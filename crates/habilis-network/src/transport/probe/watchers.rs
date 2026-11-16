@@ -212,9 +212,8 @@ pub(crate) fn nudge_climbing_pairs(
 /// [`pair_to_climb::lost_pinned`]). A pinned peer with a route is a pair like any other: if it
 /// reads as the relay, the pass above dials it with the route.
 fn close_pinned_without_route(state: &EventLoopState) {
-    let pinned = state
-        .webrtc_admission
-        .pinned_peers()
+    let peers = state.webrtc_admission.pinned_peers();
+    let pinned = peers
         .into_iter()
         .map(|peer| (peer, route_to(state, peer).is_some()));
     for peer in pair_to_climb::lost_pinned(pinned) {

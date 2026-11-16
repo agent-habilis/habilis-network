@@ -198,8 +198,8 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         for hops in 1..=MAX_ROUTE_HOPS {
             let seeds: Vec<u8> = (1..).take(hops).map(|seed| seed * 3).collect();
-            let route = Route::try_new(seeds.iter().map(|seed| hop(*seed)).collect())
-                .expect("a route of distinct hops is valid");
+            let hop_list: Vec<RouteHop> = seeds.iter().map(|seed| hop(*seed)).collect();
+            let route = Route::try_new(hop_list).expect("a route of distinct hops is valid");
             let last = seeds.last().expect("a route has a hop");
             let destination: EndpointId = SecretKey::from_bytes(&[*last; 32]).public();
             let address = Addr::Custom(route.encode());

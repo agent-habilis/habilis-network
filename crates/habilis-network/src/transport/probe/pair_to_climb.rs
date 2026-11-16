@@ -78,7 +78,6 @@ pub(crate) fn lost_pinned(pinned: impl IntoIterator<Item = (EndpointId, bool)>) 
 
 #[cfg(test)]
 mod tests {
-    use super::lost_pinned;
     use crate::testing;
 
     #[test]
@@ -92,12 +91,12 @@ mod tests {
         let mut expected = vec![lost, also_lost];
         expected.sort_unstable();
         assert_eq!(
-            lost_pinned([(kept, true), (lost, false), (also_lost, false)]),
+            super::lost_pinned([(kept, true), (lost, false), (also_lost, false)]),
             expected,
             "only the pinned peers with no route are lost"
         );
         assert!(
-            lost_pinned([(kept, true)]).is_empty(),
+            super::lost_pinned([(kept, true)]).is_empty(),
             "a pinned peer with a route is kept"
         );
     }

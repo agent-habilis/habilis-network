@@ -93,10 +93,10 @@ pub fn unpin(local: EndpointId, remote: EndpointId) {
 #[must_use]
 pub fn is_pinned(local: EndpointId, remote: EndpointId) -> bool {
     let table = PINS.lock().expect("pin table");
-    table
-        .as_ref()
-        .and_then(|table| table.get(&local))
-        .is_some_and(|pins| pins.contains(&remote))
+    let Some(pins) = table.as_ref().and_then(|table| table.get(&local)) else {
+        return false;
+    };
+    pins.contains(&remote)
 }
 
 /// The endpoint at the end of a multihop address, or `None` for any other address.
@@ -211,7 +211,11 @@ pub fn climb_pinned<'a>(
 /// assert!(pin_allows(false, Rung::Ip), "an unpinned connection keeps IP");
 /// ```
 #[must_use]
-pub fn pin_allows(pinned: bool, rung: Rung) -> bool {
+pub fn pin_allows(
+    // Whether the connection is pinned to multihop.
+    pinned: bool,
+    rung: Rung,
+) -> bool {
     !pinned || rung == Rung::Multihop
 }
 

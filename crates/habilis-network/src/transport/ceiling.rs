@@ -300,9 +300,12 @@ impl Ceiling {
 
     /// The pinned peers that hold their connection now, in no order.
     pub(crate) fn pinned_connected(&self) -> Vec<EndpointId> {
-        self.entries
+        let extra = self
+            .entries
             .iter()
-            .filter(|(peer, entry)| entry.quic == Quic::Extra && self.pinned.contains(*peer))
+            .filter(|(_, entry)| entry.quic == Quic::Extra);
+        extra
+            .filter(|(peer, _)| self.pinned.contains(*peer))
             .map(|(peer, _)| *peer)
             .collect()
     }

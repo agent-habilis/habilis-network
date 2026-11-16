@@ -483,7 +483,7 @@ impl SignalAdmission {
         }
         inner.slot(peer).conns.push(handle);
         inner.sync_gossip();
-        let evictions = if connection.alpn() != transport::UNICAST_ALPN {
+        let evictions: ceiling::Admission = if connection.alpn() != transport::UNICAST_ALPN {
             ceiling::Admission::default()
         } else if connection.side().is_client() {
             inner.ceiling.register_quic(peer, Instant::now())

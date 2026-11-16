@@ -22,7 +22,6 @@
 
 mod until_known;
 
-use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
@@ -43,6 +42,8 @@ const STEP_DEADLINE: Duration = Duration::from_mins(3);
 const STUCK_TARGET: &str = "habilis_network_iroh_multihop_transport::underlay";
 const STUCK_TEXT: &str =
     "multihop underlay stays on the relay: this hop is not advertised as a link";
+/// How long the snapshot may take to show the path of a peer after its first frame.
+const LABEL_DEADLINE: Duration = Duration::from_secs(30);
 /// The line that an eviction at the ceiling logs, on the transport target.
 const EVICTION_LINE: &str = "evicting a direct connection at the ceiling";
 /// The WARN of a forwarder that gets a cell over the relay: a cut pair still has its relay path.
@@ -226,13 +227,13 @@ async fn cut_between(first: &Member, second: &Member, first_nick: &str, second_n
 
 /// What the members counted, for the message of a failure.
 async fn counters_of(members: &[(&str, &Member)]) -> String {
-    let mut text = String::new();
+    let mut parts: Vec<String> = Vec::new();
     for (nick, member) in members {
         let units = member.direct_units().await;
         let counters = member.counters().await;
-        let _ = write!(text, "{nick} units {units:?} {counters:?}; ");
+        parts.push(format!("{nick} units {units:?} {counters:?}"));
     }
-    text
+    parts.join("; ")
 }
 
 /// Send `text` from `from` to `to` each second until `to` reads it, or the deadline ends.
@@ -248,6 +249,64 @@ async fn delivered(from: &Member, to: &mut Member, to_nick: &str, text: &str) ->
         }
         time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+/// The nicknames of the gossip neighbors in the snapshot, sorted.
+fn neighbor_nicks(snapshot: &TopologySnapshot) -> Vec<&str> {
+    let neighbors = snapshot.peers.iter().filter(|link| link.neighbor);
+    let mut nicks: Vec<&str> = neighbors
+        .filter_map(|link| link.nickname.as_deref())
+        .collect();
+    nicks.sort_unstable();
+    nicks
+}
+
+/// Whether the snapshot lists `nick` on the multihop path.
+fn is_on_multihop(snapshot: &TopologySnapshot, nick: &str) -> bool {
+    let found = snapshot
+        .peers
+        .iter()
+        .find(|link| link.nickname.as_deref() == Some(nick));
+    found.is_some_and(|link| link.path == PathLabel::Multihop)
+}
+
+/// The snapshot of alice: dave is on the multihop path, pinned, with bob as the first hop, and the
+/// pinned connection counts toward twice the cap and toward no direct unit.
+fn assert_dave_is_pinned_through_bob(snapshot: &TopologySnapshot) {
+    let link_of = |nick: &str| {
+        let found = snapshot
+            .peers
+            .iter()
+            .find(|link| link.nickname.as_deref() == Some(nick));
+        found.unwrap_or_else(|| panic!("the snapshot of alice has no peer {nick}: {snapshot:?}"))
+    };
+    let (dave_link, bob_link) = (link_of("dave"), link_of("bob"));
+    assert_eq!(
+        dave_link.path,
+        PathLabel::Multihop,
+        "dave is on the multihop path: {snapshot:?}"
+    );
+    assert!(dave_link.pinned, "dave is pinned: {snapshot:?}");
+    assert_eq!(
+        dave_link.via.as_deref(),
+        Some(bob_link.endpoint.as_str()),
+        "the first hop to dave is bob: {snapshot:?}"
+    );
+    assert!(!dave_link.neighbor, "dave is no gossip neighbor of alice");
+    assert_eq!(
+        (
+            snapshot.max_connections,
+            snapshot.direct_units,
+            snapshot.over_ceiling
+        ),
+        (2, 2, 0),
+        "alice is at its cap and not over it: {snapshot:?}"
+    );
+    assert_eq!(
+        (snapshot.quic_connections, snapshot.quic_cap),
+        (3, 4),
+        "the pinned connection counts toward 2N: {snapshot:?}"
+    );
 }
 
 #[test]
@@ -275,13 +334,17 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
         // Alice holds a full ceiling: bob and carol, both neighbors, for 2 units.
         let started = Instant::now();
         loop {
-            let (units, over) = alice.direct_units().await;
-            if units == 2 && over == 0 {
+            let snapshot = alice.snapshot().await;
+            let neighbors = neighbor_nicks(&snapshot);
+            if snapshot.direct_units == 2
+                && snapshot.over_ceiling == 0
+                && neighbors == ["bob", "carol"]
+            {
                 break;
             }
             assert!(
                 started.elapsed() < STEP_DEADLINE,
-                "alice never settled at 2 units: {}",
+                "alice never settled with bob and carol as her 2 neighbors ({neighbors:?}): {}",
                 counters_of(&[("alice", &alice), ("bob", &bob), ("dave", &dave)]).await
             );
             time::sleep(Duration::from_millis(500)).await;
@@ -337,50 +400,25 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
             counters_of(&[("alice", &alice), ("bob", &bob), ("dave", &dave)]).await
         );
 
-        let snapshot = alice.snapshot().await;
-        let link_of = |nick: &str| {
-            snapshot
-                .peers
-                .iter()
-                .find(|link| link.nickname.as_deref() == Some(nick))
-                .unwrap_or_else(|| panic!("the snapshot of alice has no peer {nick}: {snapshot:?}"))
-        };
-        let (dave_link, bob_link) = (link_of("dave"), link_of("bob"));
-        assert_eq!(
-            dave_link.path,
-            PathLabel::Multihop,
-            "dave is on the multihop path: {snapshot:?}"
-        );
-        assert!(dave_link.pinned, "dave is pinned: {snapshot:?}");
-        assert_eq!(
-            dave_link.via.as_deref(),
-            Some(bob_link.endpoint.as_str()),
-            "the first hop to dave is bob: {snapshot:?}"
-        );
-        assert!(!dave_link.neighbor, "dave is no gossip neighbor of alice");
-        assert_eq!(
-            (
-                snapshot.max_connections,
-                snapshot.direct_units,
-                snapshot.over_ceiling
-            ),
-            (2, 2, 0),
-            "alice is at its cap and not over it: {snapshot:?}"
-        );
-        assert_eq!(
-            (snapshot.quic_connections, snapshot.quic_cap),
-            (3, 4),
-            "the pinned connection counts toward 2N: {snapshot:?}"
-        );
+        // The path of a peer reaches the snapshot when its path watcher reports it, a moment after
+        // the first frame arrives.
+        let label_since = Instant::now();
+        let mut snapshot = alice.snapshot().await;
+        while !is_on_multihop(&snapshot, "dave") && label_since.elapsed() < LABEL_DEADLINE {
+            time::sleep(Duration::from_millis(500)).await;
+            snapshot = alice.snapshot().await;
+        }
+        assert_dave_is_pinned_through_bob(&snapshot);
 
         let logs = habilis_network_test_tracing::captured_logs();
+        let evictions: Vec<&str> = logs
+            .lines()
+            .filter(|line| line.contains(EVICTION_LINE))
+            .collect();
         assert!(
-            !logs.contains(EVICTION_LINE),
+            evictions.is_empty(),
             "a node evicted a direct connection at its ceiling: {}",
-            logs.lines()
-                .filter(|line| line.contains(EVICTION_LINE))
-                .collect::<Vec<_>>()
-                .join("\n")
+            evictions.join("\n")
         );
 
         for member in [alice, bob, carol, dave] {

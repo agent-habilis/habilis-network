@@ -442,9 +442,10 @@ impl MultihopHandle {
     /// # Panics
     /// If the routing-table lock is poisoned by a panic in another thread.
     #[must_use]
-    pub fn route_hops(&self, dst: AppId) -> Option<Vec<AppId>> {
+    pub fn route_hops(&self, dst: AppId) -> Option<impl Iterator<Item = AppId> + use<>> {
         let chosen = self.inner.chooser.choose(dst)?;
-        Some(chosen.route.hops().iter().map(|hop| hop.app_id).collect())
+        let hops: Vec<AppId> = chosen.route.hops().iter().map(|hop| hop.app_id).collect();
+        Some(hops.into_iter())
     }
 
     /// Mark the hop `hop` (an application id) as refused by the gate now, without
@@ -1301,19 +1302,16 @@ mod tests {
                     links,
                 ));
             }
+            let to_bob: Vec<AppId> = handle.route_hops(app(bob)).expect("a route").collect();
             assert_eq!(
-                handle.route_hops(app(bob)),
-                Some(vec![app(carol), app(bob)]),
+                to_bob,
+                vec![app(carol), app(bob)],
                 "the route to bob goes through carol"
             );
-            assert_eq!(
-                handle.route_hops(app(carol)),
-                Some(vec![app(carol)]),
-                "a neighbor is one hop"
-            );
-            assert_eq!(
-                handle.route_hops(app(stranger)),
-                None,
+            let to_carol: Vec<AppId> = handle.route_hops(app(carol)).expect("a route").collect();
+            assert_eq!(to_carol, vec![app(carol)], "a neighbor is one hop");
+            assert!(
+                handle.route_hops(app(stranger)).is_none(),
                 "a node that no vector names has no route"
             );
         });
