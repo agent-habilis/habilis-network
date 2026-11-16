@@ -16,6 +16,8 @@ pub(crate) struct Victims {
     pub(crate) conns: Vec<Connection>,
     // trait object: the sessions are shared with the table that hands them out
     pub(crate) sessions: Vec<(EndpointId, Arc<dyn Sessions>)>,
+    /// What made the ceiling evict: a connection, a session or a gossip neighbor took the unit.
+    pub(crate) cause: &'static str,
 }
 
 impl fmt::Debug for Victims {
@@ -30,6 +32,7 @@ impl Victims {
             tracing::info!(
                 target: transport::LOG_TARGET,
                 peer = %victim.remote_id().fmt_short(),
+                cause = self.cause,
                 "evicting a direct connection at the ceiling"
             );
             victim.close(webrtc::close_code::EVICTED.into(), b"evicted at capacity");
@@ -38,6 +41,7 @@ impl Victims {
             tracing::info!(
                 target: transport::LOG_TARGET,
                 peer = %peer.fmt_short(),
+                cause = self.cause,
                 "evicting a session at the ceiling"
             );
             let _ = hub.detach(&peer);

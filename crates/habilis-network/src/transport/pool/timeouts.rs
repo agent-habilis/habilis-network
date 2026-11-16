@@ -16,6 +16,10 @@ pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
 /// the cooldown bounds that to one stall per window per peer.
 pub(super) const DIAL_FAILURE_COOLDOWN: Duration = Duration::from_secs(10);
 
+/// The error of a probe that the ceiling refuses: the node is at its ceiling of direct connections,
+/// and a probe that no send waits on evicts nobody.
+pub(crate) const AT_CEILING: &str = "unicast dial skipped: the node is at its ceiling";
+
 /// The error of a cold send to a peer on the dial-failure cooldown.
 pub(crate) const COOLDOWN_REFUSED: &str = "unicast dial on cooldown after a recent failure";
 

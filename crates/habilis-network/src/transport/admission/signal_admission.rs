@@ -407,7 +407,7 @@ impl SignalAdmission {
         let mut inner = self.lock();
         inner.refused.forget(&peer);
         let evictions = inner.ceiling.register_session(peer, Instant::now());
-        let victims = inner.take_victims(&evictions);
+        let victims = inner.take_victims(&evictions, "a session");
         drop(inner);
         victims.end();
     }
@@ -490,7 +490,7 @@ impl SignalAdmission {
         } else {
             inner.ceiling.register_inbound(peer, Instant::now())
         };
-        let victims = inner.take_victims(&evictions);
+        let victims = inner.take_victims(&evictions, "a connection");
         if !inner.sampler_running {
             inner.sampler_running = true;
             sampler::spawn_sampler(Arc::downgrade(&self.inner), tuning::SLOT_SWEEP);
@@ -520,6 +520,18 @@ impl SignalAdmission {
         let plan = inner.ceiling.plan_dial(peer, route);
         inner.sync_pin(peer);
         plan
+    }
+
+    /// Whether a dial that no send asked for may take a unit for `peer` now (see
+    /// [`ceiling::Ceiling::has_room`]). It reserves nothing.
+    pub(crate) fn has_room(&self, peer: EndpointId) -> bool {
+        self.lock().ceiling.has_room(peer)
+    }
+
+    /// Reserve a unit for a dial that no send asked for, or refuse it when the ceiling is full (see
+    /// [`ceiling::Ceiling::reserve_proactive`]).
+    pub(crate) fn reserve_proactive(&self, peer: EndpointId) -> bool {
+        self.lock().ceiling.reserve_proactive(peer)
     }
 
     /// The dial of `peer` that [`Self::plan_dial`] planned ended without a connection.
@@ -610,7 +622,7 @@ impl SignalAdmission {
     pub(crate) fn set_neighbors(&self, neighbors: &HashSet<EndpointId>) {
         let mut inner = self.lock();
         let evictions = inner.ceiling.set_neighbors(neighbors, Instant::now());
-        let victims = inner.take_victims(&evictions);
+        let victims = inner.take_victims(&evictions, "a gossip neighbor");
         drop(inner);
         victims.end();
     }

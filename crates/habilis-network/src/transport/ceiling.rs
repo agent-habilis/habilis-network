@@ -273,6 +273,27 @@ impl Ceiling {
         DialPlan::Direct
     }
 
+    /// Whether a dial that no send asked for (a probe, a courtesy reply) may take a unit now: the
+    /// peer holds a unit already, or a unit is free. A node at its ceiling dials nobody for itself:
+    /// a send reaches the peer through multihop when it needs to, and no connection is evicted for
+    /// a dial that nobody waits on.
+    pub(crate) fn has_room(&self, peer: EndpointId) -> bool {
+        self.holds(peer) || !self.evicts || self.units() + self.reserved.len() < self.cap
+    }
+
+    /// [`Self::has_room`], and a free unit is reserved for the dial, under the same lock, so that
+    /// parallel proactive dials cannot take the last unit together. [`Self::register_quic`] or
+    /// [`Self::release_dial`] gives the reservation back.
+    pub(crate) fn reserve_proactive(&mut self, peer: EndpointId) -> bool {
+        if !self.has_room(peer) {
+            return false;
+        }
+        if !self.holds(peer) && self.evicts {
+            self.reserved.insert(peer);
+        }
+        true
+    }
+
     /// The dial that [`Self::plan_dial`] planned ended without a connection.
     pub(crate) fn release_dial(&mut self, peer: EndpointId) {
         self.reserved.remove(&peer);
@@ -1130,6 +1151,53 @@ mod tests {
             ceiling.pinned_connected(),
             vec![pinned],
             "a pinned peer with its connection is listed, a direct unit is not"
+        );
+    }
+
+    #[test]
+    fn a_dial_that_no_send_asked_for_takes_a_free_unit_and_never_the_last_at_the_ceiling() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        ceiling.register_quic(testing::endpoint_id(1), start);
+        assert!(
+            ceiling.has_room(testing::endpoint_id(2)),
+            "one unit is free"
+        );
+        assert!(
+            ceiling.reserve_proactive(testing::endpoint_id(2)),
+            "the first proactive dial takes it"
+        );
+        assert!(
+            !ceiling.has_room(testing::endpoint_id(3)),
+            "the unit is reserved, so no room is left"
+        );
+        assert!(
+            !ceiling.reserve_proactive(testing::endpoint_id(3)),
+            "a second proactive dial finds the ceiling full and takes nothing"
+        );
+        assert_eq!(ceiling.units(), 1, "the refusal changed no unit");
+        ceiling.release_dial(testing::endpoint_id(2));
+        assert!(
+            ceiling.reserve_proactive(testing::endpoint_id(3)),
+            "a dial that failed gives its unit back"
+        );
+    }
+
+    #[test]
+    fn a_proactive_dial_to_a_peer_that_holds_a_unit_is_allowed_at_the_ceiling() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(1);
+        let neighbor = testing::endpoint_id(1);
+        ceiling.set_neighbors(&HashSet::from([neighbor]), start);
+        assert!(
+            ceiling.has_room(neighbor) && ceiling.reserve_proactive(neighbor),
+            "a peer that holds a unit costs no new unit"
+        );
+        assert!(
+            !ceiling.has_room(testing::endpoint_id(2)),
+            "another peer finds the ceiling full"
         );
     }
 }

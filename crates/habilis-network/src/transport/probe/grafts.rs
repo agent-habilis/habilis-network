@@ -64,6 +64,11 @@ pub(crate) fn ensure_direct(
         }
         return false;
     }
+    // At its ceiling the node probes nobody: a probe evicts nobody, and a verdict that it did not
+    // run is none. The alive tick asks again when a unit is free.
+    if !state.unicast_pool.has_room_for_unprompted_dial(peer) {
+        return false;
+    }
     state.direct.insert(peer, DirectState::Pending);
     let pool = state.unicast_pool.clone();
     let tx = state.direct_proven.clone();

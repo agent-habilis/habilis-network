@@ -3,8 +3,8 @@
 use super::in_flight_dial::InFlightDial;
 use super::registration::Registration;
 use super::timeouts::{
-    BUSY_AFTER_FINISH, COOLDOWN_REFUSED, DIAL_FAILURE_COOLDOWN, DIAL_TIMEOUT, PATH_SELECT_TIMEOUT,
-    PINNED_IDLE, SEND_TIMED_OUT, SEND_TIMEOUT,
+    AT_CEILING, BUSY_AFTER_FINISH, COOLDOWN_REFUSED, DIAL_FAILURE_COOLDOWN, DIAL_TIMEOUT,
+    PATH_SELECT_TIMEOUT, PINNED_IDLE, SEND_TIMED_OUT, SEND_TIMEOUT,
 };
 use super::warm_send::WarmSend;
 use crate::transport::admission::{BusyGuard, SignalAdmission};
@@ -533,6 +533,12 @@ impl UnicastPool {
             return false;
         }
         let registration = self.register_dial(eid);
+        // A waiter has a dial to wait for. A dialer takes a free unit or sends nothing: the
+        // registration drops, and the peer is reached through multihop when a send needs it.
+        if matches!(registration, Registration::Dialer(_)) && !self.reserve_unprompted_dial(eid) {
+            tracing::debug!(target: LOG_TARGET, %eid, "no courtesy dial: the node is at its ceiling");
+            return false;
+        }
         let pool = self.clone();
         task::spawn(async move {
             if let Err(error) = pool.send_registered(registration, eid, bytes).await {
@@ -773,6 +779,9 @@ impl UnicastPool {
         {
             bail!("unicast probe waits: the peer evicted our connection lately");
         }
+        if !self.reserve_unprompted_dial(eid) {
+            bail!("{AT_CEILING}");
+        }
         self.dial_pooled(eid, Hold::Probing).await
     }
 
@@ -899,6 +908,26 @@ impl UnicastPool {
                 Err(error)
             }
         }
+    }
+
+    /// Whether a dial that no send asked for (a probe, a courtesy reply) may take a unit for `eid`
+    /// now. Without a table it always may. It reserves nothing: a caller that dials takes the
+    /// unit with [`Self::reserve_unprompted_dial`].
+    pub(crate) fn has_room_for_unprompted_dial(&self, eid: EndpointId) -> bool {
+        self.inner
+            .admission
+            .get()
+            .is_none_or(|admission| admission.has_room(eid))
+    }
+
+    /// Take a unit for a dial that no send asked for, or refuse it when the node is at its
+    /// ceiling: such a dial evicts nobody. The dial gives the unit back when it ends with no
+    /// connection (see [`Self::release_plan`]).
+    fn reserve_unprompted_dial(&self, eid: EndpointId) -> bool {
+        self.inner
+            .admission
+            .get()
+            .is_none_or(|admission| admission.reserve_proactive(eid))
     }
 
     /// The dial that [`Self::plan_dial`] planned ends without a new connection: the unit that it

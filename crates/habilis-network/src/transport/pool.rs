@@ -223,6 +223,55 @@ mod tests {
         });
     }
 
+    /// A dial that no send asked for takes a free unit and never the last one at the ceiling: a
+    /// probe is refused, a courtesy dial sends nothing, and neither evicts a peer. With a free unit
+    /// both dial.
+    #[test]
+    fn a_probe_and_a_courtesy_dial_at_the_ceiling_dial_nobody() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(300)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            assert!(
+                !pool.has_room_for_unprompted_dial(server),
+                "a ceiling of 1 with 1 unit has no room"
+            );
+
+            let probe = pool.probe_connection(server).await;
+            assert!(
+                probe.is_err_and(|error| error.to_string().contains("at its ceiling")),
+                "a probe at the ceiling is refused"
+            );
+            assert!(
+                !pool
+                    .dial_and_send_in_background(server, bytes::Bytes::from_static(b"hello"))
+                    .await,
+                "a courtesy dial at the ceiling sends nothing"
+            );
+            assert_eq!(pool.dial_attempts(), 0, "no dial went out");
+            assert!(
+                pool.inner.conns.lock().await.is_empty(),
+                "no connection was pooled"
+            );
+
+            let roomy = SignalAdmission::new(2);
+            roomy.note_success(testing::endpoint_id(7));
+            let (roomy_pool, roomy_server, router_two, client_two) =
+                pool_with_idle(Duration::from_secs(300)).await;
+            roomy_pool.set_admission(roomy);
+            assert!(
+                roomy_pool.probe_connection(roomy_server).await.is_ok(),
+                "a probe with a free unit dials"
+            );
+            router.shutdown().await.expect("shutdown");
+            router_two.shutdown().await.expect("shutdown");
+            client.close().await;
+            client_two.close().await;
+        });
+    }
+
     /// The route of a pinned connection is gone: the connection closes, and a direct connection
     /// of the same pool is left alone.
     #[test]

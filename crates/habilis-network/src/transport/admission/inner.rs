@@ -124,9 +124,17 @@ impl Inner {
     }
 
     /// The connections and the sessions of the peers that `evictions` names, and the end of
-    /// their units in the ledger: the caller ends them once it has dropped the lock.
-    pub(crate) fn take_victims(&mut self, evictions: &ceiling::Admission) -> Victims {
-        let mut victims = Victims::default();
+    /// their units in the ledger: the caller ends them once it has dropped the lock. `cause` says
+    /// what made the ceiling evict, for the log line of the eviction.
+    pub(crate) fn take_victims(
+        &mut self,
+        evictions: &ceiling::Admission,
+        cause: &'static str,
+    ) -> Victims {
+        let mut victims = Victims {
+            cause,
+            ..Victims::default()
+        };
         for peer in &evictions.evict {
             self.ceiling.unregister_quic(*peer);
             self.sync_pin(*peer);
