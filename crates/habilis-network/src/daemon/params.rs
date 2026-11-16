@@ -16,7 +16,7 @@ mod topic_params;
 
 use super::setup_error::SetupError;
 
-use crate::protocol::meshes::{LookupOpts, Mesh, MeshConfig, TransportPolicy};
+use crate::protocol::meshes::{LookupOpts, Mesh, MeshConfig};
 
 use crate::protocol::meshes::RelayChoice;
 use crate::util::tuning;
@@ -97,10 +97,8 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh, SetupError> {
 /// assert!(derive_topic_mesh_with("chat", LookupOpts::loopback()).is_ok());
 /// ```
 pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh, SetupError> {
-    derive_topic_mesh_config(
-        string,
-        MeshConfig::new(lookups, None, None, TransportPolicy::default()),
-    )
+    let transport = MeshConfig::default_transport(&lookups);
+    derive_topic_mesh_config(string, MeshConfig::new(lookups, None, None, transport))
 }
 
 /// [`derive_topic_mesh_with`] for a caller with a whole [`MeshConfig`] to bake
@@ -138,10 +136,9 @@ pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh
 #[cfg(test)]
 mod topic_derivation_tests {
     use super::{
-        LookupOpts, MeshConfig, TransportPolicy, derive_topic_mesh, derive_topic_mesh_config,
-        derive_topic_mesh_with,
+        LookupOpts, MeshConfig, derive_topic_mesh, derive_topic_mesh_config, derive_topic_mesh_with,
     };
-    use crate::protocol::meshes::Transport;
+    use crate::protocol::meshes::{Transport, TransportPolicy};
 
     /// The no-argument form must stay exactly what it always was, because the
     /// `--topic` id it derives is public API for every frontend that calls it.
@@ -218,18 +215,18 @@ mod topic_derivation_tests {
     #[test]
     fn relay_transport_changes_the_id() {
         let _guard = ::habilis_network_test_tracing::init();
-        let lookup_only =
-            derive_topic_mesh_with("standup", LookupOpts::public_preset()).expect("derive");
-        let relayed = derive_topic_mesh_config(
+        let lookup_only = derive_topic_mesh_config(
             "standup",
             MeshConfig::new(
                 LookupOpts::public_preset(),
                 None,
                 None,
-                TransportPolicy::default().relay_transport(true),
+                TransportPolicy::default().relay_transport(false),
             ),
         )
         .expect("derive");
+        let relayed =
+            derive_topic_mesh_with("standup", LookupOpts::public_preset()).expect("derive");
         assert_ne!(
             lookup_only.to_string(),
             relayed.to_string(),

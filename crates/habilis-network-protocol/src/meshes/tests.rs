@@ -469,14 +469,14 @@ fn golden_passwordless_id_and_topic_are_pinned() {
         .expect("the fixture seed, name and public config form a valid mesh");
     assert_eq!(
         mesh.to_string(),
-        "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqazmpTSgH",
+        "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqayqqpWMQ",
         "the passwordless id is pinned to its golden text"
     );
     let topic =
         crypto::derive_topic_id(Keying::Wire(mesh.seed()), mesh.name(), &mesh.config_bytes());
     assert_eq!(
         format!("{topic:?}"),
-        "TopicId(1898d0078596295e6f69e42e9284e139d69921f2db46026b16611a924e65bd1d)",
+        "TopicId(80cc95a80ba84b32614759445c1d5c15d3c8885db2f81ce21453399414c70658)",
         "the passwordless topic is pinned to its golden text"
     );
 }
@@ -492,12 +492,12 @@ fn golden_passworded_mesh_id_topic_and_rendezvous_are_pinned() {
     mesh.set_password(Password::new("hunter2".to_owned()));
     assert_eq!(
         mesh.to_string(),
-        "Xts3MujFJ6LPpDwNyubQmyofWgxZkrhDTx3ohPc8iYvUxpTMyBg1yWJBJ39x2RSLzPzUV1nGDdx7YL5nX41SP",
+        "Xts3MujFJ6LPpDwNyubQmyofWgxZkrhDTx3ohPc8iYvUxpTMyBg1yWJ986wbKXUwQjZfV8Qk9EQcrdUsPTD8k",
         "the passworded mesh id is pinned to its golden text"
     );
     assert_eq!(
         format!("{:?}", mesh.topic_id()),
-        "TopicId(47afc8fd71963d7bcbc78dac9588dbb142b4ae79013489ff3d0f09361479a322)",
+        "TopicId(e9d7266e95ed12b667a35cc6587f2fd3752cd7f5bb4769ed058f932d4a935a59)",
         "the passworded topic is pinned to its golden text"
     );
     assert_eq!(
@@ -677,8 +677,8 @@ fn a_mesh_id_carries_the_transport_policy_for_every_list() {
         }
         seen.push((config.transport, id));
     }
-    // An empty list is the default, `udp,webrtc,multihop,gossip`. A list names what it carries:
-    // the same list without `gossip` is not the default.
+    // An empty list is the default, `udp,webrtc,multihop,relay`. A list names what it carries:
+    // the same list without `relay` is not the default.
     let policy = |list: &[Transport]| {
         MeshConfig::resolve(&[Lookup::Relay], None, list)
             .expect("the lookup and transport list in this test resolve to a valid config")
@@ -686,13 +686,13 @@ fn a_mesh_id_carries_the_transport_policy_for_every_list() {
     };
     assert_eq!(
         policy(&[]),
-        policy(&[Udp, WebRtc, Multihop, Gossip]),
-        "an empty transport list gives the default policy and the full list gives every path"
+        policy(&[Udp, WebRtc, Multihop, Relay]),
+        "an empty transport list gives the default policy"
     );
     assert_ne!(
         policy(&[]),
         policy(&[Udp, WebRtc, Multihop]),
-        "the full transport policy differs from the multihop-only one"
+        "the default transport policy differs from the one without the relay"
     );
 }
 

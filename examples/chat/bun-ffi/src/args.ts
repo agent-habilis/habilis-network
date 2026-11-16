@@ -21,8 +21,8 @@ export const USAGE = `usage: bun src/main.ts <how to reach the mesh> [options]
 
   options:
     --nick <string>       nickname (default: random word-word)
-    --transport <list>    what payload may ride: udp,webrtc,multihop,gossip (default),
-                          webrtc, or any with relay
+    --transport <list>    what payload may ride: udp,webrtc,multihop,relay (default),
+                          webrtc, or any with gossip
                           (part of the mesh id, so every member must pass the
                           same list; relay needs relay in --lookup)
     --relay-url <url>     custom relay ladder, repeatable (which relay, nothing

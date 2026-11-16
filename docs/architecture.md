@@ -660,20 +660,22 @@ Two custom transports extend the reach of the base.
 
 Transport *policy* is part of the mesh id, beside the lookups.
 `MeshConfig::transport` says what the relay may carry.
-By default the relay is lookup only: it carries the bootstrap dial, JSEP signalling, and the NAT-traversal frames of a new connection, and no payload.
+By default the relay also carries payload, as the last path (`relay` is in the default `transport` list, and a mesh with no relay lookup leaves it out).
+Without `relay` in the list, the relay is lookup only: it carries the bootstrap dial, JSEP signalling, and the NAT-traversal frames of a new connection, and no payload.
+The rest of this paragraph describes that lookup-only mode.
 A payload lane (gossip graft, unicast, blob) sends to a peer only after iroh selected a non-relay path to it, or a WebRTC session is attached.
 A gossip graft waits for that proof (`transport::probe`), so a pair never dials a link through the relay.
 The accept side holds too: every inbound gossip, unicast and blob connection is held, unread, until iroh selects a direct path on it, and closed with a coded reason if none arrives in `PROBE_DEADLINE` (`transport::payload_path::refuse_unless_direct`).
 The rendezvous link is gated the same way on the beacon, so no gossip frame ever crosses the relay.
 The gate checks the path once, so every gossip connection is watched afterwards, the ones this node accepted and the ones iroh-gossip dials for it (the endpoint hook starts that watch): one whose selected path stays on the relay for `PROBE_DEADLINE`, the wait of the accept gate, is closed with the same coded reason.
 A pair that cannot hole-punch and has no WebRTC session stays unlinked for payload.
-`transport.relay_transport = true` lets payload fall back to the relay, as before the policy existed.
+`transport.relay_transport = true`, the default, lets payload fall back to the relay.
 The policy is in the id so that every member enforces the same rule; one relaying member would undo the saving for everyone it links.
 An id of version 1, minted before the policy had its own byte, is refused with a request to upgrade: the mesh is created again.
 
 Every create surface names three mesh-wide choices apart, because they are three concepts.
 `lookup` (`--lookup mdns,dht,relay` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
-`transport` (`--transport udp,webrtc,multihop,gossip,relay`, `transport: ['udp', 'webrtc', 'multihop', 'gossip', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, `multihop` and `gossip` need one of the two next to them, and `udp,webrtc,multihop,gossip` is the default.
+`transport` (`--transport udp,webrtc,multihop,gossip,relay`, `transport: ['udp', 'webrtc', 'multihop', 'gossip', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, `multihop` and `gossip` need one of the two next to them, and `udp,webrtc,multihop,relay` is the default (gossip is off, and `relay` is dropped from the default when there is no relay lookup).
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
 `habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
 The two rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, and so does letting the relay carry payload.
@@ -778,7 +780,7 @@ The first consumer that presents the id and the secret gets the stream.
 A wrong secret reads the same as an unknown id, so the refusal tells an attacker nothing.
 
 The relay policy comes from the hash.
-With the default lookup-only policy, the producer refuses a consumer whose only path is the relay.
+With a policy that has no `relay` transport, the producer refuses a consumer whose only path is the relay.
 When one end has no IP path, the consumer negotiates the WebRTC lane over the relay before it connects, because iroh does not move a live connection onto a transport added later.
 QUIC flow control paces the producer to the consumer.
 
@@ -876,8 +878,9 @@ Measured with the `habilis-network-stream` binary on one machine (2026-09-27), 1
 
 Capacity ceilings:
 
-- The HyParView active view holds 64 links, raised from the iroh-gossip default of 5.
-  A mesh of 65 members or fewer forms a full mesh with zero membership churn.
+- `max_connections` (default 32) is the one cap on the direct connections of a node: gossip neighbors, WebRTC sessions and unicast connections together.
+  It is also the size of the HyParView active view, raised from the iroh-gossip default of 5.
+  A mesh of 33 members or fewer forms a full mesh with zero membership churn.
 - Each live link costs about 0.5 MB of resident memory, and broadcast amplification grows with the square of the mesh size.
 
 What the engine is not:

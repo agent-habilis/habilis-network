@@ -416,6 +416,15 @@ impl MeshConfig {
         }
     }
 
+    /// The transport policy of a mesh that names none: [`TransportPolicy::default`], with the
+    /// relay left out when `lookups` has no relay lookup, because then there is no relay to
+    /// carry payload and the policy would not validate.
+    #[must_use]
+    pub fn default_transport(lookups: &LookupOpts) -> TransportPolicy {
+        let relay = lookups.relay_lookup != RelayChoice::Disabled;
+        TransportPolicy::default().relay_transport(relay)
+    }
+
     /// Default loopback-only config: no lookups. Test-only since the
     /// directory now builds its config from explicit lookups and `create`
     /// constructs `MeshConfig` directly.
@@ -426,7 +435,7 @@ impl MeshConfig {
             lookups: LookupOpts::loopback(),
             password: None,
             issuer_pubkey: None,
-            transport: TransportPolicy::default(),
+            transport: Self::default_transport(&LookupOpts::loopback()),
         }
     }
 
@@ -500,11 +509,17 @@ impl MeshConfig {
         relay_urls: Option<RelayLadder>,
         transports: &[Transport],
     ) -> Result<Self, ConfigError> {
+        let lookups = resolve_lookups(LookupSet::choose(lookups, relay_urls)?);
+        let transport = if transports.is_empty() {
+            Self::default_transport(&lookups)
+        } else {
+            TransportPolicy::try_from(transports)?
+        };
         let config = MeshConfig {
-            lookups: resolve_lookups(LookupSet::choose(lookups, relay_urls)?),
+            lookups,
             password: None,
             issuer_pubkey: None,
-            transport: TransportPolicy::try_from(transports)?,
+            transport,
         };
         config.validate()?;
         Ok(config)
@@ -1305,12 +1320,12 @@ mod lookup_tests {
         // byte only exists for a password or an invite.
         assert_eq!(
             MeshConfig::loopback().to_bytes(),
-            vec![0b0000, 0b1_0111],
+            vec![0b0000, 0b0111],
             "a loopback config without a password encodes no feature byte"
         );
         assert_eq!(
             MeshConfig::public_preset().to_bytes(),
-            vec![0b0111, 0b1_0111],
+            vec![0b0111, 0b1111],
             "a public preset without a password encodes no feature byte"
         );
     }
@@ -1334,7 +1349,9 @@ mod lookup_tests {
     fn config_round_trips_relay_as_transport() {
         let _guard = ::habilis_network_test_tracing::init();
         let config = MeshConfig {
-            transport: TransportPolicy::default().relay_transport(true),
+            transport: TransportPolicy::default()
+                .relay_transport(true)
+                .gossip(true),
             ..MeshConfig::public_preset()
         };
         let bytes = config.to_bytes();
@@ -1354,61 +1371,65 @@ mod lookup_tests {
         assert_ne!(
             bytes,
             MeshConfig::public_preset().to_bytes(),
-            "letting the relay carry payload derives a different topic"
+            "turning gossip on besides the relay derives a different topic"
         );
     }
 
     #[test]
-    fn relay_is_lookup_only_by_default() {
+    fn relay_carries_payload_by_default_and_stays_lookup_only_when_the_bit_is_clear() {
         let _guard = ::habilis_network_test_tracing::init();
         assert!(
-            !MeshConfig::public_preset()
+            MeshConfig::public_preset()
                 .transport
                 .allows(Transport::Relay),
-            "the public preset keeps the relay lookup only"
+            "the public preset lets the relay carry payload"
         );
         assert!(
             !MeshConfig::try_from(&[0b0111, 0b0111])
                 .expect("the bytes in this test are a valid encoded config")
                 .transport
                 .allows(Transport::Relay),
-            "the relay stays lookup-only when the flag is not set"
+            "the relay stays lookup-only when the bit is clear"
         );
     }
 
     #[test]
-    fn udp_webrtc_multihop_and_gossip_are_on_by_default() {
+    fn udp_webrtc_multihop_and_relay_are_on_by_default_and_gossip_is_off() {
         let _guard = ::habilis_network_test_tracing::init();
         let default = TransportPolicy::default();
         assert!(
             default.allows(Transport::Udp)
                 && default.allows(Transport::WebRtc)
                 && default.allows(Transport::Multihop)
-                && !default.allows(Transport::Relay),
-            "udp, webrtc, multihop and gossip are on by default"
+                && default.allows(Transport::Relay),
+            "udp, webrtc, multihop and relay are on by default"
         );
-        assert!(default.allows(Transport::Gossip), "gossip is on by default");
+        assert!(
+            !default.allows(Transport::Gossip),
+            "gossip is off by default"
+        );
         assert_eq!(
             MeshConfig::public_preset().to_bytes(),
-            vec![0b0111, 0b1_0111],
+            vec![0b0111, 0b1111],
             "the public preset encodes the default transport policy"
         );
-        let decoded = MeshConfig::try_from(&[0b0111, 0b1_0111])
+        let decoded = MeshConfig::try_from(&[0b0111, 0b1111])
             .expect("the bits in this test name a valid transport set")
             .transport;
         assert_eq!(
             decoded, default,
             "the default transport policy survives a round trip"
         );
-        let with_relay = MeshConfig::try_from(&[0b0111, 0b1111])
+        let with_gossip = MeshConfig::try_from(&[0b0111, 0b1_1111])
             .expect("the bits in this test name a valid transport set")
             .transport;
         assert!(
-            with_relay.allows(Transport::Udp)
-                && with_relay.allows(Transport::WebRtc)
-                && with_relay.allows(Transport::Multihop)
-                && with_relay.allows(Transport::Relay),
-            "the relayed policy keeps the default paths on"
+            with_gossip.allows(Transport::Udp)
+                && with_gossip.allows(Transport::WebRtc)
+                && with_gossip.allows(Transport::Multihop)
+                && with_gossip.allows(Transport::Relay)
+                && with_gossip.allows(Transport::Gossip),
+            "the policy with gossip keeps the default paths on"
         );
     }
 
@@ -1551,23 +1572,26 @@ mod lookup_tests {
     const MULTIHOP_ALONE: &str = "transport `multihop` cannot be the only transport: it forwards over a direct path, name `udp` or `webrtc`";
 
     /// The gossip bit is the fifth: an id that an older build made has it clear, reads as gossip
-    /// off, and keeps its bytes, so its id and its topic do not move. The default has the bit,
-    /// so a default mesh made now has another id than one made before.
+    /// off, and keeps its bytes, so its id and its topic do not move. The default has the bit
+    /// clear too, so only a mesh that names `gossip` carries it.
     #[test]
     fn the_gossip_bit_is_the_fifth_and_an_older_id_reads_as_gossip_off() {
         let _guard = ::habilis_network_test_tracing::init();
-        let default = MeshConfig::public_preset();
-        let bytes = default.to_bytes();
+        let with_gossip = MeshConfig {
+            transport: TransportPolicy::default().gossip(true),
+            ..MeshConfig::public_preset()
+        };
+        let bytes = with_gossip.to_bytes();
         assert_eq!(
             bytes,
-            vec![0b0111, 0b1_0111],
+            vec![0b0111, 0b1_1111],
             "the gossip bit encodes as the expected bytes"
         );
         assert_eq!(
             MeshConfig::try_from(&bytes[..])
                 .expect("the bytes in this test are a valid encoded config"),
-            default,
-            "an older id decodes with gossip off"
+            with_gossip,
+            "an id with the gossip bit decodes with gossip on"
         );
         let without_gossip = MeshConfig {
             transport: TransportPolicy::default().gossip(false),
@@ -1575,7 +1599,7 @@ mod lookup_tests {
         };
         assert_eq!(
             without_gossip.to_bytes(),
-            vec![0b0111, 0b0111],
+            vec![0b0111, 0b1111],
             "a config without gossip encodes the expected bytes"
         );
         assert_ne!(
@@ -1590,9 +1614,15 @@ mod lookup_tests {
             !decoded.transport.allows(Transport::Gossip),
             "an older id has gossip off after decoding"
         );
+        let older_config = MeshConfig {
+            transport: TransportPolicy::default()
+                .relay_transport(false)
+                .gossip(false),
+            ..MeshConfig::public_preset()
+        };
         assert_eq!(
-            decoded, without_gossip,
-            "the decoded config without gossip equals the original"
+            decoded, older_config,
+            "the decoded older config equals the config with neither relay nor gossip"
         );
         assert_eq!(decoded.to_bytes(), older, "an older id keeps its bytes");
     }
@@ -1795,7 +1825,7 @@ mod lookup_tests {
             lookups: LookupOpts::loopback(),
             password: Some([0xa5u8; 16]),
             issuer_pubkey: Some([0x3cu8; 32]),
-            transport: TransportPolicy::default(),
+            transport: TransportPolicy::default().relay_transport(false),
         };
         let decoded = MeshConfig::try_from(config.to_bytes().as_slice())
             .expect("the config was just encoded by to_bytes, so it decodes");
@@ -2125,11 +2155,15 @@ mod choice_tests {
 
     /// The relay's two roles are two lists, so the relay can serve lookup
     /// alone: named in `lookup` and not in `transport`, it is the rendezvous
-    /// and carries no payload. That is also what an empty `transport` means.
+    /// and carries no payload. An empty `transport` is the default, which carries payload over
+    /// the relay when there is a relay lookup, and not otherwise.
     #[test]
     fn relay_can_be_a_lookup_and_nothing_more() {
         let _guard = ::habilis_network_test_tracing::init();
-        for transports in [&[][..], &[Transport::Udp][..]] {
+        for transports in [
+            &[Transport::Udp][..],
+            &[Transport::Udp, Transport::WebRtc][..],
+        ] {
             let config = MeshConfig::resolve(&[Lookup::Relay], None, transports)
                 .expect("the lookup and transport list in this test resolve to a valid config");
             assert_eq!(
@@ -2145,6 +2179,31 @@ mod choice_tests {
                 "the relay-only config survives a round trip"
             );
         }
+    }
+
+    #[test]
+    fn an_empty_transport_list_carries_payload_over_the_relay_only_with_a_relay_lookup() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let with_relay = MeshConfig::resolve(&[Lookup::Relay], None, &[])
+            .expect("the relay lookup with the default transports resolves");
+        assert!(
+            with_relay.transport.allows(Transport::Relay),
+            "the default transports carry payload over the relay"
+        );
+        assert!(
+            !with_relay.transport.allows(Transport::Gossip),
+            "the default transports have no gossip"
+        );
+        let without_relay = MeshConfig::resolve(&[Lookup::Mdns], None, &[])
+            .expect("a lookup with no relay and the default transports resolves");
+        assert!(
+            !without_relay.transport.allows(Transport::Relay),
+            "with no relay lookup the default transports have no relay"
+        );
+        assert!(
+            without_relay.transport.allows(Transport::Multihop),
+            "the other default transports stay on"
+        );
     }
 
     #[test]
