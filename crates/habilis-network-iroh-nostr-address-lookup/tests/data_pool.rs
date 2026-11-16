@@ -178,6 +178,40 @@ async fn a_lane_with_one_relay_recovers_from_one_rate_limit() {
     warm_up(&alice, &BOB_TAG, &mut bob).await;
 }
 
+/// A relay that limited us and whose wait is over is a place to send a probe, not the lane: with
+/// another relay up, the data goes there, and the limited relay gets one copy now and then to
+/// earn its place back. It refuses everything here, so a datagram sent to it alone is lost.
+#[tokio::test]
+async fn data_goes_to_an_up_relay_while_a_limited_one_gets_only_a_probe() {
+    let relays = relays(2).await;
+    let alice = node(urls(&relays), ALICE, ALICE_TAG);
+    let mut bob = node(urls(&relays), BOB, BOB_TAG);
+    warm_up(&alice, &BOB_TAG, &mut bob).await;
+    settle(&alice, &BOB_TAG, &mut bob).await;
+    relays[0].refuse_events(Some("rate-limited: slow down"));
+    let before_limit = relays[0].events();
+    alice
+        .pool
+        .send(&BOB_TAG, b"limits the first relay".to_vec());
+    eventually("the first relay refuses and limits", || {
+        relays[0].events() > before_limit
+    })
+    .await;
+    // The first wait is 1 s.
+    time::sleep(Duration::from_millis(1_300)).await;
+    let before_probe = relays[0].events();
+    alice.pool.send(&BOB_TAG, b"after the wait".to_vec());
+    let datagram = time::timeout(Duration::from_secs(3), bob.datagrams.recv())
+        .await
+        .expect("the datagram arrives on the relay that is up")
+        .expect("the channel is open");
+    assert_eq!(datagram.bytes, b"after the wait", "the datagram");
+    eventually("the limited relay got its probe", || {
+        relays[0].events() > before_probe
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_dead_first_relay_moves_the_data_to_the_next() {
     let mut relays = relays(2).await;

@@ -67,7 +67,7 @@ pub(crate) fn over_buffer_bound(buffered: usize) -> bool {
 }
 
 /// One datagram for the queue, with what it needs to become an event.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Outgoing {
     // Shared with every datagram a pool queues: one key signs them all.
     pub(crate) keys: Arc<Keys>,

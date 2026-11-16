@@ -47,6 +47,9 @@ const SWALLOW_RECONNECT: Duration = if cfg!(test) {
 } else {
     Duration::from_mins(1)
 };
+/// A limited relay past its wait gets one probe copy of a datagram this often while another
+/// relay is up.
+const PROBE_EVERY: Duration = Duration::from_secs(5);
 const SEEN_CAPACITY: usize = 4096;
 /// How many ids of the events this pool sent it remembers, to tell an echo of
 /// its own event from a forged event that carries its public key. At the
@@ -112,6 +115,7 @@ impl Pool {
             owed_echo: HashMap::new(),
             redialed: HashMap::new(),
             sent: SentIds::default(),
+            probed: HashMap::new(),
         };
         // The pool signs with this key, and so does every datagram it queues on a socket.
         let keys = Arc::new(Keys::generate());
@@ -206,6 +210,8 @@ struct Chooser {
     redialed: HashMap<Url, Instant>,
     /// The ids of the events this pool sent lately.
     sent: SentIds,
+    /// When each limited relay was last sent a probe copy of a datagram.
+    probed: HashMap<Url, Instant>,
 }
 
 /// The ids of the last [`SENT_CAPACITY`] events a pool sent. An echo is an
@@ -332,17 +338,49 @@ impl Chooser {
         was_swallowing
     }
 
-    /// Hand a datagram to the first held relay whose socket takes it, in rank order. A data pool
-    /// listens on every relay of its list, so the receiver hears the datagram on whichever relay
-    /// the sender's view of health picks; a relay that is down or limited is passed over.
-    fn datagram(&self, outgoing: Outgoing) {
+    /// Hand a datagram to the first held relay that is `Up`, in rank order. A data pool listens on
+    /// every relay of its list, so the receiver hears it wherever it goes. A relay that is
+    /// limited and past its wait gets the datagram only when no relay is `Up`, or as one probe
+    /// copy every [`PROBE_EVERY`]: it would otherwise take all the data and may drop it.
+    fn datagram(&mut self, outgoing: Outgoing) {
         let lane = self.hub.lane();
-        if let Some((_, lease)) = self
+        let now = Instant::now();
+        let up = self
             .leases
             .iter()
-            .find(|(_, lease)| lease.health().sendable(lane))
-        {
-            lease.datagram(outgoing);
+            .position(|(_, lease)| lease.health() == Health::Up);
+        let mut due: Vec<Url> = Vec::new();
+        for (url, lease) in &self.leases {
+            let limited =
+                matches!(lease.health(), Health::Limited(_)) && lease.health().sendable(lane);
+            let quiet = self
+                .probed
+                .get(url)
+                .is_none_or(|at| now.saturating_duration_since(*at) >= PROBE_EVERY);
+            if limited && quiet {
+                due.push(url.clone());
+            }
+        }
+        if let Some(index) = up {
+            for (url, lease) in &self.leases {
+                if due.contains(url) {
+                    lease.datagram(outgoing.clone());
+                }
+            }
+            if let Some((_, lease)) = self.leases.get(index) {
+                lease.datagram(outgoing);
+            }
+        } else {
+            let first = self
+                .leases
+                .iter()
+                .find(|(_, lease)| lease.health().sendable(lane));
+            if let Some((_, lease)) = first {
+                lease.datagram(outgoing);
+            }
+        }
+        for url in due {
+            self.probed.insert(url, now);
         }
     }
 
@@ -659,6 +697,7 @@ mod tests {
             owed_echo: HashMap::new(),
             redialed: HashMap::new(),
             sent: SentIds::default(),
+            probed: HashMap::new(),
         };
         chooser.choose(&events);
         let overdue = ECHO_DEADLINE + SWALLOW_RECONNECT;
