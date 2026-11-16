@@ -66,6 +66,17 @@ impl Sub {
     }
 }
 
+impl Drop for TestRelay {
+    fn drop(&mut self) {
+        let clients = mem::take(&mut self.state().clients);
+        for client in clients.into_values() {
+            if let Some(task) = client.task {
+                task.abort();
+            }
+        }
+    }
+}
+
 impl TestRelay {
     /// # Errors
     /// The loopback listener cannot bind.
@@ -353,5 +364,42 @@ fn fan_out(state: &State, event: &Event) {
                     .send(serde_json::json!(["EVENT", sub_id, event]).to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::io::AsyncReadExt as _;
+    use tokio::net::TcpStream;
+    use tokio::time;
+
+    use super::TestRelay;
+
+    /// Dropping the relay stops every connection, not only the listener: a
+    /// client that was connected sees its socket close.
+    #[tokio::test]
+    async fn dropping_the_relay_closes_its_connections() {
+        let relay = TestRelay::spawn().await.expect("spawn test relay");
+        let address = relay.url();
+        let host = address.host_str().expect("a host");
+        let port = address.port().expect("a port");
+        let mut client = TcpStream::connect((host, port)).await.expect("connect");
+        for _ in 0..100 {
+            if relay.connections() == 1 {
+                break;
+            }
+            time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(relay.connections(), 1, "the relay took the connection");
+
+        drop(relay);
+        let mut buffer = [0u8; 16];
+        let read = time::timeout(Duration::from_secs(2), client.read(&mut buffer)).await;
+        assert!(
+            matches!(read, Ok(Ok(0))),
+            "the client sees the socket close, but got {read:?}"
+        );
     }
 }
