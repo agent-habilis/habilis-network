@@ -3,6 +3,7 @@
 //! queue that drops its oldest frames. It holds no socket and reads no clock: every call takes
 //! `now`, so a test drives it in virtual time.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,6 +90,8 @@ pub(crate) struct DataQueue {
     frame_tokens: f64,
     refilled: Instant,
     last_flush: Option<Instant>,
+    /// The serial of the next batch: two batches with the same datagrams still make two events.
+    next_serial: u32,
     dropped: u64,
 }
 
@@ -103,6 +106,7 @@ impl DataQueue {
             frame_tokens: BURST_FRAMES,
             refilled: now,
             last_flush: None,
+            next_serial: 0,
             dropped: 0,
         }
     }
@@ -128,6 +132,8 @@ impl DataQueue {
             bytes,
         } = outgoing;
         if bytes.len() > MAX_DATAGRAM {
+            self.dropped += 1;
+            tracing::debug!(target: "habilis_network::lookup", bytes = bytes.len(), "a datagram over the batch limit is dropped");
             return;
         }
         let idle = self.is_idle(now);
@@ -138,11 +144,18 @@ impl DataQueue {
         {
             self.flush(now, &tag);
         }
-        let pending = self.pending.entry(tag).or_insert_with(|| Pending {
-            keys,
-            batch: Batch::new(&from),
-            since: now,
-        });
+        let pending = match self.pending.entry(tag) {
+            Entry::Occupied(slot) => slot.into_mut(),
+            Entry::Vacant(slot) => {
+                let serial = self.next_serial;
+                self.next_serial = serial.wrapping_add(1);
+                slot.insert(Pending {
+                    keys,
+                    batch: Batch::new(&from, serial),
+                    since: now,
+                })
+            }
+        };
         pending.batch.push(&bytes);
         if idle || !pending.batch.fits(&[]) {
             self.flush(now, &tag);
@@ -294,6 +307,62 @@ mod tests {
         let event: Event = serde_json::from_value(parsed[1].clone()).expect("an event");
         event.verify().expect("one valid signature");
         batch::decode(&event.content).expect("a batch").datagrams
+    }
+
+    /// The id of the event in a frame the queue let out.
+    fn event_id(frame: &Frame) -> String {
+        let Frame::Data(text) = frame else {
+            panic!("a data frame");
+        };
+        let parsed: serde_json::Value = serde_json::from_str(text).expect("an EVENT frame");
+        let event: Event = serde_json::from_value(parsed[1].clone()).expect("an event");
+        event.id
+    }
+
+    /// Two batches with the same datagrams, signed in the same second, are two events: a relay and
+    /// a receiver dedupe by id, and would drop the second.
+    #[test]
+    fn two_equal_batches_in_one_second_get_two_event_ids() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        queue.push_datagram(start, outgoing(&keys, 1, b"same"));
+        let first = queue.pop_ready(start).expect("the first goes at once");
+        let soon = start + Duration::from_millis(1);
+        queue.push_datagram(soon, outgoing(&keys, 1, b"same"));
+        let tick = soon + FLUSH_TICK;
+        queue.flush_due(tick);
+        let second = queue.pop_ready(tick).expect("the second goes at the tick");
+        assert_ne!(
+            event_id(&first),
+            event_id(&second),
+            "two equal batches make two events"
+        );
+    }
+
+    /// The frame core of the gossip transport allows a frame of 3840 bytes, and a datagram
+    /// reaches this queue as that frame.
+    #[test]
+    fn a_datagram_the_frame_core_allows_is_carried() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        let frame_core_limit = vec![6u8; 3840];
+        queue.push_datagram(start, outgoing(&keys, 1, &frame_core_limit));
+        let frame = queue.pop_ready(start).expect("the datagram goes out");
+        assert_eq!(datagrams(&frame), vec![frame_core_limit], "carried whole");
+        assert_eq!(queue.dropped(), 0, "nothing was dropped");
+    }
+
+    /// A datagram no batch can carry is counted, not lost without a trace.
+    #[test]
+    fn a_datagram_over_the_limit_is_counted_as_dropped() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        queue.push_datagram(start, outgoing(&keys, 1, &vec![6u8; 3841]));
+        assert!(queue.pop_ready(start).is_none(), "nothing goes out");
+        assert_eq!(queue.dropped(), 1, "the datagram is counted");
     }
 
     #[test]

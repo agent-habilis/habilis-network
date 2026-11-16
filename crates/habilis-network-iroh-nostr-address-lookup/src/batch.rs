@@ -1,21 +1,29 @@
-//! The content of a data event: the sender's id, then length-prefixed datagrams, in base64.
-//! QUIC encrypts and authenticates each datagram, so the batch carries no seal of its own.
+//! The content of a data event: the sender's id, a serial, then length-prefixed datagrams, in
+//! base64. QUIC encrypts and authenticates each datagram, so the batch carries no seal of its own.
 
 use std::error::Error;
 use std::fmt;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 
-/// The most bytes one batch holds before base64: the id and every prefixed datagram. An event
+/// The most bytes one batch holds before base64: the header and every prefixed datagram. An event
 /// carries it as about `22 KiB` of text, far under the `128 KiB` a relay frame may hold.
 pub(crate) const MAX_BATCH_BYTES: usize = 16 * 1024;
 
-/// The longest datagram a batch carries. A QUIC datagram stays under the path MTU, so a longer
-/// one is not ours.
-pub(crate) const MAX_DATAGRAM: usize = 2048;
+/// The longest datagram a batch carries: the longest frame the gossip transport makes (`3840`
+/// bytes, header included), because a datagram reaches this crate as such a frame. A QUIC datagram
+/// stays under the path MTU, far under this, so a longer one is not ours. The transport crate pins
+/// the same number in a test.
+pub(crate) const MAX_DATAGRAM: usize = 3840;
 
 /// The length of an endpoint id.
 pub(crate) const ID_LEN: usize = 32;
+
+/// The length of the serial of a batch.
+const SERIAL_LEN: usize = 4;
+
+/// The length of the header of a batch: the sender id, then the serial.
+const HEADER_LEN: usize = ID_LEN + SERIAL_LEN;
 
 /// The length prefix of each datagram.
 const PREFIX_LEN: usize = 2;
@@ -47,22 +55,24 @@ impl fmt::Display for BatchError {
 
 impl Error for BatchError {}
 
-/// Datagrams for one destination, from one sender, waiting to go out in one event.
+/// Datagrams for one destination, from one sender, waiting to go out in one event. The serial
+/// makes two batches with the same datagrams two events: an event id has a time in seconds, and a
+/// relay and a receiver drop an id they have seen.
 #[derive(Debug, Clone)]
 pub(crate) struct Batch {
     bytes: Vec<u8>,
 }
 
 impl Batch {
-    pub(crate) fn new(from: &[u8; ID_LEN]) -> Self {
-        Self {
-            bytes: from.to_vec(),
-        }
+    pub(crate) fn new(from: &[u8; ID_LEN], serial: u32) -> Self {
+        let mut bytes = from.to_vec();
+        bytes.extend_from_slice(&serial.to_be_bytes());
+        Self { bytes }
     }
 
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
-        self.bytes.len() == ID_LEN
+        self.bytes.len() == HEADER_LEN
     }
 
     /// Whether `datagram` is one a batch carries, and fits next to what it holds.
@@ -108,8 +118,9 @@ pub(crate) fn decode(content: &str) -> Result<Decoded, BatchError> {
         return Err(BatchError::TooLong);
     }
     let bytes = BASE64.decode(content).map_err(|_| BatchError::NotBase64)?;
-    let split: Option<(&[u8; ID_LEN], &[u8])> = bytes.split_first_chunk();
+    let split: Option<(&[u8; HEADER_LEN], &[u8])> = bytes.split_first_chunk();
     let (header, mut rest) = split.ok_or(BatchError::Truncated)?;
+    let from: &[u8; ID_LEN] = header.first_chunk().ok_or(BatchError::Truncated)?;
     let mut datagrams = Vec::new();
     while !rest.is_empty() {
         let framed: Option<(&[u8; PREFIX_LEN], &[u8])> = rest.split_first_chunk();
@@ -125,14 +136,16 @@ pub(crate) fn decode(content: &str) -> Result<Decoded, BatchError> {
         rest = after;
     }
     Ok(Decoded {
-        from: *header,
+        from: *from,
         datagrams,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BASE64, Batch, BatchError, ID_LEN, MAX_BATCH_BYTES, MAX_DATAGRAM, decode};
+    use super::{
+        BASE64, Batch, BatchError, HEADER_LEN, ID_LEN, MAX_BATCH_BYTES, MAX_DATAGRAM, decode,
+    };
     use crate::event::{Event, Keys};
     use crate::lane::Lane;
     use crate::wire;
@@ -142,7 +155,7 @@ mod tests {
 
     #[test]
     fn datagrams_come_back_in_order_with_the_sender() {
-        let mut batch = Batch::new(&FROM);
+        let mut batch = Batch::new(&FROM, 0);
         for datagram in [&b"one"[..], b"", b"three"] {
             assert!(batch.push(datagram), "the datagram fits");
         }
@@ -156,8 +169,22 @@ mod tests {
     }
 
     #[test]
+    fn the_serial_makes_equal_batches_encode_differently() {
+        let (mut first, mut second) = (Batch::new(&FROM, 1), Batch::new(&FROM, 2));
+        for batch in [&mut first, &mut second] {
+            assert!(batch.push(b"same"), "the datagram fits");
+        }
+        assert_ne!(first.encode(), second.encode(), "two serials, two contents");
+        assert_eq!(
+            decode(&first.encode()).expect("decodes"),
+            decode(&second.encode()).expect("decodes"),
+            "the receiver reads the same sender and datagrams"
+        );
+    }
+
+    #[test]
     fn a_batch_refuses_what_does_not_fit() {
-        let mut batch = Batch::new(&FROM);
+        let mut batch = Batch::new(&FROM, 0);
         assert!(
             !batch.push(&vec![0u8; MAX_DATAGRAM + 1]),
             "a datagram over the ceiling is not carried"
@@ -173,7 +200,7 @@ mod tests {
         }
         assert_eq!(
             pushed,
-            (MAX_BATCH_BYTES - ID_LEN) / (MAX_DATAGRAM + 2),
+            (MAX_BATCH_BYTES - HEADER_LEN) / (MAX_DATAGRAM + 2),
             "the batch stops at its byte ceiling"
         );
         assert!(
@@ -186,7 +213,7 @@ mod tests {
     /// 130816 bytes the plan allows.
     #[test]
     fn the_fullest_batch_makes_an_event_under_130816_bytes() {
-        let mut batch = Batch::new(&FROM);
+        let mut batch = Batch::new(&FROM, 0);
         while batch.push(&[0xab; 1]) {}
         let keys = Keys::generate();
         let event = Event::sign(Lane::Data, &keys, 1_700_000_000, &[9u8; 32], batch.encode());
@@ -199,28 +226,28 @@ mod tests {
     fn what_is_not_a_batch_is_refused() {
         assert_eq!(decode("%%%"), Err(BatchError::NotBase64), "not base64");
         assert_eq!(
-            decode(&BASE64.encode([1u8; ID_LEN - 1])),
+            decode(&BASE64.encode([1u8; HEADER_LEN - 1])),
             Err(BatchError::Truncated),
             "the id is cut"
         );
-        let mut cut_prefix = vec![0u8; ID_LEN];
+        let mut cut_prefix = vec![0u8; HEADER_LEN];
         cut_prefix.push(0);
         assert_eq!(
             decode(&BASE64.encode(&cut_prefix)),
             Err(BatchError::Truncated),
             "a prefix is cut"
         );
-        let mut cut_datagram = vec![0u8; ID_LEN];
+        let mut cut_datagram = vec![0u8; HEADER_LEN];
         cut_datagram.extend_from_slice(&[0, 5, 1, 2]);
         assert_eq!(
             decode(&BASE64.encode(&cut_datagram)),
             Err(BatchError::Truncated),
             "a datagram is cut"
         );
-        let mut long_datagram = vec![0u8; ID_LEN];
+        let mut long_datagram = vec![0u8; HEADER_LEN];
         long_datagram
             .extend_from_slice(&u16::try_from(MAX_DATAGRAM + 1).unwrap_or(0).to_be_bytes());
-        long_datagram.resize(ID_LEN + 2 + MAX_DATAGRAM + 1, 0);
+        long_datagram.resize(HEADER_LEN + 2 + MAX_DATAGRAM + 1, 0);
         assert_eq!(
             decode(&BASE64.encode(&long_datagram)),
             Err(BatchError::DatagramTooLong),
