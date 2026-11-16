@@ -1,7 +1,8 @@
 //! What a data socket does between "a node has a datagram" and "a frame goes to the relay":
-//! batches for each destination, a flush rule, a pacer under the relay limits, and a bounded
-//! queue that drops its oldest frames. It holds no socket and reads no clock: every call takes
-//! `now`, so a test drives it in virtual time.
+//! batches for each sender and destination, one flush tick for the socket, a pacer under the relay
+//! limits, and a bounded queue that drops its oldest frames. It signs an event only when the pacer
+//! lets it out, so a batch the queue drops costs no signature. It holds no socket and reads no
+//! clock: every call takes `now`, so a test drives it in virtual time.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
@@ -15,8 +16,8 @@ use crate::event::{Event, Keys};
 use crate::lane::Lane;
 use crate::wire;
 
-/// A batch waits at most this long for more datagrams. One tick serves every destination of the
-/// socket.
+/// The one tick of a socket: the open batches wait at most this long for more datagrams, then all
+/// go together.
 pub(crate) const FLUSH_TICK: Duration = Duration::from_millis(5);
 
 /// The bytes a socket may send each second: `1 MiB`, the budget of a node. A relay limits by
@@ -32,9 +33,23 @@ pub(crate) const FRAMES_PER_SEC: f64 = 200.0;
 /// The frames the pacer lets out at once after a quiet spell.
 pub(crate) const BURST_FRAMES: f64 = 20.0;
 
-/// The frames the socket holds for the pacer. Past this the oldest go: QUIC recovers a loss, and
-/// an old datagram is the one it has already given up on.
+/// The bytes the socket holds for the pacer. Past this the oldest frames go: QUIC recovers a
+/// loss, and an old datagram is the one it has already given up on.
 pub(crate) const QUEUE_BYTES: usize = 256 * 1024;
+
+/// The frames the socket holds for the pacer, and the open batches it holds. At the frame rate of
+/// the pacer this is a third of a second: a bound in bytes alone would let small frames wait
+/// seconds.
+pub(crate) const MAX_QUEUED_FRAMES: usize = 64;
+
+/// The longest a datagram waits for the pacer in an open batch. An older batch is dropped: the
+/// writer is slow, and QUIC has sent that data again by now.
+pub(crate) const MAX_AGE: Duration = Duration::from_millis(250);
+
+/// What an EVENT frame adds to the text of its content: the id, the key, the signature, the kind,
+/// the time and the tag. The pacer charges a batch this much on top of its content before the
+/// batch is signed, so the charge is never below the frame.
+pub(crate) const FRAME_OVERHEAD: usize = 512;
 
 /// A browser socket with more than this many bytes unsent is behind: a data frame is dropped
 /// rather than added to the browser's own queue, which has no bound.
@@ -74,6 +89,15 @@ pub(crate) enum Frame {
     Data(String),
 }
 
+/// Who a batch is from and for. Two pools of one process that send to one tag do not share a
+/// batch: the header of a batch names its sender.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Destination {
+    from: [u8; ID_LEN],
+    tag: [u8; 32],
+}
+
+/// A batch that is still open: datagrams can join it.
 struct Pending {
     // Shared with the datagrams of the pool that queued them.
     keys: Arc<Keys>,
@@ -81,11 +105,36 @@ struct Pending {
     since: Instant,
 }
 
+/// Data that waits for the pacer.
+enum Queued {
+    /// A closed batch, not yet signed: it is signed when the pacer lets it out.
+    Batch {
+        // Shared with the datagrams of the pool that queued them.
+        keys: Arc<Keys>,
+        tag: [u8; 32],
+        content: String,
+    },
+    /// An event that the caller signed.
+    Signed(String),
+}
+
+impl Queued {
+    /// The bytes of budget this frame costs. For a batch that is an upper bound of its event.
+    fn cost(&self) -> usize {
+        match self {
+            Self::Batch { content, .. } => content.len() + FRAME_OVERHEAD,
+            Self::Signed(frame) => frame.len(),
+        }
+    }
+}
+
 pub(crate) struct DataQueue {
-    pending: HashMap<[u8; 32], Pending>,
+    pending: HashMap<Destination, Pending>,
+    /// When the oldest open batch began: the one tick of the socket counts from it.
+    round_start: Option<Instant>,
     control: VecDeque<String>,
-    frames: VecDeque<String>,
-    queued_bytes: usize,
+    ready: VecDeque<Queued>,
+    ready_bytes: usize,
     byte_tokens: f64,
     frame_tokens: f64,
     refilled: Instant,
@@ -93,25 +142,30 @@ pub(crate) struct DataQueue {
     /// The serial of the next batch: two batches with the same datagrams still make two events.
     next_serial: u32,
     dropped: u64,
+    #[cfg(test)]
+    signed: u64,
 }
 
 impl DataQueue {
     pub(crate) fn new(now: Instant) -> Self {
         Self {
             pending: HashMap::new(),
+            round_start: None,
             control: VecDeque::new(),
-            frames: VecDeque::new(),
-            queued_bytes: 0,
+            ready: VecDeque::new(),
+            ready_bytes: 0,
             byte_tokens: BURST_BYTES,
             frame_tokens: BURST_FRAMES,
             refilled: now,
             last_flush: None,
             next_serial: 0,
             dropped: 0,
+            #[cfg(test)]
+            signed: 0,
         }
     }
 
-    /// The frames dropped for want of room.
+    /// The frames and datagrams dropped for want of room, or for a size no batch carries.
     pub(crate) fn dropped(&self) -> u64 {
         self.dropped
     }
@@ -119,11 +173,23 @@ impl DataQueue {
     /// The bytes of data frames queued.
     #[cfg(test)]
     pub(crate) fn queued_bytes(&self) -> usize {
-        self.queued_bytes
+        self.ready_bytes
     }
 
-    /// Add a datagram to the batch of its destination. The first datagram after an idle spell
-    /// goes at once; the rest wait for the tick, or for a full batch.
+    /// The data frames queued.
+    #[cfg(test)]
+    pub(crate) fn queued_frames(&self) -> usize {
+        self.ready.len()
+    }
+
+    /// The events signed so far.
+    #[cfg(test)]
+    pub(crate) fn signed(&self) -> u64 {
+        self.signed
+    }
+
+    /// Add a datagram to the open batch of its sender and destination. The first datagram after
+    /// an idle spell goes at once; the rest wait for the tick of the socket, or for a full batch.
     pub(crate) fn push_datagram(&mut self, now: Instant, outgoing: Outgoing) {
         let Outgoing {
             keys,
@@ -137,14 +203,19 @@ impl DataQueue {
             return;
         }
         let idle = self.is_idle(now);
+        self.flush_due(now);
+        let destination = Destination { from, tag };
         if self
             .pending
-            .get(&tag)
+            .get(&destination)
             .is_some_and(|pending| !pending.batch.fits(&bytes))
         {
-            self.flush(now, &tag);
+            self.close(now, destination);
         }
-        let pending = match self.pending.entry(tag) {
+        if self.pending.is_empty() {
+            self.round_start = Some(now);
+        }
+        let pending = match self.pending.entry(destination) {
             Entry::Occupied(slot) => slot.into_mut(),
             Entry::Vacant(slot) => {
                 let serial = self.next_serial;
@@ -157,22 +228,22 @@ impl DataQueue {
             }
         };
         pending.batch.push(&bytes);
-        if idle || !pending.batch.fits(&[]) {
-            self.flush(now, &tag);
+        let full = !pending.batch.fits(&[]);
+        if idle || full {
+            self.close(now, destination);
         }
+        self.bound_open();
     }
 
-    /// Add a frame that is ready to send. It is paced and can be dropped.
+    /// Add an event that the caller signed. It is paced and can be dropped.
     pub(crate) fn push_frame(&mut self, frame: String) {
-        self.queued_bytes += frame.len();
-        self.frames.push_back(frame);
-        while self.queued_bytes > QUEUE_BYTES {
-            let Some(oldest) = self.frames.pop_front() else {
-                break;
-            };
-            self.queued_bytes -= oldest.len();
+        if weigh(frame.len()) > BURST_BYTES {
+            // No pacer budget ever covers it, so it would stay at the head of the queue.
             self.dropped += 1;
+            tracing::debug!(target: "habilis_network::lookup", bytes = frame.len(), "a data frame over the burst is dropped");
+            return;
         }
+        self.queue(Queued::Signed(frame));
     }
 
     /// Add a frame that is neither paced nor dropped.
@@ -180,49 +251,73 @@ impl DataQueue {
         self.control.push_back(frame);
     }
 
-    /// Flush the batches whose tick has come.
+    /// Drop the open batches that are too old, and close them all at the tick of the socket if
+    /// nothing waits for the pacer: a batch that is held back grows, and one frame then carries
+    /// more.
     pub(crate) fn flush_due(&mut self, now: Instant) {
-        let due: Vec<[u8; 32]> = self
+        let old: Vec<Destination> = self
             .pending
             .iter()
-            .filter(|(_, pending)| now >= pending.since + FLUSH_TICK)
-            .map(|(tag, _)| *tag)
+            .filter(|(_, pending)| now >= pending.since + MAX_AGE)
+            .map(|(destination, _)| *destination)
             .collect();
-        for tag in due {
-            self.flush(now, &tag);
+        for destination in old {
+            self.pending.remove(&destination);
+            self.dropped += 1;
+        }
+        if self.pending.is_empty() {
+            self.round_start = None;
+        }
+        let tick_due = self
+            .round_start
+            .is_some_and(|start| now >= start + FLUSH_TICK);
+        if tick_due && self.ready.is_empty() {
+            let mut open: Vec<(Instant, Destination)> = self
+                .pending
+                .iter()
+                .map(|(destination, pending)| (pending.since, *destination))
+                .collect();
+            open.sort_unstable_by_key(|(since, _)| *since);
+            for (_, destination) in open {
+                self.close(now, destination);
+            }
         }
     }
 
     /// The next frame the pacer lets out at `now`: a control frame first, then the oldest data
-    /// frame if the budgets cover it.
+    /// frame if the budgets cover it. A batch is signed here, not before.
     pub(crate) fn pop_ready(&mut self, now: Instant) -> Option<Frame> {
         self.refill(now);
         if let Some(frame) = self.control.pop_front() {
             return Some(Frame::Control(frame));
         }
-        let cost = self.frames.front()?.len();
+        let cost = self.ready.front()?.cost();
         if self.byte_tokens < weigh(cost) || self.frame_tokens < 1.0 {
             return None;
         }
-        let frame = self.frames.pop_front()?;
-        self.queued_bytes -= frame.len();
+        let queued = self.ready.pop_front()?;
+        self.ready_bytes -= cost;
         self.byte_tokens -= weigh(cost);
         self.frame_tokens -= 1.0;
-        Some(Frame::Data(frame))
+        #[cfg(test)]
+        {
+            self.signed += u64::from(matches!(queued, Queued::Batch { .. }));
+        }
+        Some(Frame::Data(sign(queued)))
     }
 
-    /// When the socket next has something to do: flush a batch, or send a frame.
+    /// When the socket next has something to do: close the open batches, or send a frame.
     pub(crate) fn next_wake(&mut self, now: Instant) -> Option<Instant> {
         self.refill(now);
-        let flush = self
-            .pending
-            .values()
-            .map(|pending| pending.since + FLUSH_TICK)
-            .min();
+        let flush: Option<Instant> = if self.ready.is_empty() {
+            self.round_start.map(|start| start + FLUSH_TICK)
+        } else {
+            None
+        };
         let send: Option<Instant> = if self.control.is_empty() {
-            self.frames
+            self.ready
                 .front()
-                .map(|frame| now + self.wait_for(frame.len()))
+                .map(|queued| now + self.wait_for(queued.cost()))
         } else {
             Some(now)
         };
@@ -241,7 +336,7 @@ impl DataQueue {
 
     fn is_idle(&self, now: Instant) -> bool {
         self.pending.is_empty()
-            && self.frames.is_empty()
+            && self.ready.is_empty()
             && self
                 .last_flush
                 .is_none_or(|at| now.saturating_duration_since(at) >= FLUSH_TICK)
@@ -254,15 +349,60 @@ impl DataQueue {
         self.frame_tokens = (self.frame_tokens + elapsed * FRAMES_PER_SEC).min(BURST_FRAMES);
     }
 
-    /// Sign the batch of `tag` into one event and queue its frame.
-    fn flush(&mut self, now: Instant, tag: &[u8; 32]) {
-        let Some(pending) = self.pending.remove(tag) else {
+    /// Close the open batch of `destination`: it waits for the pacer as one frame, unsigned.
+    fn close(&mut self, now: Instant, destination: Destination) {
+        let Some(pending) = self.pending.remove(&destination) else {
             return;
         };
-        let content = pending.batch.encode();
-        let event = Event::sign(Lane::Data, &pending.keys, crate::unix_now(), tag, content);
-        self.push_frame(wire::event(&event));
+        if self.pending.is_empty() {
+            self.round_start = None;
+        }
         self.last_flush = Some(now);
+        self.queue(Queued::Batch {
+            keys: pending.keys,
+            tag: destination.tag,
+            content: pending.batch.encode(),
+        });
+    }
+
+    /// Add to the queue for the pacer, then drop the oldest while it is over its bounds.
+    fn queue(&mut self, queued: Queued) {
+        self.ready_bytes += queued.cost();
+        self.ready.push_back(queued);
+        while self.ready_bytes > QUEUE_BYTES || self.ready.len() > MAX_QUEUED_FRAMES {
+            let Some(oldest) = self.ready.pop_front() else {
+                break;
+            };
+            self.ready_bytes -= oldest.cost();
+            self.dropped += 1;
+        }
+    }
+
+    /// Drop the oldest open batches while there are more than the bound.
+    fn bound_open(&mut self) {
+        while self.pending.len() > MAX_QUEUED_FRAMES {
+            let oldest: Option<Destination> = self
+                .pending
+                .iter()
+                .min_by_key(|(_, pending)| pending.since)
+                .map(|(destination, _)| *destination);
+            let Some(destination) = oldest else {
+                break;
+            };
+            self.pending.remove(&destination);
+            self.dropped += 1;
+        }
+    }
+}
+
+/// The text of the frame for `queued`: a batch is signed now.
+fn sign(queued: Queued) -> String {
+    match queued {
+        Queued::Signed(frame) => frame,
+        Queued::Batch { keys, tag, content } => {
+            let event = Event::sign(Lane::Data, &keys, crate::unix_now(), &tag, content);
+            wire::event(&event)
+        }
     }
 }
 
@@ -274,8 +414,9 @@ mod tests {
     use n0_future::time::Instant;
 
     use super::{
-        BUDGET_BYTES_PER_SEC, BURST_BYTES, BURST_FRAMES, DataQueue, FLUSH_TICK, FRAMES_PER_SEC,
-        Frame, Outgoing, QUEUE_BYTES, WEB_BUFFERED_BOUND, over_buffer_bound, weigh,
+        BUDGET_BYTES_PER_SEC, BURST_BYTES, BURST_FRAMES, DataQueue, FLUSH_TICK, FRAME_OVERHEAD,
+        FRAMES_PER_SEC, Frame, MAX_QUEUED_FRAMES, Outgoing, QUEUE_BYTES, WEB_BUFFERED_BOUND,
+        over_buffer_bound, weigh,
     };
     use crate::batch::{self, ID_LEN};
     use crate::event::{Event, Keys};
@@ -363,6 +504,193 @@ mod tests {
         queue.push_datagram(start, outgoing(&keys, 1, &vec![6u8; 3841]));
         assert!(queue.pop_ready(start).is_none(), "nothing goes out");
         assert_eq!(queue.dropped(), 1, "the datagram is counted");
+    }
+
+    /// The pacer charges a batch `FRAME_OVERHEAD` bytes above its content before it signs it, so
+    /// the charge must never be below what the event adds around any content.
+    #[test]
+    fn the_overhead_charged_before_signing_covers_the_event() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        let datagram = vec![0u8; 1];
+        queue.push_datagram(start, outgoing(&keys, 1, &datagram));
+        let frame = queue.pop_ready(start).expect("the first goes at once");
+        let Frame::Data(text) = &frame else {
+            panic!("a data frame");
+        };
+        let parsed: serde_json::Value = serde_json::from_str(text).expect("an EVENT frame");
+        let content = parsed[1]["content"].as_str().expect("a content").len();
+        assert!(
+            text.len() <= content + FRAME_OVERHEAD,
+            "the event is {} bytes over its content, the charge is {FRAME_OVERHEAD}",
+            text.len() - content
+        );
+    }
+
+    /// While a frame waits for the pacer, the open batch is not closed at the tick: it keeps
+    /// growing, and goes as one frame when the pacer has caught up.
+    #[test]
+    fn an_open_batch_grows_while_a_frame_waits_for_the_pacer() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        queue.push_datagram(start, outgoing(&keys, 1, b"idle breaker"));
+        queue.push_datagram(start + Duration::from_millis(1), outgoing(&keys, 1, b"x"));
+        queue.push_datagram(start + Duration::from_millis(3), outgoing(&keys, 1, b"y"));
+        let tick = start + Duration::from_millis(1) + FLUSH_TICK;
+        queue.flush_due(tick);
+        assert_eq!(queue.queued_frames(), 1, "the open batch was held back");
+        queue.pop_ready(tick).expect("the waiting frame goes");
+        queue.flush_due(tick);
+        let frame = queue
+            .pop_ready(tick)
+            .expect("the batch goes once nothing waits");
+        assert_eq!(
+            datagrams(&frame),
+            vec![b"x".to_vec(), b"y".to_vec()],
+            "one frame with both datagrams"
+        );
+    }
+
+    /// A frame over `from`, as the queue lets it out.
+    fn sender_of(frame: &Frame) -> [u8; ID_LEN] {
+        let Frame::Data(text) = frame else {
+            panic!("a data frame");
+        };
+        let parsed: serde_json::Value = serde_json::from_str(text).expect("an EVENT frame");
+        let event: Event = serde_json::from_value(parsed[1].clone()).expect("an event");
+        batch::decode(&event.content).expect("a batch").from
+    }
+
+    /// Two pools of one process that send to one tag do not share a batch: each datagram goes
+    /// out with the sender id of the pool that queued it.
+    #[test]
+    fn a_batch_belongs_to_a_sender_and_a_destination() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        queue.push_datagram(start, outgoing(&keys, 9, b"idle breaker"));
+        queue.pop_ready(start).expect("the first goes");
+        let soon = start + Duration::from_millis(1);
+        let mut other = outgoing(&keys, 1, b"from other");
+        other.from = [4u8; ID_LEN];
+        queue.push_datagram(soon, outgoing(&keys, 1, b"from first"));
+        queue.push_datagram(soon, other);
+        let tick = soon + FLUSH_TICK;
+        queue.flush_due(tick);
+        let mut senders: Vec<[u8; ID_LEN]> = Vec::new();
+        while let Some(frame) = queue.pop_ready(tick) {
+            senders.push(sender_of(&frame));
+        }
+        senders.sort_unstable();
+        assert_eq!(
+            senders,
+            vec![FROM, [4u8; ID_LEN]],
+            "one event for each sender"
+        );
+    }
+
+    /// One tick serves the socket: a destination that queued 1 ms after the first goes out at
+    /// the tick of the first, not at a tick of its own.
+    #[test]
+    fn one_tick_per_socket_flushes_every_destination_together() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        queue.push_datagram(start, outgoing(&keys, 9, b"idle breaker"));
+        queue.pop_ready(start).expect("the first goes");
+        let first_at = start + Duration::from_millis(1);
+        let second_at = start + Duration::from_millis(4);
+        queue.push_datagram(first_at, outgoing(&keys, 1, b"to one"));
+        queue.push_datagram(second_at, outgoing(&keys, 2, b"to two"));
+        let tick = first_at + FLUSH_TICK;
+        queue.flush_due(tick);
+        let mut count = 0;
+        while queue.pop_ready(tick).is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 2, "both destinations went at the first tick");
+    }
+
+    /// With many destinations the frames, not only the bytes, stay under a ceiling: 500-byte
+    /// frames would otherwise queue seconds of delay.
+    #[test]
+    fn the_queue_holds_a_bounded_number_of_frames() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        for index in 0..2_000u64 {
+            let now = start + Duration::from_millis(index);
+            for tag in 0..8u8 {
+                queue.push_datagram(now, outgoing(&keys, tag, &[tag; 300]));
+            }
+            queue.flush_due(now);
+            assert!(
+                queue.queued_frames() <= MAX_QUEUED_FRAMES,
+                "{} frames queued after {index} pushes",
+                queue.queued_frames()
+            );
+        }
+        assert!(queue.dropped() > 0, "frames were dropped");
+    }
+
+    /// A batch the queue drops is never signed: under overload the socket task would otherwise
+    /// spend its time on signatures of events it throws away.
+    #[test]
+    fn a_dropped_batch_costs_no_signature() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        for index in 0..1_000u64 {
+            let now = start + Duration::from_millis(index);
+            for tag in 0..8u8 {
+                queue.push_datagram(now, outgoing(&keys, tag, &[tag; 300]));
+            }
+            queue.flush_due(now);
+        }
+        let mut out = 0;
+        while queue.pop_ready(start + Duration::from_secs(1)).is_some() {
+            out += 1;
+        }
+        assert!(
+            queue.signed() <= out + 1,
+            "{} events signed for {out} sent",
+            queue.signed()
+        );
+    }
+
+    /// An event larger than the burst can never pass the pacer: refused and counted, not left
+    /// at the head of the queue.
+    #[test]
+    fn a_frame_larger_than_the_burst_is_refused_and_does_not_block_the_queue() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        queue.push_frame("x".repeat(70 * 1024));
+        assert_eq!(queue.dropped(), 1, "the oversize frame is counted");
+        queue.push_frame("small".to_owned());
+        assert_eq!(
+            queue.pop_ready(start),
+            Some(Frame::Data("small".to_owned())),
+            "the next frame is not stuck behind it"
+        );
+        let _ = keys;
+    }
+
+    /// A batch that waits behind a writer that is slow is dropped when it is old, as a frame in
+    /// the queue is: an old datagram is the one QUIC has given up on.
+    #[test]
+    fn a_batch_older_than_the_limit_is_dropped_while_the_writer_is_slow() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        queue.push_datagram(start, outgoing(&keys, 9, b"the writer holds this"));
+        let soon = start + Duration::from_millis(1);
+        queue.push_datagram(soon, outgoing(&keys, 1, b"old"));
+        let later = soon + Duration::from_secs(1);
+        queue.push_datagram(later, outgoing(&keys, 2, b"new"));
+        assert!(queue.dropped() >= 1, "the old batch was dropped");
     }
 
     #[test]
