@@ -445,9 +445,9 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
         let logs = habilis_network_test_tracing::captured_logs();
         // A new gossip neighbor takes the unit of a cached peer: that is the design. An eviction
         // that a connection or a session caused is a dial that took a unit at the cap.
-        let by_dial: Vec<&str> = logs
-            .lines()
-            .filter(|line| line.contains(EVICTION_LINE) && !line.contains(NEIGHBOR_CAUSE))
+        let evictions = logs.lines().filter(|line| line.contains(EVICTION_LINE));
+        let by_dial: Vec<&str> = evictions
+            .filter(|line| !line.contains(NEIGHBOR_CAUSE))
             .collect();
         assert!(
             by_dial.is_empty(),
