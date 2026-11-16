@@ -10,10 +10,19 @@
 //! carried cells for a pair that it is not part of. It is the proof that the tab takes part in
 //! multihop, both as an endpoint and as the neighbor that the route starts with.
 //!
+//! A second cell puts the tab at its cap and lets a native join late. Natives A and C and a tab with a
+//! cap of 2 (`maxConnections=2`) form a mesh: the tab holds sessions with A and C, and its ceiling is
+//! full. A native D joins then. The tab must dial D for nothing (the gates of the ceiling keep a probe
+//! and a courtesy dial away), and a send of the tab to D must take a route of a connected native and
+//! pin D (the debug line `dialing through multihop and pinning the peer` in the tab console). D
+//! answers. Between the join of D and the answer, no dial may evict a connection of the tab: an
+//! eviction that a gossip neighbor causes is the design, and the others are counted.
+//!
 //! The deny is on B alone. A tab has no test hook, so T cannot be told to refuse B; it does not
 //! need to be: a session needs both ends, and B answers every offer of T, and makes none, with a
 //! refusal. Two native members would be denied on both sides.
 
+use std::path::Path;
 use std::time::Duration;
 
 use crate::TaskOutcome;
@@ -39,6 +48,19 @@ use tokio::{runtime, time};
 /// on the next tick after that, so a message may wait a few ticks for its route.
 const ROUTE_TIMEOUT: Duration = Duration::from_mins(3);
 
+/// What the tab logs when a dial at its cap takes the route of a connected peer and pins the peer.
+/// What a member logs when it evicts a direct connection at its ceiling, and the cause that a gossip
+/// neighbor leaves on that line.
+const EVICTION_LINE: &str = "evicting a direct connection at the ceiling";
+const NEIGHBOR_CAUSE: &str = "cause=\"a gossip neighbor\"";
+/// How long the sessions of a tab settle at its cap, before the late member joins and before the
+/// evictions are counted.
+const SETTLE: Duration = Duration::from_secs(20);
+/// The cap of the tab in the late-member cell: A and C fill it.
+const TAB_CAP: usize = 2;
+/// How long the tab may take to print a census after the exchange: it prints one every 10 s.
+const CENSUS_TIMEOUT: Duration = Duration::from_secs(40);
+
 const TRANSPORTS: [Transport; 3] = [Transport::Udp, Transport::WebRtc, Transport::Multihop];
 
 struct CellFailure(String);
@@ -63,9 +85,10 @@ fn native_opts(nick: &str, topic: &str, relay_url: &str) -> membership::JoinOpti
         .transport(TRANSPORTS.to_vec())
 }
 
-fn page_url(base: &str, relay_url: &str, topic: &str) -> String {
+fn page_url(base: &str, relay_url: &str, topic: &str, cap: Option<usize>) -> String {
+    let cap = cap.map_or_else(String::new, |cap| format!("&maxConnections={cap}"));
     format!(
-        "{base}/?topic={topic}&nick=tab&relay={}&transport={}&log=habilis_network=debug,iroh_gossip=debug",
+        "{base}/?topic={topic}&nick=tab&relay={}&transport={}{cap}&log=habilis_network=debug,iroh_gossip=debug",
         urlencode(relay_url),
         transports(),
     )
@@ -199,7 +222,7 @@ async fn run_cell(
     let mut bravo = Native::open(&native_opts("bravo", &topic, relay_url))
         .await
         .map_err(|Skip(reason)| fail(reason))?;
-    page.navigate(&page_url(&harness.url, relay_url, &topic));
+    page.navigate(&page_url(&harness.url, relay_url, &topic, None));
     let ready = wait_ready(page, Duration::from_secs(30), Duration::from_millis(500))
         .ok_or_else(|| fail("the harness page never became ready".to_owned()))?;
     ready.map_err(|error| fail(format!("the tab failed to open the mesh: {error}")))?;
@@ -259,9 +282,164 @@ async fn run_cell(
     ))
 }
 
+/// The console of the tab, in one string.
+fn tab_console(page: &Page) -> String {
+    page.evaluate("(window.harnessLog||[]).join('\\n')")
+}
+
+/// The `direct_units` and `over_ceiling` of each mesh census line in `log`, in order.
+fn census_units(log: &str) -> Vec<(usize, usize)> {
+    let field = |line: &str, name: &str| -> Option<usize> {
+        let (_, rest) = line.split_once(name)?;
+        rest.split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    };
+    let lines = log.lines().filter(|line| line.contains("mesh census"));
+    let mut found: Vec<(usize, usize)> = Vec::new();
+    for line in lines {
+        if let (Some(units), Some(over)) =
+            (field(line, "direct_units="), field(line, "over_ceiling="))
+        {
+            found.push((units, over));
+        }
+    }
+    found
+}
+
+/// The evictions at a ceiling in `log` that a dial or a session caused. A new gossip neighbor takes
+/// the unit of a cached peer by design, so that cause is not counted.
+fn dial_evictions(log: &str) -> usize {
+    let evictions = log.lines().filter(|line| line.contains(EVICTION_LINE));
+    evictions
+        .filter(|line| !line.contains(NEIGHBOR_CAUSE))
+        .count()
+}
+
+/// The cell of a tab at its cap, and a native that joins late.
+async fn run_late_member_cell(
+    relay_url: &str,
+    harness: &BunServer,
+    page: &Page,
+) -> Result<String, CellFailure> {
+    let topic = format!("multihop-late-{}", rand_token());
+    drain_logs();
+
+    let mut alpha = Native::open(&native_opts("alpha", &topic, relay_url))
+        .await
+        .map_err(|Skip(reason)| fail(reason))?;
+    let claimed = wait_for(Duration::from_secs(25), Duration::from_millis(500), || {
+        logs_contain("beacon role active").then_some(())
+    });
+    if claimed.is_none() {
+        return Err(fail("A never claimed the beacon".to_owned()));
+    }
+    let _charlie = Native::open(&native_opts("charlie", &topic, relay_url))
+        .await
+        .map_err(|Skip(reason)| fail(reason))?;
+    page.navigate(&page_url(&harness.url, relay_url, &topic, Some(TAB_CAP)));
+    let ready = wait_ready(page, Duration::from_secs(30), Duration::from_millis(500))
+        .ok_or_else(|| fail("the harness page never became ready".to_owned()))?;
+    ready.map_err(|error| fail(format!("the tab failed to open the mesh: {error}")))?;
+    let tab_sees = |nick: &str| {
+        page.evaluate("(document.getElementById('peers')||{}).textContent||''")
+            .contains(&format!("\"{nick}\""))
+    };
+    let linked = wait_for(LINK_TIMEOUT, Duration::from_secs(1), || {
+        (alpha.saw_event("joined", "tab") && tab_sees("alpha") && tab_sees("charlie")).then_some(())
+    });
+    if linked.is_none() {
+        return Err(fail("the tab never saw A and C".to_owned()));
+    }
+
+    // The tab is at its cap. The late member comes now, and the evictions are counted from here.
+    time::sleep(SETTLE).await;
+    let console_before: usize = tab_console(page).len();
+    let evictions_before = dial_evictions(&tab_console(page)) + dial_evictions(&drain_logs());
+    let mut delta = Native::open(&native_opts("delta", &topic, relay_url))
+        .await
+        .map_err(|Skip(reason)| fail(reason))?;
+    let joined = wait_for(LINK_TIMEOUT, Duration::from_secs(1), || {
+        (delta.saw_event("joined", "tab") && tab_sees("delta")).then_some(())
+    });
+    if joined.is_none() {
+        return Err(fail("the tab and D never saw each other".to_owned()));
+    }
+    time::sleep(SETTLE).await;
+
+    // The tab sends to D, which it holds no connection to: the dial pins D on a route.
+    let before = forwarded_cells(&alpha).await?;
+    let deadline = tokio_Instant::now() + ROUTE_TIMEOUT;
+    loop {
+        let _ = call_page(page, "harness", "send('delta', 'tab-to-d')");
+        if delta.saw_msg("tab-to-d", true) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(fail(format!(
+                "the message of the tab never reached D (A's forwarded cells: {before})"
+            )));
+        }
+        time::sleep(Duration::from_secs(1)).await;
+    }
+    native_send_with_retry(&delta, Some("tab"), "d-to-tab")
+        .await
+        .map_err(|error| fail(format!("D's message to the tab was refused: {error}")))?;
+    let answered = wait_for(ROUTE_TIMEOUT, Duration::from_millis(500), || {
+        page.evaluate("(document.getElementById('messages')||{}).textContent||''")
+            .contains("d-to-tab")
+            .then_some(())
+    });
+    if answered.is_none() {
+        return Err(fail("D's answer never reached the tab".to_owned()));
+    }
+    let exchange_at: usize = tab_console(page).len();
+    // D holds no unit of the tab: a connection that fits no unit is an extra. The tab prints its
+    // census every few seconds, so the cell waits for one that comes after the exchange, and no
+    // census since D joined may show the tab over its cap.
+    let census_seen = wait_for(CENSUS_TIMEOUT, Duration::from_millis(500), || {
+        let console = tab_console(page);
+        let since_join = console.get(console_before..).unwrap_or_default();
+        let after_exchange = since_join.get(exchange_at.saturating_sub(console_before)..);
+        after_exchange
+            .is_some_and(|log| !census_units(log).is_empty())
+            .then_some(())
+    });
+    if census_seen.is_none() {
+        return Err(fail(
+            "the tab printed no census after the exchange with D".to_owned(),
+        ));
+    }
+    let console = tab_console(page);
+    let census: Vec<(usize, usize)> =
+        census_units(console.get(console_before..).unwrap_or_default());
+    if let Some((units, over)) = census
+        .iter()
+        .find(|(units, over)| *units > TAB_CAP || *over > 0)
+    {
+        return Err(fail(format!(
+            "D took a unit of the tab at its cap: {units} units, {over} over a cap of {TAB_CAP}"
+        )));
+    }
+    let evictions_after = dial_evictions(&console) + dial_evictions(&drain_logs());
+    if evictions_after != evictions_before {
+        return Err(fail(format!(
+            "a dial evicted a connection at a ceiling for the late member ({evictions_before} then {evictions_after})"
+        )));
+    }
+
+    call_page(page, "harness", "close()").map_err(fail)?;
+    Ok(
+        "the tab at its cap held the late member D as an extra; both ways, no unit taken, no dial evicted"
+            .to_owned(),
+    )
+}
+
 pub(super) fn run(args: &Args) -> TaskOutcome {
     if args.list {
         output::verbatim("multihop: tab T to native B through native A  would run");
+        output::verbatim("multihop-late: tab T at its cap, native D joins late  would run");
         return Ok(());
     }
 
@@ -298,21 +476,35 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     );
 
     let page = launch_page(args.page_browser()).map_err(|Skip(reason)| reason)?;
+    // Each cell runs, and a cell that fails does not hide the next: the suite fails at the end.
+    let mut failures: Vec<String> = Vec::new();
     output::status("Running", "tab T to native B through native A");
     match runtime.block_on(run_cell(relay_url.as_str(), &harness, &page)) {
         Ok(detail) => {
             output::status("ok", &detail);
             output::detail(&page.version());
-            Ok(())
         }
-        Err(CellFailure(reason)) => {
-            output::failure("FAILED", &reason);
-            let logs = drain_logs();
-            let dump = target.join("multihop-cell.log");
-            let browser = page.evaluate("(window.harnessLog||[]).join('\\n')");
-            let _ = fs::write(&dump, format!("── browser console ──\n{browser}\n{logs}"));
-            output::detail(&format!("full log: {}", dump.display()));
-            Err(reason.into())
-        }
+        Err(CellFailure(reason)) => failures.push(report_failure(&target, &page, &reason)),
     }
+    output::status("Running", "tab T at its cap, native D joins late");
+    match runtime.block_on(run_late_member_cell(relay_url.as_str(), &harness, &page)) {
+        Ok(detail) => output::status("ok", &detail),
+        Err(CellFailure(reason)) => failures.push(report_failure(&target, &page, &reason)),
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; ").into())
+    }
+}
+
+/// Report a failed cell, and keep its logs. Returns the reason.
+fn report_failure(target: &Path, page: &Page, reason: &str) -> String {
+    output::failure("FAILED", reason);
+    let logs = drain_logs();
+    let dump = target.join("multihop-cell.log");
+    let browser = page.evaluate("(window.harnessLog||[]).join('\\n')");
+    let _ = fs::write(&dump, format!("── browser console ──\n{browser}\n{logs}"));
+    output::detail(&format!("full log: {}", dump.display()));
+    reason.to_owned()
 }
