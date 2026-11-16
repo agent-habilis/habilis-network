@@ -1859,6 +1859,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "habilis-network-iroh-nostr-transport"
+version = "0.6.0"
+dependencies = [
+ "bytes",
+ "habilis-network-iroh-gossip-transport",
+ "habilis-network-iroh-nostr-address-lookup",
+ "habilis-network-protocol",
+ "habilis-network-test-tracing",
+ "iroh",
+ "n0-future",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "habilis-network-iroh-transport-util"
 version = "0.6.0"
 dependencies = [
