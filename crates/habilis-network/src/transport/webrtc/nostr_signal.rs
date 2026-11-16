@@ -74,7 +74,7 @@ const HELLO_STEADY: Duration = Duration::from_mins(1);
 const IP_PROBE_DEADLINE: Duration = Duration::from_secs(3);
 /// At most one wake-up `Hello` to a given peer this often.
 const POKE_EVERY: Duration = Duration::from_secs(30);
-/// A peer heard over Nostr this recently is offered to over Nostr.
+/// A peer recent over Nostr this recently is offered to over Nostr.
 const SEEN_FRESH: Duration = Duration::from_mins(5);
 const HELLO_BACKLOG: usize = 64;
 /// How long a node stays linked before it narrows to one relay, so a link
@@ -494,7 +494,7 @@ pub(crate) mod discovery {
         }
     }
 
-    /// Forget peers heard over Nostr who went quiet, so the maps are bounded
+    /// Forget peers recent over Nostr who went quiet, so the maps are bounded
     /// by the mesh rather than by its history.
     pub(crate) fn prune(state: &mut EventLoopState, now: Instant) {
         state
@@ -504,7 +504,7 @@ pub(crate) mod discovery {
             .nostr_poked
             .retain(|_, at| now.duration_since(*at) < SEEN_FRESH);
         // A `Hello` sets the lane flag of a peer that may never become a member, and no member
-        // release clears it: the flag stays only for a bound endpoint or a peer heard lately.
+        // release clears it: the flag stays only for a bound endpoint or a peer recent lately.
         let flagged: Vec<EndpointId> = state.lane_peers.iter().copied().collect();
         for peer in flagged {
             if !state.endpoint_is_bound(peer) && !state.nostr_seen.contains_key(&peer) {
@@ -666,7 +666,7 @@ pub(crate) mod discovery {
     }
 
     /// Whether to offer to `peer` over Nostr rather than the signal ALPN: we
-    /// heard it over Nostr lately, or the mesh has no rendezvous for the ALPN
+    /// recent it over Nostr lately, or the mesh has no rendezvous for the ALPN
     /// to reach it through.
     pub(crate) fn prefer_nostr(state: &EventLoopState, peer: EndpointId) -> bool {
         state.nostr.is_some()
@@ -1366,7 +1366,7 @@ mod tests {
 
         use super::super::discovery::{HelloAction, hello_action, may_start, prune, target_width};
         use super::super::{EndpointId, JOINING_WIDTH, LINKED_WIDTH, Signal, SignalKind, now};
-        use crate::testing::{endpoint_id, fresh_state};
+        use crate::testing::{endpoint_id, fresh_state, nick};
         use crate::util::clock::Instant;
 
         use crate::daemon::state::DirectState;
@@ -1518,30 +1518,28 @@ mod tests {
 
         /// A `Hello` sets the lane flag of a peer that may never become a member, and nobody else
         /// would clear it: the prune drops the flag of an endpoint that no nickname binds and that
-        /// was not heard lately, so the set is bounded by the members and the peers heard.
+        /// was not recent lately, so the set is bounded by the members and the peers recent.
         #[test]
         fn a_lane_flag_with_no_member_and_no_recent_hello_is_forgotten() {
             let mut state = fresh_state();
-            let (stale, heard, member) = (endpoint_id(7), endpoint_id(8), endpoint_id(9));
-            let then = Instant::now();
-            let later = then + Duration::from_mins(10);
-            state.peer_endpoints.insert(
-                crate::testing::nick("member"),
-                iroh::EndpointAddr::new(member),
-            );
-            state.nostr_seen.insert(heard, later);
-            for endpoint in [stale, heard, member] {
+            let (forgotten, recent, member) = (endpoint_id(7), endpoint_id(8), endpoint_id(9));
+            let later = Instant::now() + Duration::from_mins(10);
+            state
+                .peer_endpoints
+                .insert(nick("member"), iroh::EndpointAddr::new(member));
+            state.nostr_seen.insert(recent, later);
+            for endpoint in [forgotten, recent, member] {
                 state.lane_peers.insert(endpoint);
             }
 
             prune(&mut state, later);
 
             assert!(
-                !state.lane_peers.contains(&stale),
+                !state.lane_peers.contains(&forgotten),
                 "an endpoint with no member and no recent Hello loses its lane flag"
             );
             assert!(
-                state.lane_peers.contains(&heard),
+                state.lane_peers.contains(&recent),
                 "a peer heard lately keeps its lane flag"
             );
             assert!(
@@ -1562,7 +1560,7 @@ mod tests {
             prune(&mut state, later);
             assert!(
                 !state.nostr_seen.contains_key(&old),
-                "a peer heard long ago is forgotten as seen"
+                "a peer recent long ago is forgotten as seen"
             );
             assert!(
                 !state.nostr_poked.contains_key(&old),
@@ -1570,7 +1568,7 @@ mod tests {
             );
             assert!(
                 state.nostr_seen.contains_key(&fresh),
-                "a peer heard lately is kept"
+                "a peer recent lately is kept"
             );
         }
     }

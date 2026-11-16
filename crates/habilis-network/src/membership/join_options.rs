@@ -474,6 +474,7 @@ mod tests {
     use crate::protocol::meshes::NostrChoice;
     use crate::protocol::{LookupOpts, RelayChoice};
     use crate::runtime;
+    use url::Url;
 
     use super::{JoinOptions, Lookup, MeshConfig, SetupKind, Transport, resolve_kind};
     fn options() -> JoinOptions {
@@ -787,8 +788,9 @@ mod tests {
         let NostrChoice::Custom(custom) = &config.lookups.nostr else {
             panic!("nostrUrls must resolve to a custom list")
         };
+        let kept: Vec<&str> = custom.iter().map(Url::as_str).collect();
         assert_eq!(
-            custom.iter().map(url::Url::as_str).collect::<Vec<_>>(),
+            kept,
             vec![url.as_str()],
             "the comma stays in the URL, which is one relay"
         );
