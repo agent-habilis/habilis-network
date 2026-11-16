@@ -375,7 +375,7 @@ D11 replaces the cap D with one ceiling C. A node never refuses an offer or a co
 
 ### What C counts
 
-A peer is one unit when the node holds a unicast QUIC connection to it, or a `WebRTC` session to it while it is not a gossip neighbor. A gossip neighbor is held by its gossip link, so its session is not a unit. The gossip connections and the multihop underlay are not counted. The default of C is 64 (`MAX_DIRECT_PEERS`). The setting is `max_direct`. It replaced `max_sessions` at the same place in the C struct (offset 64, 72 bytes), so the meaning of the field changed but not its layout.
+A peer is one unit when the node holds a unicast QUIC connection to it, a `WebRTC` session to it, or a gossip link to it (it is a gossip neighbor). A peer with several of these is still one unit. A gossip neighbor counts but an eviction never takes it, so a ceiling full of neighbors is overrun by a newcomer. The multihop underlay is not counted. The default of C is 64 (`MAX_DIRECT_PEERS`). The setting is `max_direct`. It replaced `max_sessions` at the same place in the C struct (offset 64, 72 bytes), so the meaning of the field changed but not its layout.
 
 ### The ledger
 

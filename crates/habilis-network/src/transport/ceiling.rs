@@ -5,9 +5,10 @@
 //! backstop of `DIRECT_IDLE_BACKSTOP` apart). At `C` the node always accepts a new peer and
 //! evicts the least recently used one.
 //!
-//! The count is per peer: a peer that holds a session and a QUIC connection over it is one unit.
-//! A peer counts while it holds a unicast QUIC connection, or a session and is not a gossip
-//! neighbor: the gossip links are bound by G, outside `C`, and are never evicted.
+//! The count is per peer: a peer that holds a gossip link, a session and a QUIC connection is
+//! one unit. A peer counts while it holds a unicast QUIC connection, a session, or a gossip link
+//! (it is a gossip neighbor). A gossip neighbor counts but is never evicted: an eviction takes
+//! only peers that are not neighbors, so a ceiling full of neighbors is overrun by a newcomer.
 //!
 //! **An eviction is triggered only by an admission.** [`Ceiling::admit`] is the only call that
 //! returns victims; touching, closing or marking a peer never evicts.
@@ -80,7 +81,7 @@ struct Entry {
 impl Entry {
     /// Whether the peer is one unit of the ceiling.
     fn counted(&self) -> bool {
-        self.quic || (self.session && !self.neighbor)
+        self.quic || self.session || self.neighbor
     }
 }
 
@@ -236,7 +237,7 @@ impl Ceiling {
     fn unregister(&mut self, peer: EndpointId, clear: impl FnOnce(&mut Entry)) {
         if let Some(entry) = self.entries.get_mut(&peer) {
             clear(entry);
-            if !entry.quic && !entry.session {
+            if !entry.counted() {
                 self.entries.remove(&peer);
             }
         }
@@ -264,7 +265,8 @@ impl Ceiling {
         }
     }
 
-    /// The set of gossip neighbors changed: a session counts only while its peer is not one.
+    /// The set of gossip neighbors changed: each neighbor is one unit, and an eviction never
+    /// takes it. A peer that stops being a neighbor and holds nothing else leaves the count.
     pub(crate) fn set_neighbors(
         &mut self,
         neighbors: &HashSet<EndpointId>,
@@ -272,13 +274,17 @@ impl Ceiling {
     ) -> Admission {
         self.neighbors.clone_from(neighbors);
         let mut newly_counted = Vec::new();
-        for (peer, entry) in &mut self.entries {
-            let was_counted = entry.counted();
-            entry.neighbor = neighbors.contains(peer);
-            if !was_counted && entry.counted() {
+        for peer in neighbors {
+            let was_counted = self.entries.get(peer).is_some_and(Entry::counted);
+            self.entry(*peer, now).neighbor = true;
+            if !was_counted {
                 newly_counted.push(*peer);
             }
         }
+        self.entries.retain(|peer, entry| {
+            entry.neighbor = neighbors.contains(peer);
+            entry.counted()
+        });
         let mut admission = Admission::default();
         for peer in newly_counted {
             let one = self.admit(peer, now);
@@ -298,11 +304,14 @@ impl Ceiling {
         if need == 0 {
             return Admission::default();
         }
-        // Rule 3: the order of the candidates. A busy unit and the newcomer are not candidates.
+        // Rule 3: the order of the candidates. A busy unit, a gossip neighbor and the newcomer are
+        // not candidates.
         let mut candidates: Vec<Candidate> = self
             .entries
             .iter()
-            .filter(|(id, entry)| **id != peer && entry.counted() && entry.busy == 0)
+            .filter(|(id, entry)| {
+                **id != peer && entry.counted() && !entry.neighbor && entry.busy == 0
+            })
             .map(|(id, entry)| {
                 let opened = entry.opened_at.unwrap_or(now);
                 let used = entry.last_use.unwrap_or(opened);
@@ -635,27 +644,103 @@ mod tests {
     }
 
     #[test]
-    fn a_session_to_a_neighbor_does_not_count_until_the_peer_stops_being_one() {
+    fn a_gossip_neighbor_is_one_unit_with_no_other_connection() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(4);
+        let neighbor = testing::endpoint_id(1);
+        ceiling.set_neighbors(&HashSet::from([neighbor]), start);
+        assert_eq!(
+            ceiling.units(),
+            1,
+            "a gossip link is one unit of the ceiling"
+        );
+        assert!(ceiling.holds(neighbor), "the ceiling holds the neighbor");
+        ceiling.set_neighbors(&HashSet::new(), at(start, 1));
+        assert_eq!(
+            ceiling.units(),
+            0,
+            "a peer that stops being a neighbor and holds nothing else leaves the count"
+        );
+    }
+
+    #[test]
+    fn a_neighbor_with_a_session_and_a_connection_is_still_one_unit() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(4);
+        let neighbor = testing::endpoint_id(1);
+        ceiling.set_neighbors(&HashSet::from([neighbor]), start);
+        ceiling.register_session(neighbor, start);
+        ceiling.register_quic(neighbor, start);
+        assert_eq!(
+            ceiling.units(),
+            1,
+            "a gossip link, a session and a connection to one peer are one unit"
+        );
+        ceiling.unregister_quic(neighbor);
+        ceiling.unregister_session(neighbor);
+        assert_eq!(
+            ceiling.units(),
+            1,
+            "the gossip link alone keeps the unit after the session and the connection close"
+        );
+    }
+
+    #[test]
+    fn an_admission_never_evicts_a_gossip_neighbor() {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut ceiling = Ceiling::new(2);
         let neighbor = testing::endpoint_id(1);
+        let cached = testing::endpoint_id(2);
+        // The neighbor is the oldest and the least recently used, so it would go first.
         ceiling.set_neighbors(&HashSet::from([neighbor]), start);
-        ceiling.register_session(neighbor, start);
-        assert_eq!(ceiling.units(), 0, "a gossip link is outside the ceiling");
-        ceiling.register_quic(testing::endpoint_id(2), start);
-        ceiling.register_quic(testing::endpoint_id(3), start);
+        ceiling.register_quic(cached, at(start, 10));
+        let admission = ceiling.register_quic(testing::endpoint_id(3), at(start, 200));
         assert_eq!(
-            ceiling.units(),
-            2,
-            "a session to a neighbor does not count until the peer stops being one"
+            admission.evict,
+            vec![cached],
+            "the cached peer goes and the neighbor stays"
         );
-        // It stops being a neighbor: its session counts from now on, and the ceiling holds.
-        let admission = ceiling.set_neighbors(&HashSet::new(), at(start, 200));
-        assert_eq!(admission.evict.len(), 1, "one for the ceiling");
+    }
+
+    #[test]
+    fn a_ceiling_of_neighbors_is_overrun_by_a_newcomer_and_evicts_nobody() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        ceiling.set_neighbors(
+            &HashSet::from([testing::endpoint_id(1), testing::endpoint_id(2)]),
+            start,
+        );
+        let admission = ceiling.register_quic(testing::endpoint_id(3), at(start, 200));
         assert!(
-            !admission.evict.contains(&neighbor),
-            "the newcomer is not a victim"
+            admission.evict.is_empty(),
+            "no peer that a ceiling may evict is left"
+        );
+        assert_eq!(
+            admission.over_ceiling, 1,
+            "the newcomer overruns the ceiling by one"
+        );
+    }
+
+    #[test]
+    fn a_new_neighbor_past_the_ceiling_evicts_a_cached_peer_not_a_neighbor() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        let (old_neighbor, cached) = (testing::endpoint_id(1), testing::endpoint_id(2));
+        ceiling.set_neighbors(&HashSet::from([old_neighbor]), start);
+        ceiling.register_quic(cached, at(start, 10));
+        let admission = ceiling.set_neighbors(
+            &HashSet::from([old_neighbor, testing::endpoint_id(3)]),
+            at(start, 200),
+        );
+        assert_eq!(
+            admission.evict,
+            vec![cached],
+            "a new neighbor takes the unit of a cached peer"
         );
     }
 
