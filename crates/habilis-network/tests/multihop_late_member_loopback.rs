@@ -16,11 +16,12 @@
 //!   multihop path.
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{
-    self, Inbound, Inspect, InspectHost, Membership, Messaging, Request, Routing,
+    self, Inbound, Inspect, InspectHost, InspectTest, Membership, Messaging, Request, Routing,
 };
 use habilis_network::net;
 use habilis_network::protocol::{Lookup, Transport};
@@ -117,6 +118,19 @@ impl Member {
     async fn snapshot(&self) -> TopologySnapshot {
         self.membership
             .request(|reply| Request::Inspect(Inspect::Topology { reply }))
+            .await
+            .expect("the loop answers")
+    }
+
+    /// How many dials this member made to `peer` since it started, direct or through a route.
+    async fn dials_to(&self, peer: &str) -> u64 {
+        self.membership
+            .request(|reply| {
+                Request::InspectTest(InspectTest::DialsTo {
+                    peer: peer.to_owned(),
+                    reply,
+                })
+            })
             .await
             .expect("the loop answers")
     }
@@ -221,16 +235,30 @@ fn neighbor_nicks(snapshot: &TopologySnapshot) -> Vec<&str> {
     nicks
 }
 
-/// Whether the snapshot shows `nick` pinned, with no unit for it: the units are the cap and none is
-/// over it.
-fn is_pinned_at_the_ceiling(snapshot: &TopologySnapshot, nick: &str) -> bool {
+/// The member that is no gossip neighbor of alice in `snapshot`, when there is exactly one.
+fn the_third_member(snapshot: &TopologySnapshot) -> Option<&'static str> {
+    let neighbors = neighbor_nicks(snapshot);
+    let others = ["bob", "carol", "dave"]
+        .into_iter()
+        .filter(|nick| !neighbors.contains(nick));
+    let others: Vec<&'static str> = others.collect();
+    match others[..] {
+        [only] => Some(only),
+        _ => None,
+    }
+}
+
+/// Whether the snapshot shows `nick` held within the cap: pinned with no unit for it, or a gossip
+/// neighbor, because the random view can make the third member a neighbor between the choice of the
+/// peer and the send, and a neighbor needs no pin. The units are the cap and none is over it.
+fn is_held_within_the_cap(snapshot: &TopologySnapshot, nick: &str) -> bool {
     let wanted = Some(nick);
     let found = snapshot
         .peers
         .iter()
         .find(|link| link.nickname.as_deref() == wanted);
-    let pinned = found.is_some_and(|link| link.pinned && !link.neighbor);
-    pinned && snapshot.direct_units == 2 && snapshot.over_ceiling == 0
+    let held = found.is_some_and(|link| link.neighbor || link.pinned);
+    held && snapshot.direct_units == 2 && snapshot.over_ceiling == 0
 }
 
 /// How long the ledger may take to settle after the first frame of a send.
@@ -241,6 +269,65 @@ const LABEL_DEADLINE: Duration = Duration::from_secs(30);
 /// entry, and no state shows that none will come, so the absence of a dial needs a window. The
 /// ledger is read every 500 ms in it, and a connection beyond the units fails the run at once.
 const WATCH: Duration = Duration::from_secs(10);
+
+/// The dials that `alice` made since she started, to each of the other three members, as a nickname
+/// and a count. A gossip link to a neighbor is a dial too, and a unit: alice dialed bob and carol
+/// for their links while her ceiling had room, and she dials a new neighbor that the view takes
+/// in. So a test reads the counts once the ceiling is full, and a later dial is allowed only to a
+/// member that she held as a neighbor or as a pinned peer.
+async fn dials_made(alice: &Member) -> Vec<(&'static str, u64)> {
+    let mut dials: Vec<(&'static str, u64)> = Vec::new();
+    for nick in ["bob", "carol", "dave"] {
+        dials.push((nick, alice.dials_to(nick).await));
+    }
+    dials
+}
+
+/// The members that `now` shows more dials to than `at_the_cap` did, and that alice never held as a
+/// gossip neighbor or as a pinned peer. A dial to a neighbor is a link of the view, and a dial to a
+/// pinned peer is the dial of a send, on a multihop route (the engine's own unicast frames are
+/// sends too, and one comes about 10 s after a join). Any other dial is a direct dial for a member
+/// that no send asked for.
+fn dialed_strangers<'a>(
+    now: &[(&'a str, u64)],
+    at_the_cap: &[(&str, u64)],
+    held_seen: &BTreeSet<String>,
+) -> Vec<&'a str> {
+    let pairs = now.iter().zip(at_the_cap);
+    let grown = pairs.filter(|(after, before)| after.1 > before.1);
+    let nicks = grown.map(|(after, _)| after.0);
+    nicks.filter(|nick| !held_seen.contains(*nick)).collect()
+}
+
+/// The dials of alice now, and the members among them that she never held as a neighbor or as a
+/// pinned peer. The flag of a dial that has just begun comes with its connection, so a stranger gets
+/// 5 s, and each read adds the peers that she holds to `held_seen`.
+async fn dialed_without_a_hold(
+    alice: &Member,
+    at_the_cap: &[(&str, u64)],
+    held_seen: &mut BTreeSet<String>,
+) -> (Vec<(&'static str, u64)>, Vec<&'static str>) {
+    let started = Instant::now();
+    loop {
+        let dials = dials_made(alice).await;
+        let strangers = dialed_strangers(&dials, at_the_cap, held_seen);
+        if strangers.is_empty() || started.elapsed() >= Duration::from_secs(5) {
+            return (dials, strangers);
+        }
+        let snapshot = alice.snapshot().await;
+        held_seen.extend(held_nicks(&snapshot).iter().map(|nick| (*nick).to_owned()));
+        time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// The nicknames in `snapshot` that alice holds as a gossip neighbor or as a pinned peer.
+fn held_nicks(snapshot: &TopologySnapshot) -> Vec<&str> {
+    let held = snapshot
+        .peers
+        .iter()
+        .filter(|link| link.neighbor || link.pinned);
+    held.filter_map(|link| link.nickname.as_deref()).collect()
+}
 
 /// Why the ledger of a node at its cap of 2 took a unit for the new member, or `None` when it did
 /// not: the units and the units over the cap must be exactly 2 and 0, and the peers that hold any
@@ -291,6 +378,8 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
             time::sleep(Duration::from_millis(500)).await;
         }
         habilis_network_test_tracing::clear_captured_logs();
+        let dials_at_the_cap = dials_made(&alice).await;
+        let mut held_seen: BTreeSet<String> = BTreeSet::new();
 
         // The new member comes after the ceiling of alice is full.
         let dave = Member::join("dave", &alice).await;
@@ -311,12 +400,8 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
             if let Some(why) = took_a_unit(&snapshot) {
                 panic!("alice took a unit for the new member: {why}");
             }
-            let neighbors = neighbor_nicks(&snapshot);
-            let others = ["bob", "carol", "dave"]
-                .into_iter()
-                .filter(|nick| !neighbors.contains(nick));
-            let others: Vec<&str> = others.collect();
-            if let [only] = others[..]
+            held_seen.extend(held_nicks(&snapshot).iter().map(|nick| (*nick).to_owned()));
+            if let Some(only) = the_third_member(&snapshot)
                 && alice.has_route(only).await
             {
                 break only.to_owned();
@@ -334,8 +419,19 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
             if let Some(why) = took_a_unit(&snapshot) {
                 panic!("alice took a unit for the new member: {why}");
             }
+            held_seen.extend(held_nicks(&snapshot).iter().map(|nick| (*nick).to_owned()));
             time::sleep(Duration::from_millis(500)).await;
         }
+        let (dials_now, strangers) =
+            dialed_without_a_hold(&alice, &dials_at_the_cap, &mut held_seen).await;
+        assert!(
+            strangers.is_empty(),
+            "alice dialed members that she never held as a neighbor or a pinned peer: {strangers:?}; dials {dials_now:?}, at the cap {dials_at_the_cap:?}"
+        );
+        // The random view can change while alice is watched: the peer of the send is the one that is
+        // no neighbor now.
+        let latest = alice.snapshot().await;
+        let target: String = the_third_member(&latest).map_or(target, str::to_owned);
         let logs = habilis_network_test_tracing::captured_logs();
         // A new gossip neighbor takes the unit of a cached peer: that eviction is the design. An
         // eviction that a connection or a session caused is a dial that took a unit at the cap.
@@ -371,15 +467,14 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
         // of the snapshot comes from a path watcher that a pair may not have, so it is not read.
         let settling_since = Instant::now();
         let mut after = alice.snapshot().await;
-        while !is_pinned_at_the_ceiling(&after, &target)
-            && settling_since.elapsed() < LABEL_DEADLINE
+        while !is_held_within_the_cap(&after, &target) && settling_since.elapsed() < LABEL_DEADLINE
         {
             time::sleep(Duration::from_millis(500)).await;
             after = alice.snapshot().await;
         }
         assert!(
-            is_pinned_at_the_ceiling(&after, &target),
-            "the send of alice to {target} did not pin it with her units at 2 of 2: {after:?}"
+            is_held_within_the_cap(&after, &target),
+            "the send of alice to {target} was neither pinned nor a neighbor, or her units are not 2 of 2: {after:?}"
         );
 
         for (_, held) in members {
@@ -387,4 +482,27 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
         }
         let _ = alice.membership.node.leave().await;
     });
+}
+
+#[test]
+fn a_dial_to_a_member_that_was_never_held_is_a_stranger() {
+    let at_the_cap = [("bob", 1), ("carol", 1), ("dave", 0)];
+    let now = [("bob", 1), ("carol", 1), ("dave", 1)];
+    let held: BTreeSet<String> = ["bob", "carol"].map(str::to_owned).into();
+    assert_eq!(
+        dialed_strangers(&now, &at_the_cap, &held),
+        ["dave"],
+        "a dial to dave, whom she never held, is a direct dial that no send asked for"
+    );
+}
+
+#[test]
+fn a_dial_to_a_neighbor_or_a_pinned_peer_is_not_a_stranger() {
+    let at_the_cap = [("bob", 1), ("carol", 1), ("dave", 0)];
+    let now = [("bob", 1), ("carol", 2), ("dave", 1)];
+    let held: BTreeSet<String> = ["bob", "carol", "dave"].map(str::to_owned).into();
+    assert!(
+        dialed_strangers(&now, &at_the_cap, &held).is_empty(),
+        "a link of the view and the dial of a send are both allowed"
+    );
 }
