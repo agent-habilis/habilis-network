@@ -436,8 +436,10 @@ fn a_pair_on_the_default_list_plus_nostr_exchanges_a_message_over_nostr() {
     });
 }
 
-/// Only alice dials bob: bob has no pooled connection to alice and no want of his own. His table
-/// must not keep a refusal by name for alice, or he drops her handshake and no reply goes back.
+/// Only alice dials bob: bob has no pooled connection to alice and dials nothing of his own. A
+/// regression test for the one-way fail-over dial. It passes with the old refusal by name too, so
+/// it does not prove that fix: `the_sweep_of_an_idle_slot_leaves_a_reply_to_its_peer_allowed` does,
+/// at the seam where it broke.
 #[test]
 fn a_one_way_dial_over_nostr_gets_its_reply() {
     let guard = habilis_network_test_tracing::init();

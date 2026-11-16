@@ -1695,6 +1695,31 @@ mod tests {
         );
     }
 
+    /// The seam that broke: the sweep reads a slot with no connection, no want and no session
+    /// against a real Nostr transport. The refusal by name that an earlier reading left must not
+    /// stand, or the peer that dials first is refused its reply.
+    #[test]
+    fn the_sweep_of_an_idle_slot_leaves_a_reply_to_its_peer_allowed() {
+        use habilis_network_iroh_nostr_transport::NostrTransport;
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = iroh::SecretKey::from_bytes(&[71; 32]).public();
+        let peer = iroh::SecretKey::from_bytes(&[72; 32]).public();
+        let table = SignalAdmission::new(8);
+        let transport = NostrTransport::new(me);
+        table.set_nostr(transport.clone());
+        // An earlier reading stopped the peer by name, and its connection is gone since.
+        transport.handle().allow(peer, false);
+        table.lock().slot(peer);
+
+        table.sync_nostr();
+
+        transport.handle().allow_reply(peer);
+        assert!(
+            transport.handle().is_allowed(peer),
+            "a reply to the peer of an idle slot is accepted"
+        );
+    }
+
     /// An endpoint with a loopback UDP socket and the gossip transport, whose connections are
     /// reported to its own table, which keeps the gossip handle.
     async fn ip_and_gossip_node(
