@@ -1,10 +1,11 @@
 //! The dial side of the unicast plane: the per-peer connection pool.
 
 use super::in_flight_dial::InFlightDial;
+use super::plan_release::PlanRelease;
 use super::registration::Registration;
 use super::timeouts::{
     AT_CEILING, BUSY_AFTER_FINISH, COOLDOWN_REFUSED, DIAL_FAILURE_COOLDOWN, DIAL_TIMEOUT,
-    PATH_SELECT_TIMEOUT, PINNED_IDLE, SEND_TIMED_OUT, SEND_TIMEOUT,
+    PATH_SELECT_TIMEOUT, PINNED_IDLE, PINNED_REDIAL, SEND_TIMED_OUT, SEND_TIMEOUT,
 };
 use super::warm_send::WarmSend;
 use crate::transport::admission::{BusyGuard, SignalAdmission};
@@ -137,10 +138,6 @@ pub(in crate::transport::pool) struct PoolInner {
     /// The dial takes the entry.
     pub(in crate::transport::pool) routes:
         parking_lot::Mutex<HashMap<EndpointId, iroh::TransportAddr>>,
-    /// The route that pinned each peer, kept while the peer stays pinned. A redial of a pinned
-    /// peer takes it, so the redial is planned as the first dial was and never dials direct.
-    pub(in crate::transport::pool) last_routes:
-        parking_lot::Mutex<HashMap<EndpointId, iroh::TransportAddr>>,
     /// How long a pinned connection stays open with no send.
     pub(in crate::transport::pool) pinned_idle: Duration,
     /// `TransportPolicy::relay`. Off, a send on a connection whose selected
@@ -197,7 +194,6 @@ impl UnicastPool {
                 dial_locks: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
                 routes: parking_lot::Mutex::new(HashMap::new()),
-                last_routes: parking_lot::Mutex::new(HashMap::new()),
                 pinned_idle: PINNED_IDLE,
                 #[cfg(test)]
                 dial_gate: std_Mutex::new(None),
@@ -230,25 +226,25 @@ impl UnicastPool {
         };
         let plan = admission.plan_dial(eid, route.is_some());
         let mut routes = self.inner.routes.lock();
-        let mut last_routes = self.inner.last_routes.lock();
         match (plan, route) {
             (DialPlan::Multihop, Some(route)) => {
                 tracing::debug!(target: LOG_TARGET, %eid, "at the ceiling: dialing through multihop and pinning the peer");
-                last_routes.insert(eid, route.clone());
                 routes.insert(eid, route);
             }
             (DialPlan::Direct | DialPlan::Multihop, _) => {
-                last_routes.remove(&eid);
                 routes.remove(&eid);
             }
         }
     }
 
-    /// [`Self::dial_and_send`] after a failed write, planned again: a pinned peer is dialed on the
-    /// route that pinned it, so the redial never takes a unit or evicts a peer. A waiter has the
-    /// dial of another caller to wait for, and the dial turn serializes the two.
+    /// [`Self::dial_and_send`] after a failed write, planned again. A pinned peer is not dialed
+    /// again here: only the loop holds a fresh route to it, so the next send plans the dial, and the
+    /// frame of this one is dropped as the frame of any write that fails after QUIC buffered it. A
+    /// waiter has the dial of another caller to wait for, and the dial turn serializes the two.
     async fn redial_and_send(&self, eid: EndpointId, bytes: Bytes) -> Result<()> {
-        let registration = self.register_replanned_dial(eid);
+        let Some(registration) = self.redial_registration(eid) else {
+            bail!("{PINNED_REDIAL}");
+        };
         let outcome = self.dial_and_send(eid, bytes).await;
         if let Registration::Dialer(in_flight) = &registration {
             in_flight.publish(match &outcome {
@@ -259,10 +255,21 @@ impl UnicastPool {
         outcome
     }
 
-    /// [`Self::register_planned_dial`] for a dial that comes again: a pinned peer takes the route
-    /// that pinned it, and any other peer is planned with no route.
-    pub(crate) fn register_replanned_dial(&self, eid: EndpointId) -> Registration {
-        self.register_planned_dial(eid, || self.inner.last_routes.lock().get(&eid).cloned())
+    /// The place of a dial that comes again, planned with no route, or `None` for a pinned peer:
+    /// a route that pinned it may be gone, and a direct redial would take a unit or evict a peer.
+    pub(in crate::transport::pool) fn redial_registration(
+        &self,
+        eid: EndpointId,
+    ) -> Option<Registration> {
+        let pinned = self
+            .inner
+            .admission
+            .get()
+            .is_some_and(|admission| admission.is_pinned(eid));
+        if pinned {
+            return None;
+        }
+        Some(self.register_planned_dial(eid, || None))
     }
 
     /// Count the frames of this pool into `tally`, the tally of the loop that owns it.
@@ -320,7 +327,6 @@ impl UnicastPool {
                 dial_locks: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
                 routes: parking_lot::Mutex::new(HashMap::new()),
-                last_routes: parking_lot::Mutex::new(HashMap::new()),
                 pinned_idle: PINNED_IDLE,
                 #[cfg(test)]
                 dial_gate: std_Mutex::new(None),
@@ -529,8 +535,9 @@ impl UnicastPool {
                         }
                         Hold::Used | Hold::Probing => {
                             let table = inner.admission.get();
-                            let extra: bool = pooled.pinned
-                                || table.is_some_and(|admission| admission.is_extra(*eid));
+                            let extra: bool = table.map_or(pooled.pinned, |admission| {
+                                admission.is_pinned(*eid) || admission.is_extra(*eid)
+                            });
                             let idle = if extra {
                                 inner.idle.min(inner.pinned_idle)
                             } else {
@@ -570,8 +577,20 @@ impl UnicastPool {
         if self.is_cooling(eid).await {
             return false;
         }
-        // A courtesy reply is a send: at the ceiling it takes the route to the peer and pins it.
-        let registration = self.register_planned_dial(eid, route);
+        let registration = self.register_dial(eid);
+        // A waiter has a dial to wait for. A dialer takes the route to the peer at the ceiling and
+        // pins it, or takes a free unit. A courtesy dial that finds neither evicts nobody: a backfill
+        // is not the answer to a request, and the peer is reached through multihop when a send needs it.
+        if matches!(registration, Registration::Dialer(_)) {
+            match route() {
+                Some(route) => self.plan_dial(eid, Some(route)),
+                None if self.reserve_unprompted_dial(eid) => {}
+                None => {
+                    tracing::debug!(target: LOG_TARGET, %eid, "no courtesy dial: the node is at its ceiling and has no route");
+                    return false;
+                }
+            }
+        }
         let pool = self.clone();
         task::spawn(async move {
             if let Err(error) = pool.send_registered(registration, eid, bytes).await {
@@ -611,8 +630,9 @@ impl UnicastPool {
     /// pinned connection has no other reason to stay. A direct connection of the peer is left
     /// alone. Returns whether a connection was closed.
     pub(crate) async fn close_pinned(&self, eid: EndpointId) -> bool {
+        let pinned_now = self.is_pinned_now(eid);
         let mut conns = self.inner.conns.lock().await;
-        if !conns.get(&eid).is_some_and(|pooled| pooled.pinned) {
+        if !pinned_now || !conns.get(&eid).is_some_and(|pooled| pooled.pinned) {
             return false;
         }
         if let Some(pooled) = conns.remove(&eid) {
@@ -730,7 +750,12 @@ impl UnicastPool {
                     match self.send_if_warm(eid, bytes.clone()).await {
                         WarmSend::Sent => return Ok(()),
                         WarmSend::Refused => bail!("{RELAY_REFUSED}"),
-                        WarmSend::Cold => registration = self.register_replanned_dial(eid),
+                        WarmSend::Cold => {
+                            let Some(next) = self.redial_registration(eid) else {
+                                bail!("{PINNED_REDIAL}");
+                            };
+                            registration = next;
+                        }
                     }
                 }
             }
@@ -815,9 +840,10 @@ impl UnicastPool {
         if !self.reserve_unprompted_dial(eid) {
             bail!("{AT_CEILING}");
         }
+        let release = PlanRelease::new(self, eid);
         let result = self.dial_pooled(eid, Hold::Probing).await;
-        if result.is_err() {
-            self.release_plan(eid);
+        if result.is_ok() {
+            release.disarm();
         }
         result
     }
@@ -969,6 +995,16 @@ impl UnicastPool {
 
     /// The dial that [`Self::plan_dial`] planned ends without a new connection: the unit that it
     /// reserved and the pin that it set go back.
+    /// Whether the ledger still pins `eid`: a peer that became a gossip neighbor is not pinned any
+    /// more, though its pooled connection was dialed on a route. With no table, the flag of the
+    /// pooled connection decides alone.
+    fn is_pinned_now(&self, eid: EndpointId) -> bool {
+        self.inner
+            .admission
+            .get()
+            .is_none_or(|admission| admission.is_pinned(eid))
+    }
+
     pub(in crate::transport::pool) fn release_plan(&self, eid: EndpointId) {
         if let Some(admission) = self.inner.admission.get() {
             admission.release_dial(eid);
@@ -987,7 +1023,6 @@ impl UnicastPool {
         }
         self.inner.dial_failures.lock().await.forget(&eid);
         self.inner.routes.lock().remove(&eid);
-        self.inner.last_routes.lock().remove(&eid);
         self.release_plan(eid);
         // A rejoin may come back at another address; its `PeerInfo` notes it.
         if let Ok(mut addrs) = self.inner.addrs.lock() {

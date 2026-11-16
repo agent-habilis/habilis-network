@@ -36,6 +36,10 @@ pub(super) const PATH_SELECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// route through other members costs the members that forward for it.
 pub(crate) const PINNED_IDLE: Duration = super::super::ceiling::EXTRA_IDLE;
 
+/// The error of a redial that the pool does not make: the peer is pinned, and a route that pinned it
+/// may be gone. The next send plans the dial with a fresh route.
+pub(super) const PINNED_REDIAL: &str = "pinned peer: the next send plans a fresh route";
+
 /// How long a connection stays busy after a send finished, if the peer has not read the frame. A
 /// reader that is slower than this is not protected: the connection can be evicted under its frame.
 pub(super) const BUSY_AFTER_FINISH: Duration = Duration::from_secs(2);

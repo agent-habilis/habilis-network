@@ -557,6 +557,7 @@ impl Ceiling {
             entry.neighbor = neighbors.contains(peer);
             entry.held()
         });
+        self.promote_extras();
         for peer in neighbors {
             self.pinned.remove(peer);
             self.awaiting.remove(peer);
@@ -1224,6 +1225,26 @@ mod tests {
             admission.evict.len(),
             2,
             "two new neighbors take the units of two cached peers"
+        );
+    }
+
+    #[test]
+    fn an_extra_takes_the_unit_of_a_neighbor_that_leaves() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(1);
+        let neighbor = testing::endpoint_id(1);
+        ceiling.set_neighbors(&HashSet::from([neighbor]), start);
+        let extra = testing::endpoint_id(2);
+        ceiling.register_quic(extra, at(start, 10));
+        assert!(
+            ceiling.is_extra(extra),
+            "no unit was free for the connection"
+        );
+        ceiling.set_neighbors(&HashSet::new(), at(start, 20));
+        assert!(
+            !ceiling.is_extra(extra) && ceiling.units() == 1,
+            "the unit of the neighbor that left goes to the extra"
         );
     }
 
