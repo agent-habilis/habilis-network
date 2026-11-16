@@ -876,13 +876,18 @@ fn publish(inner: &Inner, signal: &Signal) {
 mod tests {
     use std::time::Duration;
 
+    use super::{
+        Endpoint, EndpointId, IceProfile, NostrKeys, NostrSignal, NostrSignalParts, Replies,
+        Result, SecretKey, Signal, SignalAdmission, SignalDeadlines, SignalKind, WebRtcHandle,
+        deliver_reply, discovery, expect_reply, is_cap_refusal, mpsc, nostr, now,
+    };
+
     use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay;
     use habilis_network_iroh_webrtc_transport::WebRtcTransport;
     use iroh::endpoint::{Builder, presets};
     use iroh::{EndpointAddr, RelayMode, TransportAddr};
     use tokio::time;
 
-    use super::*;
     use crate::protocol::TopicId;
     use crate::transport::MAX_DIRECT_PEERS;
 
@@ -1352,7 +1357,7 @@ mod tests {
         use std::time::Duration;
 
         use super::super::discovery::{HelloAction, hello_action, may_start, prune, target_width};
-        use super::*;
+        use super::super::{EndpointId, JOINING_WIDTH, LINKED_WIDTH, Signal, SignalKind, now};
         use crate::testing::{endpoint_id, fresh_state};
         use crate::util::clock::Instant;
 

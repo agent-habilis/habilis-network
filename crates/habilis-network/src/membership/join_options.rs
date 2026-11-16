@@ -180,9 +180,9 @@ fn nostr_list(urls: &[String]) -> Result<Option<Vec<Url>>> {
     if urls.is_empty() {
         return Ok(None);
     }
-    parse_nostr_urls(&urls.join(","))
-        .map(Some)
-        .map_err(|error| anyhow::anyhow!("{error}"))
+    let parsed = parse_nostr_urls(&urls.join(",")).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let list: Vec<Url> = parsed.collect();
+    Ok(Some(list))
 }
 
 /// One live membership's moving parts.
