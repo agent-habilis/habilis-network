@@ -28,9 +28,28 @@ use n0_future::task;
 /// ```
 #[must_use]
 pub fn selected_is_gossip(connection: &Connection) -> bool {
+    selected_is_transport(connection, GOSSIP_TRANSPORT_ID)
+}
+
+/// Whether the selected path of `connection` is a path of the custom transport `transport_id`.
+///
+/// # Examples
+///
+/// It reads the selected path of a live connection, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_gossip_transport::{NOSTR_TRANSPORT_ID, selected_is_transport};
+/// use iroh::endpoint::Connection;
+///
+/// # fn demo(connection: &Connection) -> bool {
+/// selected_is_transport(connection, NOSTR_TRANSPORT_ID)
+/// # }
+/// ```
+#[must_use]
+pub fn selected_is_transport(connection: &Connection, transport_id: u64) -> bool {
     connection.paths().iter().any(|path| {
         path.is_selected()
-            && matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == GOSSIP_TRANSPORT_ID)
+            && matches!(path.remote_addr(), TransportAddr::Custom(address) if address.id() == transport_id)
     })
 }
 
@@ -58,6 +77,33 @@ pub fn watch_recursion(
     code: u32,
     on_close: impl FnOnce() + Send + 'static,
 ) {
+    watch_transport_path(connection, GOSSIP_TRANSPORT_ID, code, on_close);
+}
+
+/// Close `connection` with `code` as soon as its selected path is a path of the custom
+/// transport `transport_id`, now or after a path change, and call `on_close` once when it does.
+/// [`watch_recursion`] is this watch for the gossip transport. Another transport uses it to keep
+/// the gossip links off a path that must not carry them. The watch holds the connection weakly
+/// and ends when the connection closes. It reads no mesh policy.
+///
+/// # Examples
+///
+/// It watches a live connection, so the doc test compiles it but does not run it.
+///
+/// ```no_run
+/// use habilis_network_iroh_gossip_transport::{NOSTR_TRANSPORT_ID, watch_transport_path};
+/// use iroh::endpoint::Connection;
+///
+/// # fn demo(connection: &Connection) {
+/// watch_transport_path(connection, NOSTR_TRANSPORT_ID, 12, || println!("closed"));
+/// # }
+/// ```
+pub fn watch_transport_path(
+    connection: &Connection,
+    transport_id: u64,
+    code: u32,
+    on_close: impl FnOnce() + Send + 'static,
+) {
     use n0_future::StreamExt as _;
     let weak = connection.weak_handle();
     let mut events = connection.path_events();
@@ -69,8 +115,11 @@ pub fn watch_recursion(
             if live.close_reason().is_some() {
                 return;
             }
-            if selected_is_gossip(&live) {
-                live.close(code.into(), b"a gossip link on the gossip path");
+            if selected_is_transport(&live, transport_id) {
+                live.close(
+                    code.into(),
+                    b"a gossip link on a path that may not carry it",
+                );
                 on_close();
                 return;
             }

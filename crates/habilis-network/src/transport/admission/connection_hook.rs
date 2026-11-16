@@ -30,6 +30,9 @@ impl EndpointHooks for ConnectionHook {
         // policy-gated.
         if connection.alpn() == net::GOSSIP_ALPN {
             payload_path::watch_gossip_recursion(connection, self.admission.clone());
+            // A graft never rides the Nostr path either: it is the last fallback, rate limited,
+            // and its relays see every datagram.
+            payload_path::watch_gossip_on_nostr(connection);
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             payload_path::track_gossip_conn(connection);
         }

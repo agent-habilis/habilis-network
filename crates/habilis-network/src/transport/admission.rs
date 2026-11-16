@@ -1462,6 +1462,109 @@ mod tests {
         );
     }
 
+    /// A gossip connection whose selected path is Nostr is closed by the hook, with its own code,
+    /// and the other end reads that code: a graft never rides the Nostr path, whatever the mesh
+    /// policy says. Nostr is rate limited, and the relay that carries it sees every datagram.
+    #[test]
+    fn a_gossip_connection_on_the_nostr_path_is_closed_by_the_hook() {
+        use iroh::endpoint::presets;
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use habilis_network_iroh_gossip_transport::hub::Hub;
+                use habilis_network_iroh_gossip_transport::{
+                    GossipHandle, NOSTR_TRANSPORT_ID, transport_addr,
+                };
+                use iroh::endpoint::ConnectionError;
+                use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+                use iroh::{EndpointAddr, RelayMode, SecretKey, TransportAddr};
+
+                #[derive(Debug, Clone)]
+                // the report is shared with the hook, which sends through it
+                struct Report(Arc<Mutex<Option<oneshot::Sender<ConnectionError>>>>);
+                impl ProtocolHandler for Report {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        let reason = connection.closed().await;
+                        if let Some(tx) = self.0.lock().expect("report lock").take() {
+                            let _ = tx.send(reason);
+                        }
+                        Ok(())
+                    }
+                }
+
+                let (alice_key, bob_key) = (
+                    SecretKey::from_bytes(&[11; 32]),
+                    SecretKey::from_bytes(&[12; 32]),
+                );
+                let hub = Hub::new();
+                let (alice_handle, bob_handle) = (
+                    GossipHandle::with_transport_id(alice_key.public(), NOSTR_TRANSPORT_ID),
+                    GossipHandle::with_transport_id(bob_key.public(), NOSTR_TRANSPORT_ID),
+                );
+                hub.join(&alice_handle);
+                hub.join(&bob_handle);
+                let bind = |key: SecretKey,
+                            handle: GossipHandle,
+                            admission: Option<SignalAdmission>| async move {
+                    let builder = iroh::Endpoint::builder(presets::Minimal);
+                    let builder = builder.secret_key(key);
+                    let builder = builder.relay_mode(RelayMode::Disabled);
+                    let builder = builder.add_custom_transport(handle.custom_transport());
+                    let builder = builder.clear_ip_transports();
+                    let builder = builder.clear_relay_transports();
+                    let builder = match admission {
+                        Some(admission) => builder.hooks(admission.connection_hook()),
+                        None => builder,
+                    };
+                    builder.bind().await.expect("bind a gossip-only endpoint")
+                };
+                let admission = SignalAdmission::new(8);
+                let alice = bind(alice_key, alice_handle, Some(admission.clone())).await;
+                let bob = bind(bob_key, bob_handle, None).await;
+                let (tx, rx) = oneshot::channel();
+                let router = Router::builder(bob.clone())
+                    .accept(
+                        net::GOSSIP_ALPN,
+                        // the report is shared with the hook, which sends through it
+                        Report(Arc::new(Mutex::new(Some(tx)))),
+                    )
+                    .spawn();
+
+                let target = EndpointAddr::from_parts(
+                    bob.id(),
+                    [TransportAddr::Custom(transport_addr(
+                        NOSTR_TRANSPORT_ID,
+                        bob.id(),
+                    ))],
+                );
+                let connection = alice
+                    .connect(target, net::GOSSIP_ALPN)
+                    .await
+                    .expect("connect over the nostr path");
+
+                let at_alice = time::timeout(Duration::from_secs(5), connection.closed())
+                    .await
+                    .expect("the dialed end was not closed");
+                let at_bob = time::timeout(Duration::from_secs(5), rx)
+                    .await
+                    .expect("the accepted end was not closed")
+                    .expect("the probe reported");
+                let code = u64::from(payload_path::GOSSIP_NOSTR_REFUSED_CODE);
+                assert!(
+                    matches!(at_alice, ConnectionError::LocallyClosed),
+                    "the dialer closed itself: {at_alice:?}"
+                );
+                assert!(
+                    matches!(&at_bob, ConnectionError::ApplicationClosed(close) if u64::from(close.error_code) == code),
+                    "the accepted end reads the code: {at_bob:?}"
+                );
+                router.shutdown().await.expect("shutdown");
+                alice.close().await;
+            },
+        );
+    }
+
     /// What the table tells the gossip transport about a peer: established when it has a live
     /// connection, allowed unless a higher rung carries the pair, on the best of its connections.
     #[test]
@@ -1508,6 +1611,36 @@ mod tests {
             (true, false),
             "the best connection stands for the pair"
         );
+    }
+
+    /// What the table tells the Nostr transport about a peer: established when it has a live
+    /// connection, and allowed only when no other path is selected for the pair.
+    #[test]
+    fn the_table_tells_the_nostr_transport_to_carry_only_a_pair_with_no_other_path() {
+        use super::super::probe::PathKind::{self, Gossip, Ip, Nostr, Relay};
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            sampler::nostr_view(&[]),
+            (false, true),
+            "no connection: a handshake may go"
+        );
+        assert_eq!(
+            sampler::nostr_view(&[PathKind::None]),
+            (true, true),
+            "a connection with no path yet"
+        );
+        assert_eq!(
+            sampler::nostr_view(&[Nostr]),
+            (true, true),
+            "a pair that Nostr already carries"
+        );
+        for other in [Ip, Gossip, Relay] {
+            assert_eq!(
+                sampler::nostr_view(&[other]),
+                (true, false),
+                "a pair on {other:?} does not need Nostr"
+            );
+        }
     }
 
     /// An endpoint with a loopback UDP socket and the gossip transport, whose connections are
