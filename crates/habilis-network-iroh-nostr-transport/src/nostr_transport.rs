@@ -1,10 +1,9 @@
 //! The Nostr transport of one endpoint.
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
 
-use habilis_network_iroh_gossip_transport::{
-    DEFAULT_BUDGET_BYTES_PER_SEC, GossipHandle, NOSTR_TRANSPORT_ID,
-};
+use habilis_network_iroh_gossip_transport::{GossipHandle, NOSTR_TRANSPORT_ID};
 use habilis_network_iroh_nostr_address_lookup::DataPool;
 use habilis_network_protocol::nostr::NostrKeys;
 use iroh::EndpointId;
@@ -38,7 +37,15 @@ pub struct NostrTransport {
     handle: GossipHandle,
     // the clones of the transport share one receive task, which stops with the last of them
     receive: Arc<OnceLock<task::AbortOnDropHandle<()>>>,
+    // the engine writes the members that it knows, and the receive task reads them
+    known: Arc<Mutex<HashSet<EndpointId>>>,
 }
+
+/// The core budget of the transport, in bytes of frame each second: below what the data lane lets
+/// out, so that a flow at its budget does not keep the queue at its age limit. The data lane paces
+/// one mebibyte each second of event text, and a frame is about 73 % of its event text after base64 and
+/// the batch header.
+pub const NOSTR_BUDGET_BYTES_PER_SEC: u64 = 700 * 1024;
 
 impl NostrTransport {
     /// A transport that is not active yet: it has no relay and no tag, so its path is not valid.
@@ -48,7 +55,7 @@ impl NostrTransport {
     #[must_use]
     pub fn new(app_id: EndpointId) -> Self {
         let handle = GossipHandle::with_transport_id(app_id, NOSTR_TRANSPORT_ID);
-        handle.set_budget(Some(DEFAULT_BUDGET_BYTES_PER_SEC));
+        handle.set_budget(Some(NOSTR_BUDGET_BYTES_PER_SEC));
         // The last rung: no frame and no address of it leaves for a peer until the engine allows
         // the pair, or a frame of that peer arrives and shows that it chose this path.
         handle.set_default_allow(false);
@@ -56,13 +63,31 @@ impl NostrTransport {
             handle,
             // the clones of the transport share one receive task
             receive: Arc::new(OnceLock::new()),
+            // the clones of the transport share the members
+            known: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Tell the transport which members the engine knows. A datagram opens replies only to one of
+    /// them: the sender that a batch names is not proven, so an id of a stranger must not open the
+    /// handle, and the tables stay as small as the roster. The engine refreshes the set at its
+    /// sweep.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another thread panicked while it held the set.
+    pub fn set_known_peers(&self, peers: impl IntoIterator<Item = EndpointId>) {
+        *self.known.lock().expect("the known members") = peers.into_iter().collect();
     }
 
     /// Open the data lane on the relays of `ranking`, the custom list in the order every member
     /// computes, and listen on the tag of the endpoint. The caller passes no relay it does not
     /// trust with payload. It does nothing when the transport is active already, and returns
     /// whether it opened the lane. Call it inside a runtime.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another thread panicked while it held the set of known members.
     #[must_use]
     pub fn activate(&self, keys: NostrKeys, ranking: Vec<Url>) -> bool {
         let app_id = self.handle.app_id();
@@ -74,10 +99,15 @@ impl NostrTransport {
             // the handle keeps the sink to send frames, and the sink owns the pool
             self.handle.attach(Arc::new(DataSink::new(pool, keys)));
             let receiving = self.handle.clone();
+            // the receive task reads the members that the engine writes
+            let known = Arc::clone(&self.known);
             task::AbortOnDropHandle::new(task::spawn(async move {
                 while let Some(datagram) = datagrams.recv().await {
                     if let Ok(sender) = EndpointId::from_bytes(&datagram.from) {
-                        receiving.allow(sender, true);
+                        let member = known.lock().expect("the known members").contains(&sender);
+                        if member {
+                            receiving.allow_reply(sender);
+                        }
                     }
                     let _ = receiving.deliver(&datagram.bytes);
                 }
@@ -99,5 +129,22 @@ impl NostrTransport {
     #[must_use]
     pub fn handle(&self) -> &GossipHandle {
         &self.handle
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NOSTR_BUDGET_BYTES_PER_SEC;
+
+    /// A flow at the budget must not exceed what the data lane lets out: it paces one mebibyte each second
+    /// of event text, and a frame is about 73 % of its event text (base64 and the batch header).
+    #[test]
+    fn the_core_budget_is_not_above_the_raw_rate_of_the_data_lane() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let lane_raw_rate = (1024 * 1024) * 73 / 100;
+        assert!(
+            NOSTR_BUDGET_BYTES_PER_SEC <= lane_raw_rate,
+            "the budget {NOSTR_BUDGET_BYTES_PER_SEC} B/s is above the lane's {lane_raw_rate} B/s"
+        );
     }
 }

@@ -151,6 +151,15 @@ impl GossipHandle {
         }
     }
 
+    /// Allow frames to `dst` as replies to a frame that it sent, unless the engine stopped `dst`
+    /// by name: `allow(dst, false)` stands. On a closed handle (see [`Self::set_default_allow`])
+    /// this is how a pair that chose this path gets its answers.
+    pub fn allow_reply(&self, dst: EndpointId) {
+        if !locked(&self.shared.blocked).contains(&dst) {
+            locked(&self.shared.permitted).insert(dst);
+        }
+    }
+
     /// Whether a destination that was never named is allowed. It is by default: a handshake to a
     /// new peer must not be dropped. A transport that carries a pair only when nothing else does
     /// sets it to `false`, and the engine allows the pairs that need it by name.
@@ -958,6 +967,34 @@ mod tests {
         handle.allow(bob, false);
         handle.shared.send_datagram(bob, &[1u8; 10]);
         assert_eq!(locked(&recorder.0).len(), 1, "bob is refused again");
+    }
+
+    /// A reply is allowed to a peer that the engine did not stop: `allow_reply` never lifts a
+    /// refusal by name, so a frame that a peer sends cannot cancel the rule of the engine.
+    #[test]
+    fn a_reply_is_allowed_unless_the_engine_stopped_the_destination() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        handle.set_default_allow(false);
+        let (bob, carol) = (secret(2).public(), secret(3).public());
+
+        handle.allow(bob, false);
+        handle.allow_reply(bob);
+        handle.allow_reply(carol);
+
+        assert!(
+            !handle.is_allowed(bob),
+            "the engine stopped bob, and a reply does not lift it"
+        );
+        assert!(
+            handle.is_allowed(carol),
+            "carol was not stopped, so a reply to her passes"
+        );
+        handle.allow(carol, false);
+        assert!(
+            !handle.is_allowed(carol),
+            "the engine can stop a reply after it"
+        );
     }
 
     /// A destination that was never named is allowed: its handshake must pass.

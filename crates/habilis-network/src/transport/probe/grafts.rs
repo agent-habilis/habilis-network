@@ -2,6 +2,7 @@
 
 use super::direct_outcome::DirectOutcome;
 use super::graft_request::{GraftRequest, GraftTarget};
+use super::path_kind::PathKind;
 use super::{graft_request, lanes, regraft};
 
 use iroh::EndpointId;
@@ -103,6 +104,11 @@ pub(crate) async fn on_outcome(
     }
     let DirectOutcome { peer, direct, .. } = outcome;
     if direct {
+        // A pair that Nostr carries is proven for payload, and no graft follows it: remember it
+        // while the probe connection is still read, because it goes after the probe.
+        if state.pair_path_kind(peer) == Some(PathKind::Nostr) {
+            state.note_proven_over_nostr(peer);
+        }
         graft_proven(state, context, peer).await;
     } else if state.demote_unproven(peer) {
         tracing::info!(target: transport::LOG_TARGET, %peer, "no direct path within the probe deadline; peer stays relay-only");
@@ -192,6 +198,10 @@ pub(crate) async fn retry_direct(
     let now = Instant::now();
     state.note_link_count(state.linked_endpoints.len(), context.max_peers, now);
     state.settle_graft_backoff(now);
+    // The Nostr transport opens replies only to the members that this node knows.
+    state
+        .webrtc_admission
+        .set_known_peers(state.known_endpoints.iter().copied());
     if state.relay_transport.relay_allowed() {
         regraft::fill_active_view(state, context).await;
         return;

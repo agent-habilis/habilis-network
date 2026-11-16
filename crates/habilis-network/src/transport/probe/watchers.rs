@@ -269,6 +269,9 @@ pub(crate) async fn on_path_change(
     }
     tracing::debug!(target: transport::LOG_TARGET, %peer, ?kind, "selected path changed");
     state.path_kinds.insert(peer, kind);
+    if kind != PathKind::Nostr {
+        state.forget_nostr_proof(peer);
+    }
     forget_route_unless_climbing(&mut state.route_dialed, peer, kind);
     // The pair may have just reached WebRTC, or IP: the underlay opens or drops its
     // session now, not at the alive tick.

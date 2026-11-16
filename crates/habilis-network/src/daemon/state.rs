@@ -2313,6 +2313,21 @@ mod tests {
         );
     }
 
+    /// A pair that a probe proved over Nostr is remembered: when the probe connection is gone the
+    /// selected kind reads as none, and a graft would dial a gossip link that the hook closes at
+    /// once. A report of another path takes the proof back.
+    #[test]
+    fn a_pair_proven_over_nostr_is_not_grafted_after_its_probe_connection_is_gone() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let bob = endpoint_id(1);
+        let mut node = fresh_state();
+        assert!(!node.rides_nostr(bob), "a pair nobody proved");
+        node.note_proven_over_nostr(bob);
+        assert!(node.rides_nostr(bob), "the proof outlives the connection");
+        node.forget_nostr_proof(bob);
+        assert!(!node.rides_nostr(bob), "another path takes the proof back");
+    }
+
     /// A proven pair that falls to Nostr is raced as one on the relay: Nostr carries no gossip
     /// link, so a quick re-graft would dial it for nothing.
     #[test]

@@ -645,6 +645,15 @@ impl SignalAdmission {
         inner.nostr.is_some() && inner.nostr_wanted.contains(&peer)
     }
 
+    /// Tell the Nostr transport which members the engine knows: a datagram opens replies only to
+    /// one of them. A table with no Nostr transport ignores it.
+    pub(crate) fn set_known_peers(&self, peers: impl IntoIterator<Item = EndpointId>) {
+        let transport = self.lock().nostr.clone();
+        if let Some(transport) = transport {
+            transport.set_known_peers(peers);
+        }
+    }
+
     /// Whether [`set_nostr`](Self::set_nostr) set a Nostr transport.
     #[cfg(test)]
     pub(crate) fn has_nostr(&self) -> bool {

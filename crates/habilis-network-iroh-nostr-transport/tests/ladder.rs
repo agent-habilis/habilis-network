@@ -107,6 +107,8 @@ fn a_pair_falls_to_nostr_when_ip_is_taken_and_climbs_back_when_it_returns() {
             // The transport starts closed: alice names bob, and bob's replies pass because a
             // frame of alice arrived first.
             alice_transport.handle().allow(bob.id(), true);
+            // Bob knows alice as a member, so that a frame of hers opens his replies.
+            bob_transport.set_known_peers([alice.id()]);
 
             let mut both: Vec<TransportAddr> = bob.addr().addrs.into_iter().collect();
             both.push(TransportAddr::Custom(transport_addr(

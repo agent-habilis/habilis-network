@@ -58,6 +58,8 @@ fn two_endpoints_with_only_nostr_echo_through_a_relay() {
             // The transport starts closed: alice names bob, and bob's replies pass because a
             // frame of alice arrived first.
             alice_transport.handle().allow(bob.id(), true);
+            // Bob knows alice as a member, so that a frame of hers opens his replies.
+            bob_transport.set_known_peers([alice.id()]);
 
             let target = EndpointAddr::from_parts(
                 bob.id(),
@@ -109,6 +111,8 @@ fn a_transport_activated_after_the_bind_links_and_echoes() {
             // The transport starts closed: alice names bob, and bob's replies pass because a
             // frame of alice arrived first.
             alice_transport.handle().allow(bob.id(), true);
+            // Bob knows alice as a member, so that a frame of hers opens his replies.
+            bob_transport.set_known_peers([alice.id()]);
             assert!(
                 alice_transport.activate(keys.clone(), vec![relay.url()]),
                 "the first activation opens the lane"
@@ -193,6 +197,70 @@ fn a_closed_transport_sends_nothing_to_a_peer_it_was_not_told_about() {
             );
             router.shutdown().await.expect("shutdown");
             alice.close().await;
+        },
+    );
+}
+
+/// A datagram of an unknown sender, a known member and a member that the engine stopped: only the
+/// known and not stopped member gets replies. The `from` of a batch is not proven, so a stranger
+/// must neither open the handle to an id of its choice nor grow its tables.
+#[test]
+fn a_datagram_opens_replies_only_to_a_known_member_that_the_engine_did_not_stop() {
+    use habilis_network_iroh_nostr_address_lookup::DataPool;
+
+    ::habilis_network_test_tracing::run_multi_thread(
+        ::habilis_network_test_tracing::init(),
+        2,
+        async {
+            let relay = TestRelay::spawn().await.expect("spawn a relay");
+            let keys = NostrKeys::derive(&TopicId::from_bytes([6u8; 32]));
+            let alice_key = SecretKey::from_bytes(&[11; 32]);
+            let (known, stopped, stranger) = (
+                SecretKey::from_bytes(&[12; 32]).public(),
+                SecretKey::from_bytes(&[13; 32]).public(),
+                SecretKey::from_bytes(&[14; 32]).public(),
+            );
+            let alice = NostrTransport::open(alice_key.public(), keys.clone(), vec![relay.url()]);
+            alice.set_known_peers([known, stopped]);
+            alice.handle().allow(stopped, false);
+            let alice_tag = keys.self_tag(&alice_key.public());
+
+            // One sender writes batches that claim each id as their source.
+            let (sender, _datagrams) = DataPool::open(
+                vec![relay.url()],
+                *stranger.as_bytes(),
+                keys.self_tag(&stranger),
+            );
+            for claimed in [stranger, known, stopped] {
+                let (pool, _rx) = DataPool::open(
+                    vec![relay.url()],
+                    *claimed.as_bytes(),
+                    keys.self_tag(&claimed),
+                );
+                for _ in 0..30 {
+                    pool.send(&alice_tag, b"not a frame".to_vec());
+                    time::sleep(Duration::from_millis(100)).await;
+                    if alice.handle().is_allowed(known) {
+                        break;
+                    }
+                }
+                drop(pool);
+            }
+            sender.send(&alice_tag, b"not a frame".to_vec());
+            time::sleep(Duration::from_secs(1)).await;
+
+            assert!(
+                alice.handle().is_allowed(known),
+                "a known member gets replies"
+            );
+            assert!(
+                !alice.handle().is_allowed(stopped),
+                "a frame does not lift the refusal of the engine"
+            );
+            assert!(
+                !alice.handle().is_allowed(stranger),
+                "a stranger gets no reply and no entry in the tables"
+            );
         },
     );
 }

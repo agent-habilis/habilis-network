@@ -27,4 +27,4 @@
 mod data_sink;
 mod nostr_transport;
 
-pub use nostr_transport::NostrTransport;
+pub use nostr_transport::{NOSTR_BUDGET_BYTES_PER_SEC, NostrTransport};

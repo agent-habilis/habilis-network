@@ -22,10 +22,10 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use n0_future::time::Instant as PoolInstant;
 use tokio::sync::{Mutex, watch};
 
+#[cfg(feature = "iroh-test-utils")]
+use crate::transport::probe;
 use crate::transport::webrtc::close_code::IDLE;
-use crate::transport::{
-    LOG_TARGET, PayloadPath, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on, probe,
-};
+use crate::transport::{LOG_TARGET, PayloadPath, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
 use habilis_network_iroh_gossip_transport::{NOSTR_TRANSPORT_ID, transport_addr};
 
 use crate::util::clock::Instant;
@@ -341,6 +341,7 @@ impl UnicastPool {
         // A path that a test took away from this node is not dialed: its selector refuses it, and
         // iroh would select it as soon as it validates (the test hooks block nothing without the
         // `test-hooks` feature, so a product build keeps every address).
+        #[cfg(feature = "iroh-test-utils")]
         if let Some(endpoint) = &self.inner.endpoint {
             let local = endpoint.id();
             address

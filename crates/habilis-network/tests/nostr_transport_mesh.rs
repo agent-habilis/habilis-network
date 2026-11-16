@@ -472,12 +472,13 @@ fn two_members_with_no_other_path_exchange_a_message_over_nostr() {
             "the datagrams of the message went through the Nostr relay as data events"
         );
 
-        // The network is repaired: IP and the relay return, and the pair climbs back to IP.
+        // The network is repaired: IP and the relay return. The test shows that a new dial selects IP; a
+        // connection that stands on Nostr does not move back by itself before it ends.
         alice.lift_cut("bob").await;
         bob.lift_cut("alice").await;
         alice.forget_connection("bob").await;
         alice
-            .expect_rung_redialing("bob", "ip", "IP and the relay returned")
+            .expect_rung_redialing("bob", "ip", "a new dial after IP and the relay returned")
             .await;
 
         for member in [alice, bob, carol] {

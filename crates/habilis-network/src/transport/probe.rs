@@ -26,8 +26,10 @@ mod watchers;
 pub(crate) use direct_outcome::DirectOutcome;
 pub(crate) use graft_request::graft_request;
 pub(crate) use grafts::{ensure_direct, on_outcome, request_graft, retry_direct};
+#[cfg(feature = "iroh-test-utils")]
+pub(crate) use kinds::path_is_blocked;
 pub(crate) use kinds::{
-    allow_for, any_not_ip, best_kind, nostr_allow_for, pair_kind, path_is_blocked, selected_kind,
+    allow_for, any_not_ip, best_kind, nostr_allow_for, pair_kind, selected_kind,
     selected_kind_unblocked,
 };
 pub(crate) use lanes::{lane_pick, plan_lane_offers, top_up_lane_offers};

@@ -614,6 +614,10 @@ pub struct EventLoopState {
     pub(crate) nostr: Option<transport::webrtc::nostr_signal::NostrSignal>,
     /// When each peer was last heard over Nostr.
     pub(crate) nostr_seen: HashMap<EndpointId, Instant>,
+    /// The peers that a probe proved over Nostr. The proof outlives the probe connection, so that
+    /// a graft is not dialed for a pair that only Nostr carries: the hook would close the link at
+    /// once. A report of another path takes it back. Bounded by the peers that are probed.
+    pub(crate) nostr_proven: HashSet<EndpointId>,
     /// When each peer was last woken with a `Hello` on its own tag.
     pub(crate) nostr_poked: HashMap<EndpointId, Instant>,
     /// When the next `Hello` goes out; `None` without the carrier.
@@ -991,6 +995,7 @@ impl EventLoopState {
             has_rendezvous: true,
             nostr: None,
             nostr_seen: HashMap::new(),
+            nostr_proven: HashSet::new(),
             nostr_poked: HashMap::new(),
             next_hello: None,
             hellos_sent: 0,
@@ -2439,12 +2444,23 @@ impl EventLoopState {
                 .is_some_and(|handle| handle.has_session(&peer))
     }
 
+    /// A probe proved `peer` over Nostr: see [`Self::rides_nostr`].
+    pub(crate) fn note_proven_over_nostr(&mut self, peer: EndpointId) {
+        self.nostr_proven.insert(peer);
+    }
+
+    /// A path other than Nostr carries `peer`: the proof over Nostr is void.
+    pub(crate) fn forget_nostr_proof(&mut self, peer: EndpointId) {
+        self.nostr_proven.remove(&peer);
+    }
+
     /// Whether the selected path of `peer` is Nostr. A gossip link never rides it (the hook closes
     /// the connection), so a graft only makes the gossip layer dial a link that dies at once. Not
     /// while a session is attached: it carries the pair, and the link rides it once iroh moves
     /// the connection.
     pub(crate) fn rides_nostr(&self, peer: EndpointId) -> bool {
-        self.pair_path_kind(peer) == Some(probe::PathKind::Nostr)
+        (self.pair_path_kind(peer) == Some(probe::PathKind::Nostr)
+            || self.nostr_proven.contains(&peer))
             && !self
                 .webrtc
                 .as_ref()
