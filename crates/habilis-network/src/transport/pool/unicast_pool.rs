@@ -227,6 +227,7 @@ impl UnicastPool {
         let mut routes = self.inner.routes.lock();
         match (plan, route) {
             (DialPlan::Multihop, Some(route)) => {
+                tracing::debug!(target: LOG_TARGET, %eid, "at the ceiling: dialing through multihop and pinning the peer");
                 routes.insert(eid, route);
             }
             (DialPlan::Direct | DialPlan::Multihop, _) => {

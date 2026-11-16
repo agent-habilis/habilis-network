@@ -12,6 +12,8 @@
  * - `transport` — what payload may ride, `udp,webrtc,multihop,relay` (the default),
  *   `webrtc`, or any with `gossip` (id-changing, same rule). A tab needs
  *   `webrtc` or `relay`, and ignores `multihop`.
+ * - `maxConnections` — the cap on this tab's direct connections (the engine default
+ *   when omitted). At the cap, a send to a new peer rides a multihop route.
  * - `log` — an `EnvFilter` for the engine's tracing, to the console.
  *
  * DOM contract (what a driver asserts on):
@@ -133,6 +135,7 @@ async function main(): Promise<void> {
   // Passed through as typed: a name that is not a transport is the engine's
   // error to raise, and it names the choices.
   const transport = params.get('transport')?.split(',') as Transport[] | undefined
+  const maxConnections = params.get('maxConnections')
 
   let mesh: Mesh
   try {
@@ -141,6 +144,7 @@ async function main(): Promise<void> {
       ...(id === null ? {} : { id }),
       ...(nick === null ? {} : { nick }),
       ...(transport === undefined ? {} : { transport }),
+      ...(maxConnections === null ? {} : { maxConnections: Number(maxConnections) }),
       relayUrls,
       log: params.get('log') ?? 'info',
     })
