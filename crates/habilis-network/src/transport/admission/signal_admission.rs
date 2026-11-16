@@ -261,6 +261,11 @@ impl SignalAdmission {
         if !outgoing && inner.we_evicted.holds(&peer, now) {
             return Err(Refusal::Evicted);
         }
+        // The remote side of a pinned pair is not pinned on its own side, and offers. A session
+        // would take a unit, or evict a peer, at the ceiling that pinned the pair.
+        if !outgoing && inner.ceiling.pinned(peer) {
+            return Err(Refusal::Pinned);
+        }
         if inner.ceiling.refuses()
             && !inner.ceiling.holds(peer)
             && inner.ceiling.units() + inner.rounds_in_flight() >= self.cap

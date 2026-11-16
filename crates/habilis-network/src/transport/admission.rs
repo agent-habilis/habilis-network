@@ -105,6 +105,7 @@ mod tests {
     use super::{Refusal, RefusalBackoff, Sessions, SignalAdmission, sampler};
     #[cfg(feature = "iroh-test-utils")]
     use crate::lookup::test_relay;
+    use crate::transport::ceiling::DialPlan;
     use crate::transport::payload_path;
     use habilis_network_iroh_gossip_transport::hub::Hub as habilisnetworkirohgossiptransport_Hub;
     #[cfg(feature = "iroh-test-utils")]
@@ -724,7 +725,6 @@ mod tests {
     /// table releases the pins, and a pin that a neighbor makes void is released too.
     #[test]
     fn closing_the_table_and_a_new_neighbor_release_the_pins_of_the_selector() {
-        use crate::transport::ceiling::DialPlan;
         use habilis_network_iroh_transport_util as selector;
         let _guard = ::habilis_network_test_tracing::init();
         let admission = SignalAdmission::new(1);
@@ -755,6 +755,37 @@ mod tests {
         assert!(
             !selector::is_pinned(local, far),
             "closing the table releases the pins of the selector"
+        );
+    }
+
+    /// The offer of a pinned peer is refused: this node rides multihop for the pair, and a session
+    /// would take a unit, or evict a peer, at the ceiling that pinned it. The remote side of the pair
+    /// is not pinned on its own side, so it reads the pair as proven and offers. Our own offer is a
+    /// send and is not refused here.
+    #[test]
+    fn an_offer_from_a_pinned_peer_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let admission = SignalAdmission::new(1);
+        let hub = FakeHub::default();
+        admission.note_success(peer(1));
+        let pinned = peer(2);
+        assert_eq!(
+            admission.plan_dial(pinned, true),
+            DialPlan::Multihop,
+            "the peer is pinned"
+        );
+        assert_eq!(
+            admission.try_admit(pinned, &hub).err(),
+            Some(Refusal::Pinned),
+            "an offer of a pinned peer is refused"
+        );
+        assert!(
+            admission.try_admit_offer(pinned, &hub).is_ok(),
+            "our own offer for a held frame is a send, and the pin check is not for it"
+        );
+        assert!(
+            admission.try_admit(peer(3), &hub).is_ok(),
+            "an offer of an unpinned peer is admitted"
         );
     }
 

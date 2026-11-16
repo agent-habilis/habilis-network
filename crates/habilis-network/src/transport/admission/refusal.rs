@@ -15,6 +15,9 @@ pub(crate) enum Refusal {
     ShuttingDown,
     /// A test denied this peer: no round with it, offered or answered.
     Denied,
+    /// This node rides multihop for the peer (it is pinned): a session would take a unit, or evict a
+    /// peer, at the ceiling that pinned it.
+    Pinned,
     /// The table of a route edge is at its cap: the units and the rounds in flight reach it, and
     /// nobody is evicted for a newcomer. The offerer waits as for any cap refusal.
     AtCapacity,
