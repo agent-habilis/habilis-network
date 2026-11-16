@@ -647,7 +647,7 @@ mod tests {
                 let frame = || WireFrame::fixture_raw(bytes::Bytes::from_static(b"hello"));
                 let mut handles = Vec::new();
                 for _ in 0..2 {
-                    let delivered = deliver::send_unicast(server_id, frame(), &pool)
+                    let delivered = deliver::send_unicast(server_id, frame(), &pool, || None)
                         .await
                         .expect("a refused path is not an error before the wait ends");
                     let Delivered::Pending(handle) = delivered else {
@@ -694,7 +694,7 @@ mod tests {
                 pool.note_dial_failure(server_id).await;
 
                 let frame = WireFrame::fixture_raw(bytes::Bytes::from_static(b"hello"));
-                let error = deliver::send_unicast(server_id, frame, &pool)
+                let error = deliver::send_unicast(server_id, frame, &pool, || None)
                     .await
                     .expect_err("the cooldown refuses the send at once");
                 assert!(
@@ -730,7 +730,7 @@ mod tests {
                 pool.note_dial_failure(server_id).await;
 
                 let frame = WireFrame::fixture_raw(bytes::Bytes::from_static(b"hello"));
-                let delivered = deliver::send_unicast(server_id, frame, &pool)
+                let delivered = deliver::send_unicast(server_id, frame, &pool, || None)
                     .await
                     .expect("a warm connection is not refused by the cooldown");
                 let Delivered::Pending(handle) = delivered else {

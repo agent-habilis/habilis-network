@@ -183,6 +183,46 @@ mod tests {
         )
     }
 
+    /// A pinned connection rides multihop for a peer that the node could not dial directly, and
+    /// the members that forward for it pay for each minute it stays. It closes after the pinned
+    /// idle (60 s), which is shorter than the idle timeout of a direct connection.
+    #[test]
+    fn a_pinned_connection_is_closed_after_a_minute_idle_and_a_direct_one_is_not() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            time::pause();
+
+            advance_secs(61).await;
+            assert!(
+                connection.close_reason().is_none(),
+                "a direct connection keeps the idle timeout of the pool"
+            );
+
+            {
+                let mut conns = pool.inner.conns.lock().await;
+                let pooled = conns.get_mut(&server).expect("the connection is pooled");
+                pooled.pinned = true;
+                pooled.last_used = n0_future::time::Instant::now();
+            }
+            advance_secs(55).await;
+            assert!(
+                connection.close_reason().is_none(),
+                "inside the pinned idle the connection stays"
+            );
+            advance_secs(10).await;
+            assert!(
+                closed_as_idle(&connection),
+                "a pinned connection idle for a minute is closed as idle"
+            );
+
+            time::resume();
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
     #[test]
     fn a_pooled_connection_nothing_sends_on_is_closed_after_the_idle_timeout() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {

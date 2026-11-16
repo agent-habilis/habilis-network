@@ -91,6 +91,7 @@ impl SignalAdmission {
                 path_sink: None,
                 gossip: None,
                 closed_on_rung: HashMap::new(),
+                local: None,
             })),
             cap,
             // the flag is shared by the table and the gossip watch
@@ -482,10 +483,12 @@ impl SignalAdmission {
         }
         inner.slot(peer).conns.push(handle);
         inner.sync_gossip();
-        let evictions = if connection.alpn() == transport::UNICAST_ALPN {
+        let evictions = if connection.alpn() != transport::UNICAST_ALPN {
+            ceiling::Admission::default()
+        } else if connection.side().is_client() {
             inner.ceiling.register_quic(peer, Instant::now())
         } else {
-            ceiling::Admission::default()
+            inner.ceiling.register_inbound(peer, Instant::now())
         };
         let victims = inner.take_victims(&evictions);
         if !inner.sampler_running {
@@ -497,6 +500,28 @@ impl SignalAdmission {
             self.watch_for_eviction(connection.clone());
         }
         victims.end();
+    }
+
+    /// The endpoint that this table serves. The pin of a peer reaches its path selector.
+    pub(crate) fn set_local(&self, local: EndpointId) {
+        self.lock().local = Some(local);
+    }
+
+    /// How a new dial to `peer` goes, decided under the lock of the table so that parallel dials
+    /// cannot all take the last unit. `route` says whether multihop reaches the peer. A pinned peer
+    /// reaches the path selector of the endpoint before the dial starts.
+    pub(crate) fn plan_dial(&self, peer: EndpointId, route: bool) -> ceiling::DialPlan {
+        let mut inner = self.lock();
+        let plan = inner.ceiling.plan_dial(peer, route);
+        inner.sync_pin(peer);
+        plan
+    }
+
+    /// The dial of `peer` that [`Self::plan_dial`] planned ended without a connection.
+    pub(crate) fn release_dial(&self, peer: EndpointId) {
+        let mut inner = self.lock();
+        inner.ceiling.release_dial(peer);
+        inner.sync_pin(peer);
     }
 
     /// When `conn` closes, whatever the reason, the peer leaves the ledger unless it holds another

@@ -52,6 +52,9 @@ pub(crate) struct Inner {
     /// leaves the table at once, so this is what keeps the pair reading as the gossip rung while
     /// the event loop handles the loss of the link (see `SignalAdmission::selected_kind`).
     pub(crate) closed_on_rung: HashMap<EndpointId, Instant>,
+    /// The endpoint that this table serves, so that the pin of a peer reaches the path selector of
+    /// that endpoint. Set once by the pool.
+    pub(crate) local: Option<EndpointId>,
 }
 
 impl fmt::Debug for Inner {
@@ -64,6 +67,18 @@ impl fmt::Debug for Inner {
 }
 
 impl Inner {
+    /// Give the path selector of the endpoint the pin of `peer` as the ledger holds it now.
+    pub(crate) fn sync_pin(&self, peer: EndpointId) {
+        let Some(local) = self.local else {
+            return;
+        };
+        if self.ceiling.pinned(peer) {
+            habilis_network_iroh_transport_util::pin(local, peer);
+        } else {
+            habilis_network_iroh_transport_util::unpin(local, peer);
+        }
+    }
+
     pub(crate) fn slot(&mut self, peer: EndpointId) -> &mut Slot {
         self.slots.entry(peer).or_insert_with(Slot::new)
     }
@@ -114,6 +129,7 @@ impl Inner {
         let mut victims = Victims::default();
         for peer in &evictions.evict {
             self.ceiling.unregister_quic(*peer);
+            self.sync_pin(*peer);
             self.ceiling.unregister_session(*peer);
             let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
             self.we_evicted.note(*peer, Instant::now(), spread);
@@ -150,6 +166,7 @@ impl Inner {
         });
         if !alive {
             self.ceiling.unregister_quic(peer);
+            self.sync_pin(peer);
         }
     }
 
