@@ -2280,6 +2280,92 @@ mod tests {
         );
     }
 
+    /// **A pinned peer opens no session.** The pair rides multihop, and a session would take a unit
+    /// or evict at the cap, so no round is offered for it though a frame is held.
+    #[test]
+    fn a_pinned_peer_is_offered_no_session_though_a_frame_is_held() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::protocol::MeshId;
+                use crate::protocol::identity::Identity;
+                use crate::transport::ceiling::DialPlan;
+
+                let (endpoint, handle) = endpoint().await;
+                // Only the lower id offers unless a frame is held, and here the peer is the lower id.
+                // The id of our endpoint is random, so many seeds are tried.
+                let key = (1u16..=u16::MAX)
+                    .map(|seed| {
+                        let mut bytes = [0u8; 32];
+                        bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                        SecretKey::from_bytes(&bytes)
+                    })
+                    .find(|key| key.public() < endpoint.id())
+                    .expect("a key below ours");
+                let (server, server_hub) = endpoint_with(key).await;
+                let server_admission = SignalAdmission::new(8);
+                let router = serve(&server, &server_hub, &server_admission);
+
+                let gossip = irohgossip_Gossip::builder().spawn(endpoint.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = transport::MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let identity = Identity::generate();
+                let our_pubkey = identity.author_key();
+                let author = testing::nick("alice");
+                let sink = event::SilentSink;
+                let context = handler_ctx::HandlerCtx {
+                    sender: &sender,
+                    endpoint: &endpoint,
+                    mesh: &mesh,
+                    author: &author,
+                    identity: &identity,
+                    our_pubkey,
+                    max_connections: 16,
+                    rendezvous_id: testing::endpoint_id(9),
+                    external_msg_tx: None,
+                    sink: &sink,
+                };
+                let mut state = testing::fresh_state();
+                state.webrtc = Some(handle.clone());
+                state.local_udp_transport = UdpTransport::Absent;
+                state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
+                state
+                    .peer_endpoints
+                    .insert(testing::nick("bob"), server.addr());
+
+                // The ceiling is full and the peer is pinned to a multihop route.
+                state.webrtc_admission = SignalAdmission::new(1);
+                state.webrtc_admission.note_success(testing::endpoint_id(7));
+                assert_eq!(
+                    state.webrtc_admission.plan_dial(server.id(), true),
+                    DialPlan::Multihop,
+                    "the peer is pinned"
+                );
+                state.want_lane_session(server.id(), clock::Instant::now());
+                retry::retry_sessions(&mut state, &context);
+                assert!(
+                    !until(|| handle.has_session(&server.id())).await,
+                    "a pinned peer opens no session, though a frame is held for it"
+                );
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    0,
+                    "no round is offered for a pinned peer"
+                );
+
+                router.shutdown().await.expect("shutdown");
+                server.close().await;
+                endpoint.close().await;
+            },
+        );
+    }
+
     /// **A frame held on the higher-id node opens the session.** The lower id has no reason to
     /// offer, so the higher id offers when a frame is held for the peer, and the session attaches
     /// on both nodes.

@@ -326,7 +326,9 @@ pub(crate) async fn on_path_change(
                 }
                 tracing::info!(target: transport::LOG_TARGET, %peer, ?kind, detector = "watcher", "direct path lost; racing again");
             }
-            if let Some(addrs) = ladder.nudge {
+            // A pinned peer rides multihop only: a nudge dial would open a direct path to it.
+            let pinned = state.webrtc_admission.is_pinned(peer);
+            if let Some(addrs) = ladder.nudge.filter(|_| !pinned) {
                 // One dial carries what iroh may not know yet: the session's
                 // address moves a connection onto the session's path, and the
                 // multihop route is learned by no lookup while another path is

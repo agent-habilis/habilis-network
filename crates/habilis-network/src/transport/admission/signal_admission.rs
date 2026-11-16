@@ -502,6 +502,11 @@ impl SignalAdmission {
         victims.end();
     }
 
+    /// Whether `peer` is pinned to multihop: a dial planned it, or its pinned connection is open.
+    pub(crate) fn is_pinned(&self, peer: EndpointId) -> bool {
+        self.lock().ceiling.pinned(peer)
+    }
+
     /// Whether `peer` holds an extra: a connection or a session that took no unit (see
     /// [`ceiling::Ceiling::is_extra`]).
     pub(crate) fn is_extra(&self, peer: EndpointId) -> bool {
@@ -688,6 +693,11 @@ impl SignalAdmission {
         let quic_peers: Vec<EndpointId> = ceiling.quic_peers();
         let session_peers: Vec<EndpointId> = ceiling.session_peers();
         let pinned: Vec<EndpointId> = ceiling.pinned_connected();
+        let held: Vec<EndpointId> = quic_peers.iter().chain(&session_peers).copied().collect();
+        let extras: Vec<EndpointId> = held
+            .into_iter()
+            .filter(|peer| ceiling.is_extra(*peer))
+            .collect();
         LedgerView {
             local: inner.local,
             cap: self.cap,
@@ -698,6 +708,7 @@ impl SignalAdmission {
             quic_peers,
             session_peers,
             pinned,
+            extras,
         }
     }
 
