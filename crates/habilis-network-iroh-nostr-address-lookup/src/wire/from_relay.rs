@@ -57,10 +57,11 @@ pub(crate) fn parse(text: &str) -> FromRelay {
 mod tests {
     use super::{FromRelay, parse};
     use crate::event::{Event, Keys};
+    use crate::lane::Lane;
 
     #[test]
     fn relay_frames_parse() {
-        let event = Event::sign(&Keys::generate(), 1, &[1u8; 32], "c".into());
+        let event = Event::sign(Lane::Signal, &Keys::generate(), 1, &[1u8; 32], "c".into());
         let text = serde_json::json!(["EVENT", "s1", event]).to_string();
         assert!(
             matches!(parse(&text), FromRelay::Event { sub_id, event: got } if sub_id == "s1" && got == event),

@@ -19,6 +19,7 @@ use url::Url;
 
 use crate::event::{Event, Keys, kind_for};
 use crate::hub::{Hub, Lease};
+use crate::lane::Lane;
 use crate::wire::{self, Filter};
 
 use crate::hub::Health;
@@ -62,6 +63,7 @@ enum Command {
 /// A subscription to a set of tags on a ranked relay list.
 #[derive(Debug)]
 pub struct Pool {
+    lane: Lane,
     keys: Keys,
     commands: mpsc::UnboundedSender<Command>,
     connected: watch::Receiver<Vec<Url>>,
@@ -69,16 +71,18 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// Subscribe to `tags` on the first `width` healthy relays of `ranking`.
+    /// Subscribe to `tags` on `lane`, on the first `width` healthy relays of `ranking`.
     /// Events arrive on the returned receiver, each once, whichever relays
-    /// carried it.
+    /// carried it. The pool shares its sockets with the other pools of the lane,
+    /// not with those of the other lane.
     #[must_use]
     pub fn open(
+        lane: Lane,
         ranking: Vec<Url>,
         width: usize,
         tags: &[[u8; 32]],
     ) -> (Self, mpsc::UnboundedReceiver<Event>) {
-        let distinct_kinds: HashSet<u32> = tags.iter().map(kind_for).collect();
+        let distinct_kinds: HashSet<u32> = tags.iter().map(|tag| kind_for(lane, tag)).collect();
         let hex_tags: Vec<String> = tags.iter().map(hex::encode).collect();
         let filter = Filter {
             kinds: distinct_kinds.into_iter().collect(),
@@ -92,7 +96,7 @@ impl Pool {
             tracing::warn!(target: "habilis_network::lookup", "a pool with no relays reaches no one");
         }
         let chooser = Chooser {
-            hub: Hub::global(),
+            hub: Hub::of(lane),
             ranking,
             width,
             sub_id: hex::encode(subscription_bytes),
@@ -107,6 +111,7 @@ impl Pool {
         let own = keys.pubkey().to_owned();
         let task = task::spawn(run(chooser, own, command_rx, out_tx, connected_tx));
         let pool = Self {
+            lane,
             keys,
             commands,
             connected,
@@ -117,7 +122,7 @@ impl Pool {
 
     /// Sign `content` under `tag` and send it to every usable relay held.
     pub fn publish(&self, tag: &[u8; 32], content: String) {
-        let event = Event::sign(&self.keys, crate::unix_now(), tag, content);
+        let event = Event::sign(self.lane, &self.keys, crate::unix_now(), tag, content);
         let _ = self.commands.send(Command::Publish {
             tag: *tag,
             id: event.id.clone(),
@@ -273,7 +278,7 @@ impl Chooser {
         let expect_echo = self.subscribed.contains(tag);
         let now = Instant::now();
         for (url, lease) in &self.leases {
-            if lease.health().sendable() {
+            if lease.health().sendable(self.hub.lane()) {
                 lease.publish(frame.to_owned());
                 if expect_echo {
                     self.owed_echo.entry(url.clone()).or_insert(now);
@@ -417,7 +422,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        Chooser, ECHO_DEADLINE, Event, Filter, Hub, Keys, Pool, Receipt, SENT_CAPACITY,
+        Chooser, ECHO_DEADLINE, Event, Filter, Hub, Keys, Lane, Pool, Receipt, SENT_CAPACITY,
         SWALLOW_RECONNECT, SentIds,
     };
     use crate::test_relay::TestRelay;
@@ -450,7 +455,13 @@ mod tests {
         let own = ours.pubkey();
         let mut sent = SentIds::default();
 
-        let ours_sent = Event::sign(&ours, crate::unix_now(), &TAG, "ours".to_owned());
+        let ours_sent = Event::sign(
+            Lane::Signal,
+            &ours,
+            crate::unix_now(),
+            &TAG,
+            "ours".to_owned(),
+        );
         sent.insert(ours_sent.id.clone());
         assert_eq!(
             sent.receipt(own, &ours_sent),
@@ -468,7 +479,13 @@ mod tests {
             "a valid id with our key, that we did not send, is not an echo"
         );
 
-        let foreign = Event::sign(&theirs, crate::unix_now(), &TAG, "theirs".to_owned());
+        let foreign = Event::sign(
+            Lane::Signal,
+            &theirs,
+            crate::unix_now(),
+            &TAG,
+            "theirs".to_owned(),
+        );
         assert_eq!(
             sent.receipt(own, &foreign),
             Receipt::Foreign,
@@ -501,7 +518,7 @@ mod tests {
         let first = TestRelay::spawn().await.expect("spawn test relay");
         let second = TestRelay::spawn().await.expect("spawn test relay");
         first.refuse_events(Some("rate-limited: slow down"));
-        let (pool, _rx) = Pool::open(vec![first.url(), second.url()], 1, &[TAG]);
+        let (pool, _rx) = Pool::open(Lane::Signal, vec![first.url(), second.url()], 1, &[TAG]);
         eventually("connected to the first", || {
             connected_set(&pool) == vec![first.url()]
         })
@@ -575,7 +592,7 @@ mod tests {
     async fn a_relay_that_keeps_swallowing_is_dialed_again() {
         let relay = TestRelay::spawn().await.expect("spawn test relay");
         relay.swallow_events(true);
-        let (pool, _rx) = Pool::open(vec![relay.url()], 1, &[TAG]);
+        let (pool, _rx) = Pool::open(Lane::Signal, vec![relay.url()], 1, &[TAG]);
         eventually("connected", || connected_set(&pool) == vec![relay.url()]).await;
         let dials = relay.accepted();
         for _ in 0..60 {

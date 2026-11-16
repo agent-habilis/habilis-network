@@ -40,6 +40,7 @@ struct State {
     tamper_events: bool,
     hang_up_on_accept: bool,
     reqs: usize,
+    events: usize,
     next_client: u64,
     accepted: usize,
     clients: HashMap<u64, Client>,
@@ -163,6 +164,12 @@ impl TestRelay {
     #[must_use]
     pub fn reqs(&self) -> usize {
         self.state().reqs
+    }
+
+    /// Valid EVENT frames received since the relay started, refused ones too.
+    #[must_use]
+    pub fn events(&self) -> usize {
+        self.state().events
     }
 
     /// Connections open now.
@@ -298,6 +305,7 @@ fn handle(text: &str, id: u64, shared: &Mutex<State>) {
                 );
                 return;
             }
+            state.events += 1;
             if let Some(reason) = state.refuse_events.clone() {
                 reply(&state, serde_json::json!(["OK", event.id, false, reason]));
                 return;

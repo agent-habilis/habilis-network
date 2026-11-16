@@ -4,7 +4,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay;
-use habilis_network_iroh_nostr_address_lookup::{Event, Keys, Pool};
+use habilis_network_iroh_nostr_address_lookup::{
+    DATA_KIND_START, Event, Keys, LANE_KIND_SPAN, Lane, Pool,
+};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::{runtime, time};
 use url::Url;
@@ -58,11 +60,36 @@ async fn deliver(from: &Pool, to: &mut UnboundedReceiver<Event>, content: &str) 
     panic!("no delivery of {content:?}");
 }
 
+/// The lanes are apart by kind: a data pool hears the data events of its tag, and a signalling pool
+/// on the same tag, on the same relay, hears none of them.
+#[tokio::test]
+async fn a_data_event_reaches_data_pools_and_not_signalling_pools() {
+    let relays = relays(1).await;
+    let (alice, _alice_rx) = Pool::open(Lane::Data, urls(&relays), 1, &[TAG]);
+    let (bob, mut bob_rx) = Pool::open(Lane::Data, urls(&relays), 1, &[TAG]);
+    let (carol, mut carol_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
+    eventually("all connected", || {
+        [&alice, &bob, &carol]
+            .iter()
+            .all(|pool| connected_set(pool).len() == 1)
+    })
+    .await;
+
+    let got = deliver(&alice, &mut bob_rx, "payload").await;
+    assert!(
+        (DATA_KIND_START..DATA_KIND_START + LANE_KIND_SPAN).contains(&got.kind),
+        "the event is on a data kind: {}",
+        got.kind
+    );
+    let heard = time::timeout(Duration::from_millis(300), carol_rx.recv()).await;
+    assert!(heard.is_err(), "a signalling pool hears no data event");
+}
+
 #[tokio::test]
 async fn two_pools_deliver_to_each_other() {
     let relays = relays(1).await;
-    let (alice, mut alice_rx) = Pool::open(urls(&relays), 1, &[TAG]);
-    let (bob, mut bob_rx) = Pool::open(urls(&relays), 1, &[TAG]);
+    let (alice, mut alice_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
+    let (bob, mut bob_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
     eventually("both connected", || {
         connected_set(&alice).len() == 1 && connected_set(&bob).len() == 1
     })
@@ -75,8 +102,8 @@ async fn two_pools_deliver_to_each_other() {
 #[tokio::test]
 async fn an_event_carried_by_two_relays_arrives_once() {
     let relays = relays(2).await;
-    let (alice, _alice_rx) = Pool::open(urls(&relays), 2, &[TAG]);
-    let (bob, mut bob_rx) = Pool::open(urls(&relays), 2, &[TAG]);
+    let (alice, _alice_rx) = Pool::open(Lane::Signal, urls(&relays), 2, &[TAG]);
+    let (bob, mut bob_rx) = Pool::open(Lane::Signal, urls(&relays), 2, &[TAG]);
     eventually("both on two relays", || {
         connected_set(&alice).len() == 2 && connected_set(&bob).len() == 2
     })
@@ -98,8 +125,8 @@ async fn an_event_carried_by_two_relays_arrives_once() {
 async fn a_rate_limited_relay_is_passed_over_and_delivery_still_happens() {
     let relays = relays(3).await;
     relays[0].refuse_events(Some("rate-limited: slow down"));
-    let (alice, _alice_rx) = Pool::open(urls(&relays), 2, &[TAG]);
-    let (bob, mut bob_rx) = Pool::open(urls(&relays), 2, &[TAG]);
+    let (alice, _alice_rx) = Pool::open(Lane::Signal, urls(&relays), 2, &[TAG]);
+    let (bob, mut bob_rx) = Pool::open(Lane::Signal, urls(&relays), 2, &[TAG]);
     eventually("both connected", || {
         connected_set(&alice).len() == 2 && connected_set(&bob).len() == 2
     })
@@ -119,7 +146,7 @@ async fn a_rate_limited_relay_is_passed_over_and_delivery_still_happens() {
 async fn a_retired_relay_is_never_dialed_again() {
     let relays = relays(2).await;
     relays[0].refuse_subs(Some("blocked: not welcome"));
-    let (first, _first_rx) = Pool::open(urls(&relays), 1, &[TAG]);
+    let (first, _first_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
     eventually("first pool moves to relay 1", || {
         connected_set(&first) == vec![relays[1].url()]
     })
@@ -130,7 +157,7 @@ async fn a_retired_relay_is_never_dialed_again() {
     drop(first);
     time::sleep(Duration::from_millis(100)).await;
 
-    let (second, _second_rx) = Pool::open(urls(&relays), 1, &[TAG]);
+    let (second, _second_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
     eventually("second pool on relay 1", || {
         connected_set(&second) == vec![relays[1].url()]
     })
@@ -146,8 +173,8 @@ async fn a_retired_relay_is_never_dialed_again() {
 #[tokio::test]
 async fn a_dropped_connection_reconnects_and_resubscribes() {
     let relays = relays(1).await;
-    let (alice, _alice_rx) = Pool::open(urls(&relays), 1, &[TAG]);
-    let (bob, mut bob_rx) = Pool::open(urls(&relays), 1, &[TAG]);
+    let (alice, _alice_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
+    let (bob, mut bob_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
     eventually("both connected", || {
         connected_set(&alice).len() == 1 && connected_set(&bob).len() == 1
     })
@@ -168,7 +195,7 @@ async fn two_retired_relays_of_three_are_replaced_by_the_next_in_rank() {
     let relays = relays(5).await;
     relays[0].refuse_subs(Some("auth-required: NIP-42"));
     relays[1].refuse_subs(Some("pow: difficulty 20"));
-    let (pool, _rx) = Pool::open(urls(&relays), 3, &[TAG]);
+    let (pool, _rx) = Pool::open(Lane::Signal, urls(&relays), 3, &[TAG]);
     eventually("ranks 3, 4 and 5 held", || {
         connected_set(&pool) == vec![relays[2].url(), relays[3].url(), relays[4].url()]
     })
@@ -178,7 +205,7 @@ async fn two_retired_relays_of_three_are_replaced_by_the_next_in_rank() {
 #[tokio::test]
 async fn width_opens_and_closes_sockets_in_rank_order() {
     let relays = relays(3).await;
-    let (pool, _rx) = Pool::open(urls(&relays), 3, &[TAG]);
+    let (pool, _rx) = Pool::open(Lane::Signal, urls(&relays), 3, &[TAG]);
     eventually("three connected", || connected_set(&pool).len() == 3).await;
 
     pool.set_width(1);
@@ -197,8 +224,8 @@ async fn width_opens_and_closes_sockets_in_rank_order() {
 #[tokio::test]
 async fn two_pools_in_one_process_share_one_socket_per_relay() {
     let relays = relays(1).await;
-    let (alice, _a) = Pool::open(urls(&relays), 1, &[TAG]);
-    let (bob, _b) = Pool::open(urls(&relays), 1, &[[8u8; 32]]);
+    let (alice, _a) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
+    let (bob, _b) = Pool::open(Lane::Signal, urls(&relays), 1, &[[8u8; 32]]);
     eventually("both connected", || {
         connected_set(&alice).len() == 1 && connected_set(&bob).len() == 1
     })
@@ -243,12 +270,12 @@ fn a_pool_survives_the_runtime_that_first_dialed_its_relay() {
     let first_runtime = runtime::Runtime::new().expect("a tokio runtime");
     let second_runtime = runtime::Runtime::new().expect("a tokio runtime");
     let (first, _first_rx) =
-        first_runtime.block_on(async { Pool::open(ranking.clone(), 1, &[TAG]) });
+        first_runtime.block_on(async { Pool::open(Lane::Signal, ranking.clone(), 1, &[TAG]) });
     first_runtime.block_on(eventually("first connected", || {
         connected_set(&first).len() == 1
     }));
     let (bob, mut bob_rx) =
-        second_runtime.block_on(async { Pool::open(ranking.clone(), 1, &[TAG]) });
+        second_runtime.block_on(async { Pool::open(Lane::Signal, ranking.clone(), 1, &[TAG]) });
     second_runtime.block_on(eventually("bob connected", || {
         connected_set(&bob).len() == 1
     }));
@@ -257,7 +284,7 @@ fn a_pool_survives_the_runtime_that_first_dialed_its_relay() {
     drop(first_runtime);
 
     second_runtime.block_on(async {
-        let (alice, _alice_rx) = Pool::open(ranking, 1, &[TAG]);
+        let (alice, _alice_rx) = Pool::open(Lane::Signal, ranking, 1, &[TAG]);
         deliver_within(10, &alice, &mut bob_rx, "after the first runtime").await;
     });
 }
@@ -268,8 +295,8 @@ fn a_pool_survives_the_runtime_that_first_dialed_its_relay() {
 async fn a_relay_that_swallows_events_is_passed_over() {
     let relays = relays(2).await;
     relays[0].swallow_events(true);
-    let (alice, _alice_rx) = Pool::open(urls(&relays), 1, &[TAG]);
-    let (bob, mut bob_rx) = Pool::open(urls(&relays), 1, &[TAG]);
+    let (alice, _alice_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
+    let (bob, mut bob_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
     eventually("both connected", || {
         connected_set(&alice).len() == 1 && connected_set(&bob).len() == 1
     })
@@ -298,8 +325,8 @@ async fn a_relay_that_swallows_events_is_passed_over() {
 async fn a_tampered_copy_is_dropped() {
     let relays = relays(1).await;
     relays[0].tamper_events(true);
-    let (alice, _alice_rx) = Pool::open(urls(&relays), 1, &[TAG]);
-    let (bob, mut bob_rx) = Pool::open(urls(&relays), 1, &[TAG]);
+    let (alice, _alice_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
+    let (bob, mut bob_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
     eventually("both connected", || {
         connected_set(&alice).len() == 1 && connected_set(&bob).len() == 1
     })
@@ -320,14 +347,20 @@ async fn a_tampered_copy_is_dropped() {
 #[tokio::test]
 async fn an_event_with_a_valid_id_and_a_bad_signature_is_delivered() {
     let relays = relays(1).await;
-    let (bob, mut bob_rx) = Pool::open(urls(&relays), 1, &[TAG]);
+    let (bob, mut bob_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
     eventually("bob connected", || connected_set(&bob).len() == 1).await;
     eventually("bob's subscription arrived", || relays[0].reqs() >= 1).await;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("the clock is after the epoch")
         .as_secs();
-    let mut event = Event::sign(&Keys::generate(), now, &TAG, "unsigned".to_owned());
+    let mut event = Event::sign(
+        Lane::Signal,
+        &Keys::generate(),
+        now,
+        &TAG,
+        "unsigned".to_owned(),
+    );
     event.signature = "00".repeat(64);
     relays[0].inject(&event);
     let got = time::timeout(Duration::from_secs(2), bob_rx.recv())
@@ -343,7 +376,7 @@ async fn an_event_with_a_valid_id_and_a_bad_signature_is_delivered() {
 async fn a_relay_that_hangs_up_is_not_hammered() {
     let relays = relays(1).await;
     relays[0].hang_up_on_accept(true);
-    let (_pool, _rx) = Pool::open(urls(&relays), 1, &[TAG]);
+    let (_pool, _rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
     time::sleep(Duration::from_secs(8)).await;
     // Delays of 1, 2 and 4 s put dials at about 0, 1, 3 and 7 s.
     let dials = relays[0].accepted();
@@ -356,14 +389,20 @@ async fn a_relay_that_hangs_up_is_not_hammered() {
 #[tokio::test]
 async fn a_peer_whose_clock_is_behind_still_reaches_us() {
     let relays = relays(1).await;
-    let (bob, mut bob_rx) = Pool::open(urls(&relays), 1, &[TAG]);
+    let (bob, mut bob_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
     eventually("bob connected", || connected_set(&bob).len() == 1).await;
     eventually("bob's subscription arrived", || relays[0].reqs() >= 1).await;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("the clock is after the epoch")
         .as_secs();
-    let late = Event::sign(&Keys::generate(), now - 5, &TAG, "late".to_owned());
+    let late = Event::sign(
+        Lane::Signal,
+        &Keys::generate(),
+        now - 5,
+        &TAG,
+        "late".to_owned(),
+    );
     relays[0].inject(&late);
     let got = time::timeout(Duration::from_secs(2), bob_rx.recv())
         .await
@@ -377,7 +416,7 @@ async fn a_peer_whose_clock_is_behind_still_reaches_us() {
 #[tokio::test]
 async fn an_oversized_frame_drops_the_socket() {
     let relays = relays(1).await;
-    let (pool, _rx) = Pool::open(urls(&relays), 1, &[TAG]);
+    let (pool, _rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
     eventually("connected", || connected_set(&pool).len() == 1).await;
     let before = relays[0].accepted();
     relays[0].send_raw(&format!("[\"NOTICE\",\"{}\"]", "x".repeat(200 * 1024)));
@@ -393,7 +432,7 @@ async fn an_oversized_frame_drops_the_socket() {
 async fn an_unexplained_closed_backs_off() {
     let relays = relays(1).await;
     relays[0].refuse_subs(Some("error: too many subscriptions"));
-    let (_pool, _rx) = Pool::open(urls(&relays), 1, &[TAG]);
+    let (_pool, _rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
     time::sleep(Duration::from_secs(17)).await;
     // The first REQ, then retries 5 and 10 s apart (at 5 and 15 s).
     let reqs = relays[0].reqs();
@@ -406,8 +445,8 @@ async fn an_unexplained_closed_backs_off() {
 #[tokio::test]
 async fn a_publish_made_while_dialing_is_sent() {
     let relays = relays(1).await;
-    let (_bob, mut bob_rx) = Pool::open(urls(&relays), 1, &[TAG]);
-    let (alice, _alice_rx) = Pool::open(urls(&relays), 1, &[TAG]);
+    let (_bob, mut bob_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
+    let (alice, _alice_rx) = Pool::open(Lane::Signal, urls(&relays), 1, &[TAG]);
     alice.publish(&TAG, "early".to_owned());
     let got = time::timeout(Duration::from_secs(3), bob_rx.recv())
         .await

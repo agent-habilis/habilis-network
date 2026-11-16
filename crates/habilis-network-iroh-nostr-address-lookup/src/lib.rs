@@ -10,12 +10,12 @@
 //! members of that tag publish. The doc test compiles it but does not run it.
 //!
 //! ```no_run
-//! use habilis_network_iroh_nostr_address_lookup::Pool;
+//! use habilis_network_iroh_nostr_address_lookup::{Lane, Pool};
 //!
 //! # async fn demo() {
 //! let relays = vec!["wss://relay.example".parse().expect("a relay URL")];
 //! let tag = [7u8; 32];
-//! let (pool, mut events) = Pool::open(relays, 1, &[tag]);
+//! let (pool, mut events) = Pool::open(Lane::Signal, relays, 1, &[tag]);
 //! pool.publish(&tag, "hello".to_owned());
 //! if let Some(event) = events.recv().await {
 //!     println!("{}", event.content);
@@ -27,6 +27,7 @@ use n0_future::time;
 mod event;
 mod event_error;
 mod hub;
+mod lane;
 mod pool;
 mod wire;
 #[cfg(not(target_arch = "wasm32"))]
@@ -41,6 +42,7 @@ pub mod test_relay;
 
 pub use event::{Event, Keys, TAG, kind_for};
 pub use event_error::EventError;
+pub use lane::{DATA_KIND_START, LANE_KIND_SPAN, Lane, SIGNAL_KIND_START};
 pub use pool::Pool;
 
 /// Seconds since the Unix epoch, on the portable clock (std on a host,

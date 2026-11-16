@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use habilis_network_iroh_nostr_address_lookup::Pool;
+use habilis_network_iroh_nostr_address_lookup::{Lane, Pool};
 use url::Url;
 
 use futures_util::future;
@@ -156,8 +156,8 @@ enum Outcome {
 
 async fn probe(url: Url) -> Outcome {
     let tag: [u8; 32] = rand::random();
-    let (sender, _sender_rx) = Pool::open(vec![url.clone()], 1, &[tag]);
-    let (_receiver, mut receiver_rx) = Pool::open(vec![url], 1, &[tag]);
+    let (sender, _sender_rx) = Pool::open(Lane::Signal, vec![url.clone()], 1, &[tag]);
+    let (_receiver, mut receiver_rx) = Pool::open(Lane::Signal, vec![url], 1, &[tag]);
     let connected = time::timeout(CONNECT_BUDGET, async {
         while sender.connected().next().is_none() {
             time::sleep(Duration::from_millis(50)).await;
@@ -201,7 +201,7 @@ async fn cadence(url: Url) {
     let tag: [u8; 32] = rand::random();
     let mut pools = Vec::new();
     for _ in 0..NODES {
-        pools.push(Pool::open(vec![url.clone()], 1, &[tag]));
+        pools.push(Pool::open(Lane::Signal, vec![url.clone()], 1, &[tag]));
     }
     // One process shares one socket per relay, which is not what ten real
     // nodes look like to the relay's per-connection limits, but it is what

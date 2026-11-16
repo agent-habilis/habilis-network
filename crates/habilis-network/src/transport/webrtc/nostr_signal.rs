@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::protocol::nostr::{self, NostrKeys, Opener, Signal, SignalKind};
 use anyhow::{Context as _, Result};
-use habilis_network_iroh_nostr_address_lookup::Pool;
+use habilis_network_iroh_nostr_address_lookup::{Lane, Pool};
 use habilis_network_iroh_webrtc_transport::{SignalEnvelope, WebRtcHandle};
 use iroh::address_lookup::memory::MemoryLookup;
 use iroh::{Endpoint, EndpointId, SecretKey};
@@ -172,6 +172,7 @@ impl NostrSignal {
         let local = parts.endpoint.id();
         let secret = parts.endpoint.secret_key().clone();
         let (pool, events) = Pool::open(
+            Lane::Signal,
             parts.relays,
             JOINING_WIDTH,
             &[parts.keys.room_tag(), parts.keys.self_tag(&local)],

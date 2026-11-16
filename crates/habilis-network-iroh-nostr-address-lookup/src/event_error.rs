@@ -10,10 +10,10 @@ use std::fmt;
 /// An event whose content changed after it was signed no longer matches its id.
 ///
 /// ```
-/// use habilis_network_iroh_nostr_address_lookup::{Event, EventError, Keys};
+/// use habilis_network_iroh_nostr_address_lookup::{Event, EventError, Keys, Lane};
 ///
 /// let keys = Keys::generate();
-/// let mut event = Event::sign(&keys, 1_700_000_000, &[9u8; 32], "hello".to_owned());
+/// let mut event = Event::sign(Lane::Signal, &keys, 1_700_000_000, &[9u8; 32], "hello".to_owned());
 /// event.content = "bye".to_owned();
 /// assert!(matches!(event.verify_id(), Err(EventError::IdMismatch)));
 /// ```

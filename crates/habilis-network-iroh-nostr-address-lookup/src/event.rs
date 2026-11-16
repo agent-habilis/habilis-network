@@ -8,20 +8,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::event_error::EventError;
+use crate::lane::{LANE_KIND_SPAN, Lane};
 
 /// The tag name every event and filter uses. Trystero uses the same one.
 pub const TAG: &str = "x";
 
-/// Ephemeral kinds are 20000..30000: relays forward them and store nothing.
-const EPHEMERAL_BASE: u32 = 20_000;
-const EPHEMERAL_SPAN: u32 = 10_000;
-
-/// The ephemeral kind for a 32-byte tag. Spreading tags roughly evenly over the range, as
-/// Trystero does, keeps one busy tag from sharing a kind with every other one
-/// on a relay that indexes by kind.
+/// The ephemeral kind for a 32-byte tag on a lane. The kinds of a lane are spread roughly evenly
+/// over its range, as Trystero does over the whole one, so one busy tag does not share a kind
+/// with every other one on a relay that indexes by kind.
 #[must_use]
-pub fn kind_for(tag: &[u8; 32]) -> u32 {
-    EPHEMERAL_BASE + u32::from(u16::from_be_bytes([tag[0], tag[1]])) % EPHEMERAL_SPAN
+pub fn kind_for(lane: Lane, tag: &[u8; 32]) -> u32 {
+    lane.kind_start() + u32::from(u16::from_be_bytes([tag[0], tag[1]])) % LANE_KIND_SPAN
 }
 
 /// A signing key for one session. It proves nothing about who we are: it only
@@ -96,14 +93,14 @@ pub struct Event {
 }
 
 impl Event {
-    /// Build and sign an event carrying `content` under one `x` tag.
+    /// Build and sign an event on `lane` carrying `content` under one `x` tag.
     ///
     /// # Panics
     /// Never in practice: BIP-340 signing fails only on a zero nonce, which
     /// the auxiliary randomness rules out.
     #[must_use]
-    pub fn sign(keys: &Keys, created_at: u64, tag: &[u8; 32], content: String) -> Self {
-        let kind = kind_for(tag);
+    pub fn sign(lane: Lane, keys: &Keys, created_at: u64, tag: &[u8; 32], content: String) -> Self {
+        let kind = kind_for(lane, tag);
         let tags = vec![vec![TAG.to_owned(), hex::encode(tag)]];
         let id = compute_id(keys.pubkey(), created_at, kind, &tags, &content);
         let signature = keys
@@ -131,7 +128,7 @@ impl Event {
         tag: &[u8; 32],
         content: String,
     ) -> Self {
-        let kind = kind_for(tag);
+        let kind = kind_for(Lane::Signal, tag);
         let tags = vec![vec![TAG.to_owned(), hex::encode(tag)]];
         let id = compute_id(pubkey, created_at, kind, &tags, &content);
         Self {
@@ -230,6 +227,7 @@ fn serialize(
 #[cfg(test)]
 mod tests {
     use super::{Event, Keys, kind_for, serialize};
+    use crate::lane::{DATA_KIND_START, LANE_KIND_SPAN, Lane, SIGNAL_KIND_START};
 
     /// BIP-340 test vector 0 (github.com/bitcoin/bips, bip-0340/test-vectors.csv).
     #[test]
@@ -269,7 +267,13 @@ mod tests {
     #[test]
     fn a_signed_event_verifies_and_a_tampered_one_does_not() {
         let keys = Keys::generate();
-        let event = Event::sign(&keys, 1_700_000_000, &[9u8; 32], "hello".to_owned());
+        let event = Event::sign(
+            Lane::Signal,
+            &keys,
+            1_700_000_000,
+            &[9u8; 32],
+            "hello".to_owned(),
+        );
         event.verify().expect("a valid event");
         assert_eq!(
             event.tag(),
@@ -295,7 +299,13 @@ mod tests {
     #[test]
     fn verify_id_accepts_a_bad_signature_and_refuses_a_changed_content() {
         let keys = Keys::generate();
-        let event = Event::sign(&keys, 1_700_000_000, &[9u8; 32], "hello".to_owned());
+        let event = Event::sign(
+            Lane::Signal,
+            &keys,
+            1_700_000_000,
+            &[9u8; 32],
+            "hello".to_owned(),
+        );
 
         let mut bad_signature = event.clone();
         bad_signature.signature = "00".repeat(64);
@@ -316,21 +326,81 @@ mod tests {
     }
 
     #[test]
-    fn kinds_are_ephemeral_and_deterministic() {
-        for tag in [
-            [0u8; 32],
-            [0xff; 32],
-            [
-                0x27, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0,
-            ],
-        ] {
-            let kind = kind_for(&tag);
-            assert!((20_000..30_000).contains(&kind), "{kind}");
-            assert_eq!(kind, kind_for(&tag), "the same tag gives the same kind");
+    fn an_event_is_signed_on_the_kind_of_its_lane() {
+        let keys = Keys::generate();
+        for lane in [Lane::Signal, Lane::Data] {
+            let event = Event::sign(lane, &keys, 1_700_000_000, &[9u8; 32], "x".to_owned());
+            assert_eq!(event.kind, kind_for(lane, &[9u8; 32]), "{lane:?}");
+            event.verify().expect("a valid event");
         }
-        assert_eq!(kind_for(&[0u8; 32]), 20_000, "tag zero is the base kind");
-        // 0xffff = 65535 → 65535 % 10000 = 5535.
-        assert_eq!(kind_for(&[0xff; 32]), 25_535, "the largest prefix wraps");
+    }
+
+    #[test]
+    fn kinds_are_ephemeral_and_deterministic() {
+        for lane in [Lane::Signal, Lane::Data] {
+            let start = lane.kind_start();
+            for tag in [
+                [0u8; 32],
+                [0xff; 32],
+                [
+                    0x27, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                ],
+            ] {
+                let kind = kind_for(lane, &tag);
+                assert!(
+                    (start..start + LANE_KIND_SPAN).contains(&kind),
+                    "{lane:?}: {kind}"
+                );
+                assert_eq!(
+                    kind,
+                    kind_for(lane, &tag),
+                    "the same tag gives the same kind"
+                );
+            }
+        }
+    }
+
+    /// The kinds are goldens: the relay server pins the same ranges.
+    #[test]
+    fn each_lane_has_its_kind_range() {
+        assert_eq!(
+            kind_for(Lane::Signal, &[0u8; 32]),
+            20_000,
+            "tag zero is the base kind of signalling"
+        );
+        assert_eq!(
+            kind_for(Lane::Data, &[0u8; 32]),
+            25_000,
+            "tag zero is the base kind of data"
+        );
+        // 0xffff = 65535 -> 65535 % 5000 = 535.
+        assert_eq!(
+            kind_for(Lane::Signal, &[0xff; 32]),
+            20_535,
+            "the largest prefix wraps inside signalling"
+        );
+        assert_eq!(
+            kind_for(Lane::Data, &[0xff; 32]),
+            25_535,
+            "the largest prefix wraps inside data"
+        );
+    }
+
+    /// The relay server pins `DATA_KIND_START` too: a change here is a change there.
+    #[test]
+    fn the_data_lane_starts_at_25000() {
+        assert_eq!(DATA_KIND_START, 25_000, "the first data kind");
+        assert_eq!(SIGNAL_KIND_START, 20_000, "the first signalling kind");
+        assert_eq!(
+            SIGNAL_KIND_START + LANE_KIND_SPAN,
+            DATA_KIND_START,
+            "signalling ends where data starts"
+        );
+        assert_eq!(
+            DATA_KIND_START + LANE_KIND_SPAN,
+            30_000,
+            "data ends at the end of the ephemeral range"
+        );
     }
 }

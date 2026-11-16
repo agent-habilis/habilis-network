@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, watch};
 use url::Url;
 
 use crate::event::Event;
+use crate::lane::Lane;
 use crate::wire::{self, Filter, FromRelay, Verdict};
 use crate::{unix_now, ws};
 
@@ -48,6 +49,18 @@ const RATE_LIMIT: Backoff = Backoff::new(
     Duration::from_mins(15),
 );
 const RATE_LIMIT_CALM: Duration = Duration::from_mins(5);
+
+/// The data lane waits seconds after a limit, not minutes: a minute of silence is a minute of
+/// payload lost, and its path state (QUIC) is what tells a dead path from a slow one.
+const DATA_RATE_LIMIT: Backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(10));
+
+/// The rate-limit waits of `lane`.
+fn rate_limit(lane: Lane) -> Backoff {
+    match lane {
+        Lane::Signal => RATE_LIMIT,
+        Lane::Data => DATA_RATE_LIMIT,
+    }
+}
 /// A REQ the relay closed for no stated reason is sent again after 5 s,
 /// doubling up to 5 min.
 const RESUBSCRIBE: Backoff = Backoff::new(Duration::from_secs(5), Duration::from_mins(5));
@@ -76,11 +89,14 @@ impl Health {
         matches!(self, Self::Connecting | Self::Up)
     }
 
-    /// May be sent a publish. A limited relay past its wait takes one as a
-    /// probe: the `OK true` it earns is its only way back to `Up`.
-    pub(crate) fn sendable(self) -> bool {
+    /// May be sent a publish on `lane`. A limited relay past its wait takes one as a
+    /// probe: the `OK true` it earns is its only way back to `Up`. A socket that still
+    /// dials takes a signal, so the first announce of a node is not lost, and drops a
+    /// datagram batch: it would go out in a burst the relay limits at once.
+    pub(crate) fn sendable(self, lane: Lane) -> bool {
         match self {
-            Self::Connecting | Self::Up => true,
+            Self::Connecting => lane == Lane::Signal,
+            Self::Up => true,
             Self::Limited(until) => Instant::now() >= until,
             Self::Down | Self::Retired => false,
         }
@@ -244,9 +260,10 @@ struct Conn {
     health: watch::Receiver<Health>,
 }
 
-/// The process-wide table of relay connections.
-#[derive(Debug, Default)]
+/// The process-wide table of relay connections of one lane.
+#[derive(Debug)]
 pub(crate) struct Hub {
+    lane: Lane,
     conns: Mutex<HashMap<String, Weak<Conn>>>,
     retired: Mutex<Retirements>,
     /// Bumped on any relay's health change, so pools choose again.
@@ -254,18 +271,48 @@ pub(crate) struct Hub {
 }
 
 impl Hub {
+    fn new(lane: Lane) -> Self {
+        Self {
+            lane,
+            conns: Mutex::default(),
+            retired: Mutex::default(),
+            changed: OnceLock::new(),
+        }
+    }
+
+    /// The hub of the signalling lane.
     pub(crate) fn global() -> &'static Hub {
         static HUB: OnceLock<Hub> = OnceLock::new();
-        HUB.get_or_init(Hub::default)
+        HUB.get_or_init(|| Hub::new(Lane::Signal))
+    }
+
+    /// The hub of the data lane: its own sockets, health and rate-limit state,
+    /// so a relay that limits our data does not stop our signals.
+    pub(crate) fn data() -> &'static Hub {
+        static HUB: OnceLock<Hub> = OnceLock::new();
+        HUB.get_or_init(|| Hub::new(Lane::Data))
+    }
+
+    /// The lane this hub carries.
+    pub(crate) fn lane(&self) -> Lane {
+        self.lane
+    }
+
+    /// The hub of `lane`.
+    pub(crate) fn of(lane: Lane) -> &'static Hub {
+        match lane {
+            Lane::Signal => Self::global(),
+            Lane::Data => Self::data(),
+        }
     }
 
     /// A hub whose first retirement wait and cap are these, so a test can see a
     /// whole retire, retry and refuse cycle in milliseconds.
     #[cfg(all(test, feature = "test-relay"))]
-    fn with_retirement(first: Duration, max: Duration) -> Self {
+    fn with_retirement(lane: Lane, first: Duration, max: Duration) -> Self {
         Self {
             retired: Mutex::new(Retirements::new(first, max)),
-            ..Self::default()
+            ..Self::new(lane)
         }
     }
 
@@ -393,12 +440,12 @@ async fn run(
     health: watch::Sender<Health>,
 ) {
     let mut task = Task {
+        rate_limit: rate_limit(hub.lane()),
         hub,
         url,
         commands,
         health,
         subs: HashMap::new(),
-        rate_limit: RATE_LIMIT,
         last_limited: None,
         limited_until: None,
         resubscribe: RESUBSCRIBE,
@@ -545,7 +592,15 @@ impl Task {
                 wire::close(&sub_id)
             }
             Command::Publish(frame) => {
-                if !queued && !self.health.borrow().sendable() {
+                let lane = self.hub.lane();
+                // What queued while the socket dialed goes out for signalling, and is dropped
+                // for data (see `Health::sendable`).
+                let held_back = if queued {
+                    lane == Lane::Data
+                } else {
+                    !self.health.borrow().sendable(lane)
+                };
+                if held_back {
                     return Ok(());
                 }
                 frame
@@ -705,6 +760,7 @@ mod flow_tests {
 
     use super::{Health, Hub, Lease};
     use crate::event::{Event, Keys};
+    use crate::lane::Lane;
     use crate::test_relay::TestRelay;
     use crate::wire::{self, Filter};
 
@@ -714,6 +770,7 @@ mod flow_tests {
 
     fn hub() -> &'static Hub {
         Box::leak(Box::new(Hub::with_retirement(
+            Lane::Signal,
             FIRST,
             Duration::from_secs(60),
         )))
@@ -724,6 +781,12 @@ mod flow_tests {
             kinds: vec![20_001],
             tags: vec!["ab".into()],
         }
+    }
+
+    /// A signed event on `lane`.
+    fn an_event(lane: Lane) -> Event {
+        let keys = Keys::generate();
+        Event::sign(lane, &keys, crate::unix_now(), &[1u8; 32], "x".into())
     }
 
     fn blocked(hub: &Hub, url: &Url) -> bool {
@@ -798,7 +861,7 @@ mod flow_tests {
             .lease(&url, "one".into(), filter(), events)
             .expect("a lease");
         until("the relay is up", || lease.health() == Health::Up).await;
-        let signed = Event::sign(&Keys::generate(), crate::unix_now(), &[1u8; 32], "x".into());
+        let signed = an_event(Lane::Signal);
         lease.publish(wire::event(&signed));
         until("the refusal limits the relay", || {
             matches!(lease.health(), Health::Limited(_))
@@ -816,6 +879,110 @@ mod flow_tests {
             "the reconnect did not forgive the rate limit, but made it {:?}",
             lease.health()
         );
+    }
+
+    fn data_hub() -> &'static Hub {
+        Box::leak(Box::new(Hub::with_retirement(
+            Lane::Data,
+            FIRST,
+            Duration::from_secs(60),
+        )))
+    }
+
+    /// How many events a relay receives when `hub` is told to publish before its socket is up.
+    async fn accepted_from_a_publish_before_up(hub: &'static Hub) -> usize {
+        let relay = TestRelay::spawn().await.expect("spawn test relay");
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let lease: Lease = hub
+            .lease(&relay.url(), "one".into(), filter(), events)
+            .expect("a lease");
+        let signed = an_event(hub.lane());
+        lease.publish(wire::event(&signed));
+        until("the relay is up", || lease.health() == Health::Up).await;
+        sleep(Duration::from_millis(200)).await;
+        relay.events()
+    }
+
+    /// The first announce of a node queues while its socket dials and goes out at once. A data
+    /// event that queued the same way is dropped: no burst after a dial.
+    #[tokio::test]
+    async fn a_publish_before_the_socket_is_up_goes_out_on_signalling_only() {
+        assert_eq!(
+            accepted_from_a_publish_before_up(hub()).await,
+            1,
+            "signalling sends what queued during the dial"
+        );
+        assert_eq!(
+            accepted_from_a_publish_before_up(data_hub()).await,
+            0,
+            "data drops what queued during the dial"
+        );
+    }
+
+    /// The lanes have their own sockets: a relay that limits what the data lane sends leaves the
+    /// signalling socket to the same relay up.
+    #[tokio::test]
+    async fn a_data_rate_limit_leaves_signalling_up() {
+        let (signalling, data) = (hub(), data_hub());
+        let relay = TestRelay::spawn().await.expect("spawn test relay");
+        relay.refuse_events(Some("rate-limited: slow down"));
+        let url = relay.url();
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let signal_lease: Lease = signalling
+            .lease(&url, "one".into(), filter(), events.clone())
+            .expect("a signalling lease");
+        let data_lease: Lease = data
+            .lease(&url, "two".into(), filter(), events)
+            .expect("a data lease");
+        until("both sockets are up", || {
+            signal_lease.health() == Health::Up && data_lease.health() == Health::Up
+        })
+        .await;
+        let signed = an_event(Lane::Data);
+        data_lease.publish(wire::event(&signed));
+        until("the refusal limits the data socket", || {
+            matches!(data_lease.health(), Health::Limited(_))
+        })
+        .await;
+        assert_eq!(
+            signal_lease.health(),
+            Health::Up,
+            "the signalling socket is not limited"
+        );
+    }
+
+    /// The data lane is back in seconds: after a rate limit its wait is short, and the first
+    /// event after the wait is the probe that earns the relay `Up` again.
+    #[tokio::test]
+    async fn the_data_lane_recovers_from_a_rate_limit_in_seconds() {
+        let relay = TestRelay::spawn().await.expect("spawn test relay");
+        relay.refuse_events(Some("rate-limited: slow down"));
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let lease: Lease = data_hub()
+            .lease(&relay.url(), "one".into(), filter(), events)
+            .expect("a lease");
+        until("the relay is up", || lease.health() == Health::Up).await;
+        let signed = an_event(Lane::Data);
+        lease.publish(wire::event(&signed));
+        until("the refusal limits the relay", || {
+            matches!(lease.health(), Health::Limited(_))
+        })
+        .await;
+        let Health::Limited(until_instant) = lease.health() else {
+            panic!("the lease is limited");
+        };
+        assert!(
+            until_instant.saturating_duration_since(Instant::now()) <= Duration::from_secs(10),
+            "the wait is seconds"
+        );
+
+        relay.refuse_events(None);
+        until("the wait ends", || Instant::now() >= until_instant).await;
+        lease.publish(wire::event(&signed));
+        until("the probe earns the relay Up again", || {
+            lease.health() == Health::Up
+        })
+        .await;
     }
 
     /// A relay that serves us after a retry (it finishes the REQ) is forgiven:
@@ -855,8 +1022,50 @@ mod tests {
     use url::Url;
 
     use super::{
-        Backoff, Health, RETIRE_FIRST, RETIRE_MAX, Refusal, Retirements, STALE_WARN_EVERY, refusal,
+        Backoff, Health, RETIRE_FIRST, RETIRE_MAX, Refusal, Retirements, STALE_WARN_EVERY,
+        rate_limit, refusal,
     };
+    use crate::lane::Lane;
+
+    /// Signalling sends while its socket still dials, so a node's first announce is not lost.
+    /// Data drops: a burst after the dial would meet the relay's limit at once.
+    #[test]
+    fn only_the_signal_lane_sends_while_connecting() {
+        let past = Instant::now();
+        let future = past + Duration::from_secs(60);
+        for (health, signal, data, name) in [
+            (Health::Connecting, true, false, "connecting"),
+            (Health::Up, true, true, "up"),
+            (Health::Down, false, false, "down"),
+            (Health::Retired, false, false, "retired"),
+            (
+                Health::Limited(past),
+                true,
+                true,
+                "limited, past its wait: a probe",
+            ),
+            (
+                Health::Limited(future),
+                false,
+                false,
+                "limited, inside its wait",
+            ),
+        ] {
+            assert_eq!(health.sendable(Lane::Signal), signal, "signal, {name}");
+            assert_eq!(health.sendable(Lane::Data), data, "data, {name}");
+        }
+    }
+
+    /// A data lane that waits a minute after a limit loses a minute of payload: its wait is
+    /// seconds, and never reaches the minutes of signalling.
+    #[test]
+    fn the_data_lane_waits_seconds_after_a_rate_limit() {
+        let mut backoff = rate_limit(Lane::Data);
+        for step in 0..10 {
+            let wait = backoff.step();
+            assert!(wait <= Duration::from_secs(10), "step {step}: {wait:?}");
+        }
+    }
 
     /// A relay with a shorter window refuses every announce, so the warning
     /// goes out once per relay per ten minutes, not once per refusal.
