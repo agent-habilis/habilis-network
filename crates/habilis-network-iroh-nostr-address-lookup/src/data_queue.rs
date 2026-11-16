@@ -105,6 +105,12 @@ struct Pending {
     since: Instant,
 }
 
+/// A frame in the queue, with the time it joined.
+struct Waiting {
+    since: Instant,
+    queued: Queued,
+}
+
 /// Data that waits for the pacer.
 enum Queued {
     /// A closed batch, not yet signed: it is signed when the pacer lets it out.
@@ -133,7 +139,7 @@ pub(crate) struct DataQueue {
     /// When the oldest open batch began: the one tick of the socket counts from it.
     round_start: Option<Instant>,
     control: VecDeque<String>,
-    ready: VecDeque<Queued>,
+    ready: VecDeque<Waiting>,
     ready_bytes: usize,
     byte_tokens: f64,
     frame_tokens: f64,
@@ -236,14 +242,14 @@ impl DataQueue {
     }
 
     /// Add an event that the caller signed. It is paced and can be dropped.
-    pub(crate) fn push_frame(&mut self, frame: String) {
+    pub(crate) fn push_frame(&mut self, now: Instant, frame: String) {
         if weigh(frame.len()) > BURST_BYTES {
             // No pacer budget ever covers it, so it would stay at the head of the queue.
             self.dropped += 1;
             tracing::debug!(target: "habilis_network::lookup", bytes = frame.len(), "a data frame over the burst is dropped");
             return;
         }
-        self.queue(Queued::Signed(frame));
+        self.queue(now, Queued::Signed(frame));
     }
 
     /// Add a frame that is neither paced nor dropped.
@@ -285,17 +291,19 @@ impl DataQueue {
     }
 
     /// The next frame the pacer lets out at `now`: a control frame first, then the oldest data
-    /// frame if the budgets cover it. A batch is signed here, not before.
+    /// frame if the budgets cover it. A frame that waited past [`MAX_AGE`] is dropped, not sent
+    /// late. A batch is signed here, not before.
     pub(crate) fn pop_ready(&mut self, now: Instant) -> Option<Frame> {
         self.refill(now);
         if let Some(frame) = self.control.pop_front() {
             return Some(Frame::Control(frame));
         }
-        let cost = self.ready.front()?.cost();
+        self.drop_aged(now);
+        let cost = self.ready.front()?.queued.cost();
         if self.byte_tokens < weigh(cost) || self.frame_tokens < 1.0 {
             return None;
         }
-        let queued = self.ready.pop_front()?;
+        let queued = self.ready.pop_front()?.queued;
         self.ready_bytes -= cost;
         self.byte_tokens -= weigh(cost);
         self.frame_tokens -= 1.0;
@@ -317,7 +325,7 @@ impl DataQueue {
         let send: Option<Instant> = if self.control.is_empty() {
             self.ready
                 .front()
-                .map(|queued| now + self.wait_for(queued.cost()))
+                .map(|waiting| now + self.wait_for(waiting.queued.cost()))
         } else {
             Some(now)
         };
@@ -358,22 +366,34 @@ impl DataQueue {
             self.round_start = None;
         }
         self.last_flush = Some(now);
-        self.queue(Queued::Batch {
+        let batch = Queued::Batch {
             keys: pending.keys,
             tag: destination.tag,
             content: pending.batch.encode(),
-        });
+        };
+        self.queue(now, batch);
     }
 
     /// Add to the queue for the pacer, then drop the oldest while it is over its bounds.
-    fn queue(&mut self, queued: Queued) {
+    fn queue(&mut self, now: Instant, queued: Queued) {
         self.ready_bytes += queued.cost();
-        self.ready.push_back(queued);
+        self.ready.push_back(Waiting { since: now, queued });
         while self.ready_bytes > QUEUE_BYTES || self.ready.len() > MAX_QUEUED_FRAMES {
             let Some(oldest) = self.ready.pop_front() else {
                 break;
             };
-            self.ready_bytes -= oldest.cost();
+            self.ready_bytes -= oldest.queued.cost();
+            self.dropped += 1;
+        }
+    }
+
+    /// Drop the frames at the head of the queue that waited past [`MAX_AGE`].
+    fn drop_aged(&mut self, now: Instant) {
+        while let Some(front) = self.ready.front()
+            && now >= front.since + MAX_AGE
+        {
+            self.ready_bytes -= front.queued.cost();
+            self.ready.pop_front();
             self.dropped += 1;
         }
     }
@@ -415,8 +435,8 @@ mod tests {
 
     use super::{
         BUDGET_BYTES_PER_SEC, BURST_BYTES, BURST_FRAMES, DataQueue, FLUSH_TICK, FRAME_OVERHEAD,
-        FRAMES_PER_SEC, Frame, MAX_QUEUED_FRAMES, Outgoing, QUEUE_BYTES, WEB_BUFFERED_BOUND,
-        over_buffer_bound, weigh,
+        FRAMES_PER_SEC, Frame, MAX_AGE, MAX_QUEUED_FRAMES, Outgoing, QUEUE_BYTES,
+        WEB_BUFFERED_BOUND, over_buffer_bound, weigh,
     };
     use crate::batch::{self, ID_LEN};
     use crate::event::{Event, Keys};
@@ -553,6 +573,21 @@ mod tests {
         );
     }
 
+    /// A frame that waited past the age limit is old data: the pacer was held up, for instance
+    /// by a rate limit, and QUIC has sent it again. It is dropped, not sent late.
+    #[test]
+    fn a_frame_that_waited_past_the_age_limit_is_dropped_when_it_comes_up() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        queue.push_datagram(start, outgoing(&keys, 1, b"old"));
+        let late = start + MAX_AGE + Duration::from_millis(1);
+        assert!(queue.pop_ready(late).is_none(), "the old frame is not sent");
+        assert_eq!(queue.dropped(), 1, "and it is counted");
+        queue.push_datagram(late, outgoing(&keys, 1, b"new"));
+        assert!(queue.pop_ready(late).is_some(), "a new frame goes");
+    }
+
     /// A frame over `from`, as the queue lets it out.
     fn sender_of(frame: &Frame) -> [u8; ID_LEN] {
         let Frame::Data(text) = frame else {
@@ -667,9 +702,9 @@ mod tests {
         let keys = shared_keys();
         let start = Instant::now();
         let mut queue = DataQueue::new(start);
-        queue.push_frame("x".repeat(70 * 1024));
+        queue.push_frame(start, "x".repeat(70 * 1024));
         assert_eq!(queue.dropped(), 1, "the oversize frame is counted");
-        queue.push_frame("small".to_owned());
+        queue.push_frame(start, "small".to_owned());
         assert_eq!(
             queue.pop_ready(start),
             Some(Frame::Data("small".to_owned())),

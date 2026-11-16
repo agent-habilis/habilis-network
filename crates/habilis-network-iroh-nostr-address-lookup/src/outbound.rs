@@ -15,6 +15,17 @@ use crate::data_queue::{DataQueue, Frame, Outgoing};
 use crate::lane::Lane;
 use crate::ws;
 
+/// When a socket may send the data in its queue: the state of the relay decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pace {
+    /// Now, at the rate of the pacer.
+    Open,
+    /// Not before the instant: the relay limited us until then.
+    After(Instant),
+    /// Not until the state of the relay changes.
+    Held,
+}
+
 pub(crate) enum Outbound {
     /// Every frame is written when it is sent.
     Direct(ws::Sender),
@@ -81,7 +92,7 @@ impl Outbound {
         match self {
             Self::Direct(sender) => sender.send(frame).await,
             Self::Paced(paced) => {
-                paced.queue.push_frame(frame);
+                paced.queue.push_frame(Instant::now(), frame);
                 Ok(())
             }
         }
@@ -94,30 +105,44 @@ impl Outbound {
         }
     }
 
-    /// What the loop waits for next.
-    pub(crate) fn wake(&mut self) -> Wake {
+    /// What the loop waits for next. A socket that is `Held` waits for nothing: the loop wakes
+    /// on a frame from the relay, and asks again.
+    pub(crate) fn wake(&mut self, pace: Pace) -> Wake {
+        let now = Instant::now();
         match self {
             Self::Direct(_) => Wake {
                 at: None,
                 writer: None,
             },
-            Self::Paced(paced) => Wake {
-                at: paced.queue.next_wake(Instant::now()),
-                writer: Some(mpsc::Sender::clone(&paced.writer)),
+            Self::Paced(paced) => match pace {
+                Pace::Held => Wake {
+                    at: None,
+                    writer: None,
+                },
+                Pace::Open => Wake {
+                    at: paced.queue.next_wake(now),
+                    writer: Some(mpsc::Sender::clone(&paced.writer)),
+                },
+                Pace::After(not_before) => Wake {
+                    at: paced.queue.next_wake(now).map(|at| at.max(not_before)),
+                    writer: Some(mpsc::Sender::clone(&paced.writer)),
+                },
             },
         }
     }
 
-    /// The writer has room: hand it the next frame that is due, if one is.
-    pub(crate) fn pump(&mut self, permit: mpsc::OwnedPermit<Frame>) {
+    /// The writer has room: hand it the next frame that is due, if one is. `true` if it did.
+    pub(crate) fn pump(&mut self, permit: mpsc::OwnedPermit<Frame>) -> bool {
         let Self::Paced(paced) = self else {
-            return;
+            return false;
         };
         let now = Instant::now();
         paced.queue.flush_due(now);
-        if let Some(frame) = paced.queue.pop_ready(now) {
-            permit.send(frame);
-        }
+        let Some(frame) = paced.queue.pop_ready(now) else {
+            return false;
+        };
+        permit.send(frame);
+        true
     }
 
     /// Frames dropped for want of room, as a socket with no queue counts them: none.
@@ -171,7 +196,7 @@ mod tests {
     use n0_future::time::{Instant, timeout};
     use tokio::sync::mpsc;
 
-    use super::{Outbound, Paced};
+    use super::{Outbound, Pace, Paced};
     use crate::data_queue::{DataQueue, Frame, Outgoing};
     use crate::event::Keys;
 
@@ -200,7 +225,7 @@ mod tests {
 
         outbound.datagram(outgoing(&keys, b"first".to_vec()));
         let permit: mpsc::OwnedPermit<Frame> =
-            timeout(Duration::from_secs(1), outbound.wake().permit())
+            timeout(Duration::from_secs(1), outbound.wake(Pace::Open).permit())
                 .await
                 .expect("a frame is due and the writer has room")
                 .expect("the writer is alive");
@@ -209,7 +234,7 @@ mod tests {
         // The writer now holds one frame and reads no more.
         for index in 0..1_000u32 {
             outbound.datagram(outgoing(&keys, index.to_be_bytes().repeat(300)));
-            let wake = outbound.wake();
+            let wake = outbound.wake(Pace::Open);
             assert!(
                 timeout(Duration::from_millis(1), wake.permit())
                     .await

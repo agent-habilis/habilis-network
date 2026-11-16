@@ -18,7 +18,7 @@ use url::Url;
 use crate::data_queue::Outgoing;
 use crate::event::Event;
 use crate::lane::Lane;
-use crate::outbound::Outbound;
+use crate::outbound::{Outbound, Pace};
 use crate::wire::{self, Filter, FromRelay, Verdict};
 use crate::{unix_now, ws};
 
@@ -51,6 +51,10 @@ const RATE_LIMIT: Backoff = Backoff::new(
     Duration::from_mins(15),
 );
 const RATE_LIMIT_CALM: Duration = Duration::from_mins(5);
+
+/// A probe sent after a rate limit gets this long to earn an `OK`. Past it, with no answer, the
+/// socket sends the next one.
+const PROBE_REPLY: Duration = Duration::from_secs(5);
 
 /// The data lane waits seconds after a limit, not minutes: a minute of silence is a minute of
 /// payload lost, and its path state (QUIC) is what tells a dead path from a slow one.
@@ -431,6 +435,9 @@ struct Task {
     served: bool,
     /// When the stale-event warning last went out for this relay.
     stale_warned: Option<Instant>,
+    /// When the probe of the current rate limit went out. One frame goes after the wait; the
+    /// rest of the queue waits for the relay to accept it.
+    probe_sent: Option<Instant>,
 }
 
 impl Drop for Task {
@@ -463,6 +470,7 @@ async fn run(
         closed_subs: HashSet::new(),
         served: false,
         stale_warned: None,
+        probe_sent: None,
     };
     let mut reconnect = RECONNECT;
     loop {
@@ -510,6 +518,7 @@ impl Task {
         self.resubscribe_at = None;
         self.closed_subs.clear();
         self.served = false;
+        self.probe_sent = None;
         if self.subscribe_all(&mut sender).await.is_err() {
             return Outcome::Dropped;
         }
@@ -531,7 +540,7 @@ impl Task {
                     None => future::pending().await,
                 }
             };
-            let wake = sender.wake();
+            let wake = sender.wake(self.pace());
             let step = tokio::select! {
                 command = self.commands.recv() => match command {
                     None => Err(Outcome::Idle),
@@ -547,7 +556,10 @@ impl Task {
                 },
                 permit = wake.permit() => match permit {
                     Ok(permit) => {
-                        sender.pump(permit);
+                        let sent = sender.pump(permit);
+                        if sent && matches!(*self.health.borrow(), Health::Limited(_)) {
+                            self.probe_sent = Some(Instant::now());
+                        }
                         Ok(())
                     }
                     Err(_) => Err(Outcome::Dropped),
@@ -658,6 +670,7 @@ impl Task {
                     self.rate_limit.reset();
                 }
                 self.limited_until = None;
+                self.probe_sent = None;
                 if matches!(*self.health.borrow(), Health::Limited(_)) {
                     self.set_health(Health::Up);
                 }
@@ -701,9 +714,37 @@ impl Task {
         }
     }
 
-    /// Back off: mark the relay limited and double the next wait.
+    /// When the data in the queue may go to the relay. A relay that limited us gets nothing
+    /// until the wait is over, and then one frame at a time: that frame is the probe.
+    fn pace(&self) -> Pace {
+        let health = *self.health.borrow();
+        match health {
+            Health::Up => Pace::Open,
+            Health::Limited(until) => {
+                let reopens = self
+                    .probe_sent
+                    .map_or(until, |sent| until.max(sent + PROBE_REPLY));
+                if reopens > Instant::now() {
+                    Pace::After(reopens)
+                } else {
+                    Pace::Open
+                }
+            }
+            Health::Connecting | Health::Down | Health::Retired => Pace::Held,
+        }
+    }
+
+    /// Back off: mark the relay limited and double the next wait. A refusal that comes while the
+    /// relay is already limited is the answer to a frame sent before the limit: it is the same
+    /// limit, and changes nothing.
     fn limit(&mut self) -> Instant {
         let now = Instant::now();
+        if let Health::Limited(until) = *self.health.borrow()
+            && until > now
+        {
+            return until;
+        }
+        self.probe_sent = None;
         let until = now + self.rate_limit.step();
         self.last_limited = Some(now);
         self.limited_until = Some(until);
@@ -783,13 +824,16 @@ fn refusal(url: &Url, reason: &str, stale_warned: &mut Option<Instant>) -> Refus
 
 #[cfg(all(test, feature = "test-relay"))]
 mod flow_tests {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use n0_future::time::{Instant, sleep};
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, watch};
     use url::Url;
 
-    use super::{Health, Hub, Lease};
+    use super::{Health, Hub, Lease, RESUBSCRIBE, Task, rate_limit};
+    use crate::data_queue::Outgoing;
     use crate::event::{Event, Keys};
     use crate::lane::Lane;
     use crate::test_relay::TestRelay;
@@ -1014,6 +1058,117 @@ mod flow_tests {
             lease.health() == Health::Up
         })
         .await;
+    }
+
+    /// A connection task that is not connected, to drive its rate-limit state.
+    fn offline_task(hub: &'static Hub) -> Task {
+        let (_commands, commands) = mpsc::unbounded_channel();
+        let (health, _health_rx) = watch::channel(Health::Up);
+        Task {
+            hub,
+            url: "ws://127.0.0.1:1".parse().expect("a URL"),
+            commands,
+            health,
+            subs: HashMap::new(),
+            rate_limit: rate_limit(hub.lane()),
+            last_limited: None,
+            limited_until: None,
+            resubscribe: RESUBSCRIBE,
+            resubscribe_at: None,
+            closed_subs: HashSet::new(),
+            served: false,
+            stale_warned: None,
+            probe_sent: None,
+        }
+    }
+
+    /// The relay refuses every frame that was already on the wire when it first limited us. That
+    /// is one rate limit, not three: the wait doubles once, when a new window opens.
+    #[tokio::test(start_paused = true)]
+    async fn refusals_inside_one_rate_limit_window_double_the_wait_once() {
+        let mut task = offline_task(hub());
+        let first = task.limit();
+        assert_eq!(task.limit(), first, "a second refusal in the window");
+        assert_eq!(task.limit(), first, "a third refusal in the window");
+        sleep(Duration::from_millis(1_100)).await;
+        let next = task.limit();
+        assert!(
+            next.saturating_duration_since(Instant::now()) > Duration::from_millis(1_500),
+            "a refusal after the window waits twice as long"
+        );
+    }
+
+    /// A relay that limits us gets no more queued frames until the wait is over: frames go on
+    /// only as a probe.
+    #[tokio::test]
+    async fn the_data_socket_sends_no_queued_frame_while_limited() {
+        let relay = TestRelay::spawn().await.expect("spawn test relay");
+        relay.refuse_events(Some("rate-limited: slow down"));
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let lease: Lease = data_hub()
+            .lease(&relay.url(), "one".into(), filter(), events)
+            .expect("a lease");
+        until("the relay is up", || lease.health() == Health::Up).await;
+        let keys = Arc::new(Keys::generate());
+        for index in 0..100u8 {
+            lease.datagram(Outgoing {
+                keys: Arc::clone(&keys),
+                tag: [1u8; 32],
+                from: [2u8; 32],
+                bytes: vec![index; 3_800],
+            });
+        }
+        until("the relay limits the socket", || {
+            matches!(lease.health(), Health::Limited(_))
+        })
+        .await;
+        sleep(Duration::from_millis(100)).await;
+        let sent_by_then = relay.events();
+        sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            relay.events(),
+            sent_by_then,
+            "no frame went out during the wait"
+        );
+    }
+
+    /// After the wait the socket sends one frame, the probe, and no more until the relay
+    /// answers it.
+    #[tokio::test]
+    async fn a_limited_data_socket_sends_one_probe_after_the_wait() {
+        let relay = TestRelay::spawn().await.expect("spawn test relay");
+        relay.refuse_events(Some("rate-limited: slow down"));
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let lease: Lease = data_hub()
+            .lease(&relay.url(), "one".into(), filter(), events)
+            .expect("a lease");
+        until("the relay is up", || lease.health() == Health::Up).await;
+        let keys = Arc::new(Keys::generate());
+        let datagram = |index: u8| Outgoing {
+            keys: Arc::clone(&keys),
+            tag: [1u8; 32],
+            from: [2u8; 32],
+            bytes: vec![index; 3_800],
+        };
+        lease.datagram(datagram(0));
+        until("the relay limits the socket", || {
+            matches!(lease.health(), Health::Limited(_))
+        })
+        .await;
+        let Health::Limited(wait_ends) = lease.health() else {
+            panic!("the lease is limited");
+        };
+        until("the wait ends", || Instant::now() >= wait_ends).await;
+        let before = relay.events();
+        for index in 1..60u8 {
+            lease.datagram(datagram(index));
+        }
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            relay.events() - before,
+            1,
+            "one probe went out, and the refusal held the rest"
+        );
     }
 
     /// A relay that serves us after a retry (it finishes the REQ) is forgiven:
