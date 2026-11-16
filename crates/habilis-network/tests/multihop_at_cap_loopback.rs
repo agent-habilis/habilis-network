@@ -10,6 +10,8 @@
 //! What the run shows:
 //! - both frames arrive, and bob forwards cells for them;
 //! - no member evicts a connection at its ceiling;
+//! - the snapshot of alice shows dave on the multihop path, pinned, with bob as the first hop, and
+//!   3 connections of the 4 that twice the cap allows;
 //! - alice counts 2 direct units, none over the cap, after the send. A direct dial to dave would
 //!   take a third unit, and an eviction would take one of bob and carol.
 //!
@@ -29,6 +31,7 @@ use habilis_network::membership::{
 };
 use habilis_network::net;
 use habilis_network::protocol::{Lookup, Transport};
+use habilis_network::topology::{PathLabel, TopologySnapshot};
 use habilis_network_iroh_multihop_transport::MultihopCounters;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time;
@@ -155,6 +158,14 @@ impl Member {
     async fn direct_units(&self) -> (usize, usize) {
         self.membership
             .request(|reply| Request::Routing(Routing::DirectUnits { reply }))
+            .await
+            .expect("the loop answers")
+    }
+
+    /// The connections of this member, the cap on them, and the multihop graph.
+    async fn snapshot(&self) -> TopologySnapshot {
+        self.membership
+            .request(|reply| Request::Inspect(Inspect::Topology { reply }))
             .await
             .expect("the loop answers")
     }
@@ -324,6 +335,42 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
             (2, 0),
             "the answer of dave changed the units of alice: {}",
             counters_of(&[("alice", &alice), ("bob", &bob), ("dave", &dave)]).await
+        );
+
+        let snapshot = alice.snapshot().await;
+        let link_of = |nick: &str| {
+            snapshot
+                .peers
+                .iter()
+                .find(|link| link.nickname.as_deref() == Some(nick))
+                .unwrap_or_else(|| panic!("the snapshot of alice has no peer {nick}: {snapshot:?}"))
+        };
+        let (dave_link, bob_link) = (link_of("dave"), link_of("bob"));
+        assert_eq!(
+            dave_link.path,
+            PathLabel::Multihop,
+            "dave is on the multihop path: {snapshot:?}"
+        );
+        assert!(dave_link.pinned, "dave is pinned: {snapshot:?}");
+        assert_eq!(
+            dave_link.via.as_deref(),
+            Some(bob_link.endpoint.as_str()),
+            "the first hop to dave is bob: {snapshot:?}"
+        );
+        assert!(!dave_link.neighbor, "dave is no gossip neighbor of alice");
+        assert_eq!(
+            (
+                snapshot.max_connections,
+                snapshot.direct_units,
+                snapshot.over_ceiling
+            ),
+            (2, 2, 0),
+            "alice is at its cap and not over it: {snapshot:?}"
+        );
+        assert_eq!(
+            (snapshot.quic_connections, snapshot.quic_cap),
+            (3, 4),
+            "the pinned connection counts toward 2N: {snapshot:?}"
         );
 
         let logs = habilis_network_test_tracing::captured_logs();
