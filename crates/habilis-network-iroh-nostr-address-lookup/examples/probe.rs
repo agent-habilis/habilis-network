@@ -79,7 +79,8 @@ async fn main() {
     }
 
     let probes = CANDIDATES.iter().map(|host| {
-        let url: Url = format!("wss://{host}").parse().expect("a valid URL");
+        let text = format!("wss://{host}");
+        let url: Url = text.parse().expect("a valid URL");
         async move { (url.clone(), probe(url).await) }
     });
     let mut results = future::join_all(probes).await;
@@ -158,7 +159,7 @@ async fn probe(url: Url) -> Outcome {
     let (sender, _sender_rx) = Pool::open(vec![url.clone()], 1, &[tag]);
     let (_receiver, mut receiver_rx) = Pool::open(vec![url], 1, &[tag]);
     let connected = time::timeout(CONNECT_BUDGET, async {
-        while sender.connected().is_empty() {
+        while sender.connected().next().is_none() {
             time::sleep(Duration::from_millis(50)).await;
         }
     })
@@ -213,7 +214,8 @@ async fn cadence(url: Url) {
             time::sleep(wait).await;
         }
         for (pool, _) in &pools {
-            pool.publish(&tag, format!("hello {}", rand::random::<u64>()));
+            let nonce: u64 = rand::random();
+            pool.publish(&tag, format!("hello {nonce}"));
         }
     }
     time::sleep(Duration::from_secs(3)).await;
