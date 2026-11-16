@@ -7,14 +7,13 @@ use std::sync::Arc;
 use crate::embed::NodeSink;
 use crate::protocol::{
     DirectorySelection, JoinTarget, Lookup, MeshConfig, MeshName, Nickname, RelayLadder, Transport,
-    meshes,
 };
 use crate::runtime::{
     CreateParams, JoinParams, Node, Resolved, SetupKind, SetupParams, SignalHandling,
     derive_topic_mesh_config, setup_mesh,
 };
 use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use url::Url;
@@ -175,15 +174,23 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
     ladder.map(Some).map_err(|error| anyhow::anyhow!("{error}"))
 }
 
-/// The Nostr relays these options name, or `None` for the pinned list.
+/// The Nostr relays these options name, or `None` for the pinned list. Each entry is one URL, so a
+/// comma inside a URL (a query such as `?channels=a,b`) stays in it: the comma list belongs to the
+/// C string boundary, not to this vector.
 fn nostr_list(urls: &[String]) -> Result<Option<Vec<Url>>> {
     if urls.is_empty() {
         return Ok(None);
     }
-    let parsed =
-        meshes::parse_nostr_urls(&urls.join(",")).map_err(|error| anyhow::anyhow!("{error}"))?;
-    let list: Vec<Url> = parsed.collect();
-    Ok(Some(list))
+    let parsed: Result<Vec<Url>> = urls.iter().map(|entry| nostr_url(entry)).collect();
+    parsed.map(Some)
+}
+
+/// One Nostr relay URL. The scheme and the length are checked when the mesh config is built.
+fn nostr_url(entry: &str) -> Result<Url> {
+    entry
+        .trim()
+        .parse()
+        .with_context(|| format!("nostr relay URL {entry:?} is not a URL"))
 }
 
 /// One live membership's moving parts.
@@ -762,6 +769,42 @@ mod tests {
             )
             .is_err(),
             "a bad URL is an error, not a shrunk ladder"
+        );
+    }
+
+    /// A relay URL may hold a comma (a query such as `?channels=a,b`). Each entry of `nostr_urls`
+    /// is one URL: the list is a vector here, and the comma list belongs to the C string boundary.
+    #[test]
+    fn a_nostr_url_with_a_comma_stays_one_url() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let url = "wss://relay.example/path?channels=a,b".to_owned();
+
+        let config = create_config(&JoinOptions {
+            lookup: vec![Lookup::Nostr],
+            nostr_urls: vec![url.clone()],
+            ..options()
+        });
+        let NostrChoice::Custom(custom) = &config.lookups.nostr else {
+            panic!("nostrUrls must resolve to a custom list")
+        };
+        assert_eq!(
+            custom.iter().map(url::Url::as_str).collect::<Vec<_>>(),
+            vec![url.as_str()],
+            "the comma stays in the URL, which is one relay"
+        );
+
+        let topic = resolve_kind(
+            &JoinOptions {
+                topic: Some("standup".to_owned()),
+                nostr_urls: vec![url],
+                ..options()
+            },
+            None,
+        );
+        assert!(
+            topic.is_ok(),
+            "a topic with such a relay resolves too: {:?}",
+            topic.err()
         );
     }
 
