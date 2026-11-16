@@ -304,6 +304,27 @@ mod tests {
         );
     }
 
+    /// The limit of the pin in the selector. iroh gives a selector no remote id, and an IP address
+    /// names none, so a set of paths that holds only IP paths is not recognized as pinned. A pinned
+    /// dial takes the route alone as its address, so a set holds an IP path only when a lookup
+    /// adds one. The relay and a `WebRTC` path name the remote, and any of them pins the set.
+    #[test]
+    fn a_set_of_ip_paths_alone_names_no_remote_and_is_not_pinned() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (local, remote) = (node(57), node(58));
+        let tuples = [FourTuple::from_remote(Addr::Ip(
+            ([192, 0, 2, 9], 4433).into(),
+        ))];
+        pin(local, remote);
+        let chosen = rung_of_choice(&tuples, local);
+        unpin(local, remote);
+        assert_eq!(
+            chosen,
+            Some(Rung::Ip),
+            "a set with an IP path alone names nobody: the pin cannot hold it"
+        );
+    }
+
     #[test]
     fn a_pin_holds_for_its_local_endpoint_and_remote_only() {
         let _guard = ::habilis_network_test_tracing::init();
