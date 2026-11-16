@@ -70,7 +70,8 @@ resident memory. `qclose`, `pclose` and `sclose` count the closes of every QUIC 
 (the gossip links too), of the pooled unicast connections that a send used, and of WebRTC
 sessions, and `qredial`, `predial` and `sredial` the closes that were followed by a connection to
 the same peer within 300 s: `bun scripts/perf/redial_report.ts <run folder>` prints them
-per node per hour, and the share of closes that were followed by a re-dial. `idle_sessions` counts the WebRTC sessions to members that are not gossip
+per node per hour, and the share of closes that were followed by a re-dial. `fwd` counts the multihop
+cells that the node passed on for pairs it is not part of, since its start: the forward load. `idle_sessions` counts the WebRTC sessions to members that are not gossip
 neighbors. `phase` is 2 once the node has taken IP away.
 
 A run folder holds `n<i>.out` and `n<i>.err` per node, `summary.txt` (the last census

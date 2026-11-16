@@ -38,7 +38,8 @@
 //! plain QUIC connections> qredial <of them followed by a connection to the same peer within
 //! 300 s> sclose <closes of WebRTC sessions> sredial <of them followed by one within 300 s>
 //! pclose <closes of the pooled unicast connections that a send used> predial <of them followed
-//! by one within 300 s>`.
+//! by one within 300 s> fwd <cells that this node passed on for pairs it is not part of, since
+//! the start>`.
 
 use std::time::{Duration, Instant};
 
@@ -107,6 +108,20 @@ async fn count(
 ) -> usize {
     let (reply, answer) = oneshot::channel();
     if sender.send(request(reply)).await.is_ok() {
+        answer.await.unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+/// The cells that this node passed on for pairs it is not part of, `0` when the node is gone.
+async fn forwarded(sender: &mpsc::Sender<Request>) -> u64 {
+    let (reply, answer) = oneshot::channel();
+    if sender
+        .send(Request::Routing(Routing::ForwardedCells { reply }))
+        .await
+        .is_ok()
+    {
         answer.await.unwrap_or(0)
     } else {
         0
@@ -322,8 +337,9 @@ async fn main() -> anyhow::Result<()> {
             })
             .await;
             let redials = redial_counts(&sender).await;
+            let fwd = forwarded(&sender).await;
             println!(
-                "t {elapsed} phase {} peers {} links {links} sessions {} underlay {underlay} rss_mb {} idle_sessions {idle_sessions} qclose {} qredial {} sclose {} sredial {} pclose {} predial {}{role}",
+                "t {elapsed} phase {} peers {} links {links} sessions {} underlay {underlay} rss_mb {} idle_sessions {idle_sessions} qclose {} qredial {} sclose {} sredial {} pclose {} predial {} fwd {fwd}{role}",
                 if blocked { 2 } else { 1 },
                 nicks.len(),
                 webrtc.session_count(),
