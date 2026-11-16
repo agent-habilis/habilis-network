@@ -48,23 +48,29 @@ pub(crate) fn selected_kind_unblocked(
     let paths = connection.paths();
     let selected = paths.iter().find(Path::is_selected);
     let address: Option<iroh::TransportAddr> = selected.map(|path| path.remote_addr().clone());
-    if address.is_some_and(|address| path_is_blocked(local, &address)) {
+    let remote = connection.remote_id();
+    if address.is_some_and(|address| path_is_blocked(local, remote, &address)) {
         PathKind::None
     } else {
         selected_kind(connection)
     }
 }
 
-/// Pure: whether a test took the path with `address` away from `local`.
-pub(crate) fn path_is_blocked(local: iroh::EndpointId, address: &iroh::TransportAddr) -> bool {
+/// Pure: whether a test took the path with `address` to `remote` away from `local`: a block of the
+/// rung, or a block of the rung to this remote only.
+pub(crate) fn path_is_blocked(
+    local: iroh::EndpointId,
+    remote: iroh::EndpointId,
+    address: &iroh::TransportAddr,
+) -> bool {
     use habilis_network_iroh_transport_util as transport_util;
     let (rung, ip) = match address {
-        iroh::TransportAddr::Ip(remote) => (transport_util::Rung::Ip, Some(*remote)),
+        iroh::TransportAddr::Ip(socket) => (transport_util::Rung::Ip, Some(*socket)),
         iroh::TransportAddr::Relay(_) => (transport_util::Rung::Relay, None),
         iroh::TransportAddr::Custom(custom) => (transport_util::custom_rung(custom.id()), None),
         _ => (transport_util::Rung::Other, None),
     };
-    transport_util::is_blocked_to(local, rung, ip, None)
+    transport_util::is_blocked_to(local, rung, ip, Some(remote))
 }
 
 /// Pure: the kind of a custom path by the id of its transport.
@@ -90,14 +96,25 @@ pub(crate) fn allow_for(kind: PathKind) -> bool {
 }
 
 /// Pure: whether the Nostr transport may carry frames to a pair whose connections read as
-/// `kinds`. Only a pair with no other selected path: Nostr is the last fallback, and an address
+/// `kinds`. Only a pair with no other usable path: Nostr is the last fallback, and an address
 /// that iroh adds as a keep-alive backup to every connection would put a rate-limited relay in
-/// the path of every pair. A connection with no path yet, and a pair with no connection (a
-/// handshake), are allowed.
-pub(crate) fn nostr_allow_for(kinds: &[PathKind]) -> bool {
-    kinds
-        .iter()
-        .all(|kind| matches!(kind, PathKind::None | PathKind::Nostr))
+/// the path of every pair. A relay path is usable only where `relay_carries` (the mesh lets the
+/// relay carry payload): on a lookup-only relay the pair has no path there. A connection with no
+/// path yet is allowed. A pair with no connection is allowed only when the engine `wanted` Nostr
+/// for it (its first flight rides what the pair has).
+pub(crate) fn nostr_allow_for(kinds: &[PathKind], relay_carries: bool, wanted: bool) -> bool {
+    let usable = kinds.iter().any(|kind| match kind {
+        PathKind::None | PathKind::Nostr => false,
+        PathKind::Relay => relay_carries,
+        PathKind::Ip | PathKind::WebRtc | PathKind::Multihop | PathKind::Gossip => true,
+    });
+    if usable {
+        false
+    } else if kinds.is_empty() {
+        wanted
+    } else {
+        true
+    }
 }
 
 /// Pure: the kind that stands for a peer whose connections read as `kinds`: the best of them, in
@@ -188,25 +205,42 @@ mod tests {
         use habilis_network_iroh_transport_util::Rung;
         let _guard = ::habilis_network_test_tracing::init();
         let local = iroh::SecretKey::from_bytes(&[8; 32]).public();
+        let remote = iroh::SecretKey::from_bytes(&[10; 32]).public();
         let ip = iroh::TransportAddr::Ip(([127, 0, 0, 1], 9).into());
         let relay = iroh::TransportAddr::Relay("https://relay.invalid".parse().expect("relay url"));
-        assert!(!super::path_is_blocked(local, &ip), "nothing blocked");
+        assert!(
+            !super::path_is_blocked(local, remote, &ip),
+            "nothing blocked"
+        );
         habilis_network_iroh_webrtc_transport::block_rung(local, Rung::Ip, true);
         assert!(
-            super::path_is_blocked(local, &ip),
+            super::path_is_blocked(local, remote, &ip),
             "the IP rung is blocked for this node"
         );
         assert!(
-            !super::path_is_blocked(local, &relay),
+            !super::path_is_blocked(local, remote, &relay),
             "the relay rung is not"
         );
         let other = iroh::SecretKey::from_bytes(&[9; 32]).public();
         assert!(
-            !super::path_is_blocked(other, &ip),
+            !super::path_is_blocked(other, remote, &ip),
             "another node is not affected"
         );
         habilis_network_iroh_webrtc_transport::block_rung(local, Rung::Ip, false);
-        assert!(!super::path_is_blocked(local, &ip), "the block is lifted");
+        assert!(
+            !super::path_is_blocked(local, remote, &ip),
+            "the block is lifted"
+        );
+        habilis_network_iroh_webrtc_transport::block_rung_to(local, Rung::Relay, remote, true);
+        assert!(
+            super::path_is_blocked(local, remote, &relay),
+            "a block of the relay rung to this remote only"
+        );
+        assert!(
+            !super::path_is_blocked(local, other, &relay),
+            "another remote is not blocked"
+        );
+        habilis_network_iroh_webrtc_transport::block_rung_to(local, Rung::Relay, remote, false);
     }
 
     #[test]
@@ -215,18 +249,27 @@ mod tests {
         assert!(allow_for(PathKind::Nostr), "Nostr is below gossip");
     }
 
-    /// The Nostr transport carries a pair that has no other selected path: iroh adds a Nostr
-    /// address as a keep-alive backup on every connection otherwise.
+    /// The Nostr transport carries a pair that has no other usable path: iroh adds a Nostr
+    /// address as a keep-alive backup on every connection otherwise. A relay path is usable only
+    /// where the relay carries payload; on a lookup-only relay it is no path. A pair with no
+    /// connection is allowed only when the engine wants Nostr for it.
     #[test]
-    fn the_nostr_path_is_allowed_only_for_a_pair_with_no_other_selected_path() {
+    fn the_nostr_path_is_allowed_only_for_a_pair_with_no_other_usable_path() {
         let _guard = ::habilis_network_test_tracing::init();
-        assert!(nostr_allow_for(&[]), "a new pair has no path yet");
         assert!(
-            nostr_allow_for(&[PathKind::None]),
+            !nostr_allow_for(&[], true, false),
+            "a new pair rides what it has first"
+        );
+        assert!(
+            nostr_allow_for(&[], true, true),
+            "a pair that the engine wants Nostr for"
+        );
+        assert!(
+            nostr_allow_for(&[PathKind::None], true, false),
             "no path is selected yet"
         );
         assert!(
-            nostr_allow_for(&[PathKind::Nostr]),
+            nostr_allow_for(&[PathKind::Nostr], true, false),
             "Nostr already carries it"
         );
         for other in [
@@ -234,16 +277,25 @@ mod tests {
             PathKind::WebRtc,
             PathKind::Multihop,
             PathKind::Gossip,
-            PathKind::Relay,
         ] {
-            assert!(
-                !nostr_allow_for(&[other]),
-                "{other:?} is selected, so Nostr is not needed"
-            );
-            assert!(
-                !nostr_allow_for(&[PathKind::Nostr, other]),
-                "one connection on {other:?} is enough to refuse Nostr"
-            );
+            for wanted in [false, true] {
+                assert!(
+                    !nostr_allow_for(&[other], false, wanted),
+                    "{other:?} is selected, so Nostr is not needed"
+                );
+                assert!(
+                    !nostr_allow_for(&[PathKind::Nostr, other], false, wanted),
+                    "one connection on {other:?} is enough to refuse Nostr"
+                );
+            }
         }
+        assert!(
+            !nostr_allow_for(&[PathKind::Relay], true, true),
+            "a relay that carries payload serves the pair"
+        );
+        assert!(
+            nostr_allow_for(&[PathKind::Relay], false, false),
+            "a lookup-only relay carries no payload: the pair has no usable path"
+        );
     }
 }

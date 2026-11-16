@@ -1,5 +1,5 @@
 //! The largest frame that iroh hands a frame transport fits the datagram limit of the data lane
-//! (2048 B, see `DataPool`): QUIC sizes its packets by the path MTU, which iroh bounds at 1452 B
+//! (3840 B, the longest frame of the transport core, see `DataPool`): QUIC sizes its packets by the path MTU, which iroh bounds at 1452 B
 //! whatever the transport, and the frame adds a 66 B header. A bulk transfer shows it on a real
 //! connection: path MTU discovery has probed as high as it goes by the end.
 
@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use habilis_network_iroh_gossip_transport::frame::MAX_FRAME_LEN;
 use habilis_network_iroh_gossip_transport::hub::Hub;
 use habilis_network_iroh_gossip_transport::{
     FrameSink, GossipHandle, NOSTR_TRANSPORT_ID, transport_addr,
@@ -16,8 +17,9 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 use tokio::io;
 
-/// The datagram limit of the data lane.
-const DATA_LANE_LIMIT: usize = 2048;
+/// The datagram limit of the data lane. It is the longest frame that the transport core makes,
+/// so that no frame is ever over it: the test pins the number against the core.
+const DATA_LANE_LIMIT: usize = 3840;
 const ALPN: &[u8] = b"habilis-network-nostr/test-size/0";
 /// Enough bytes for path MTU discovery to finish.
 const BULK: usize = 4 << 20;
@@ -118,6 +120,10 @@ fn the_largest_frame_of_a_bulk_transfer_fits_the_data_lane() {
             writer.await.expect("the writer ends");
             assert_eq!(echoed.len(), BULK, "the whole transfer came back");
 
+            assert_eq!(
+                DATA_LANE_LIMIT, MAX_FRAME_LEN,
+                "the data lane takes the longest frame of the core"
+            );
             let largest = largest.load(Ordering::SeqCst);
             assert!(
                 largest > 1000,

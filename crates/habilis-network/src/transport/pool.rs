@@ -48,37 +48,50 @@ mod tests {
         );
     }
 
-    /// A pair that falls through every other rung needs the Nostr address in its dial: iroh learns
-    /// the address of a custom transport only from an address that names it, and a connection
-    /// dialed without it has no Nostr path to fall to. A mesh that does not list Nostr adds none.
+    /// A pair whose other paths are gone needs the Nostr address in its dial: iroh learns the
+    /// address of a custom transport only from an address that names it. A healthy pair, and a
+    /// mesh that does not list Nostr, name none: the first flight of a dial rides what the pair has.
     #[test]
-    fn a_dial_names_the_nostr_address_only_when_the_mesh_lists_nostr() {
+    fn a_dial_names_the_nostr_address_only_for_a_pair_the_engine_wants_it_for() {
+        use crate::transport::SignalAdmission;
         use habilis_network_iroh_gossip_transport::{NOSTR_TRANSPORT_ID, transport_addr};
+        use habilis_network_iroh_nostr_transport::NostrTransport;
         let _guard = ::habilis_network_test_tracing::init();
-        let bob = testing::endpoint_id(1);
+        let (me, bob) = (testing::endpoint_id(1), testing::endpoint_id(2));
         let nostr = iroh::TransportAddr::Custom(transport_addr(NOSTR_TRANSPORT_ID, bob));
         let pool = super::UnicastPool::disconnected();
         pool.note_addr(&iroh::EndpointAddr::new(bob));
+        let table = SignalAdmission::new(8);
+        pool.set_admission(table.clone());
+        pool.set_nostr_transport(true);
+
         assert!(
             !pool.dial_address(bob).addrs.contains(&nostr),
-            "a mesh without Nostr dials without its address"
+            "a pair that nobody wants Nostr for dials without its address"
         );
-        pool.set_nostr_transport(true);
+        table.want_nostr(bob);
+        assert!(
+            !pool.dial_address(bob).addrs.contains(&nostr),
+            "a table with no Nostr transport (an injected endpoint without one) never wants it"
+        );
+        table.set_nostr(NostrTransport::new(me));
+        table.want_nostr(bob);
         let dialed = pool.dial_address(bob);
         assert!(
             dialed.addrs.contains(&nostr),
-            "a mesh with Nostr dials with its address"
+            "a pair that the engine wants Nostr for dials with its address"
         );
         assert_eq!(dialed.id, bob, "it is still the dial of the same peer");
-        let unknown = testing::endpoint_id(2);
+        let other = testing::endpoint_id(3);
         assert!(
-            pool.dial_address(unknown)
+            !pool
+                .dial_address(other)
                 .addrs
                 .contains(&iroh::TransportAddr::Custom(transport_addr(
                     NOSTR_TRANSPORT_ID,
-                    unknown
+                    other
                 ))),
-            "a peer whose address is not known is dialed by its id and the Nostr address"
+            "another peer is not affected"
         );
     }
 

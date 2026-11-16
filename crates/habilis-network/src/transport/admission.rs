@@ -1614,33 +1614,48 @@ mod tests {
     }
 
     /// What the table tells the Nostr transport about a peer: established when it has a live
-    /// connection, and allowed only when no other path is selected for the pair.
+    /// connection, and allowed only when no other usable path serves the pair.
     #[test]
     fn the_table_tells_the_nostr_transport_to_carry_only_a_pair_with_no_other_path() {
         use super::super::probe::PathKind::{self, Gossip, Ip, Nostr, Relay};
         let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
-            sampler::nostr_view(&[]),
-            (false, true),
-            "no connection: a handshake may go"
+            sampler::nostr_view(&[], true, false),
+            (false, false),
+            "no connection, and no want: the pair rides what it has"
         );
         assert_eq!(
-            sampler::nostr_view(&[PathKind::None]),
+            sampler::nostr_view(&[], true, true),
+            (false, true),
+            "no connection, and the engine wants Nostr for it"
+        );
+        assert_eq!(
+            sampler::nostr_view(&[PathKind::None], true, false),
             (true, true),
             "a connection with no path yet"
         );
         assert_eq!(
-            sampler::nostr_view(&[Nostr]),
+            sampler::nostr_view(&[Nostr], true, false),
             (true, true),
             "a pair that Nostr already carries"
         );
-        for other in [Ip, Gossip, Relay] {
+        for other in [Ip, Gossip] {
             assert_eq!(
-                sampler::nostr_view(&[other]),
+                sampler::nostr_view(&[other], false, true),
                 (true, false),
                 "a pair on {other:?} does not need Nostr"
             );
         }
+        assert_eq!(
+            sampler::nostr_view(&[Relay], true, false),
+            (true, false),
+            "a relay that carries payload serves the pair"
+        );
+        assert_eq!(
+            sampler::nostr_view(&[Relay], false, false),
+            (true, true),
+            "a lookup-only relay carries no payload"
+        );
     }
 
     /// An endpoint with a loopback UDP socket and the gossip transport, whose connections are

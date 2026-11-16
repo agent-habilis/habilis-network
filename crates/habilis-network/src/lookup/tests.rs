@@ -773,6 +773,36 @@ fn only_a_member_of_a_mesh_that_lists_nostr_has_the_transport_and_it_activates_o
     });
 }
 
+// The Nostr transport is on the member endpoint and not on the multihop underlay: a multihop
+// link never rides a Nostr path, because the underlay endpoint has no Nostr transport to carry it.
+#[cfg(all(feature = "host", feature = "multihop"))]
+#[test]
+fn the_multihop_underlay_has_no_nostr_transport() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let table = transport::SignalAdmission::new(8);
+        let (endpoint, handle, _webrtc, leg, _mdns) = super::build_peer_multihop_with(
+            &LookupOpts::loopback(),
+            TransportOpts::default().nostr(true),
+            Some(&table),
+            super::multihop_handle_config(PayloadPath::DirectOnly),
+            Some(5),
+        )
+        .await
+        .expect("a multihop peer binds");
+        handle.close().await;
+        endpoint.close().await;
+        let leg = leg.expect("a leg when a cap is given");
+        assert!(
+            table.has_nostr(),
+            "the member endpoint has the Nostr transport"
+        );
+        assert!(
+            !leg.admission.has_nostr(),
+            "the multihop underlay does not, so a link of it never rides Nostr"
+        );
+    });
+}
+
 // The list `udp,gossip` has no WebRTC and no multihop, so no other selector is installed: the
 // member still gets the gossip handle (the admission table keeps it), the gossip address,
 // and the ladder of the gossip handle, which keeps IP above gossip.

@@ -127,7 +127,7 @@ pub(crate) async fn tick_heal_hard(
 pub(crate) async fn rebridge_known(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let known = state.known_endpoints.iter().copied();
     let peers: Vec<EndpointId> = known
-        .filter(|peer| !state.rides_gossip_rung(*peer))
+        .filter(|peer| !state.rides_gossip_rung(*peer) && !state.rides_nostr(*peer))
         .collect();
     // `info`, not `debug`: this fires only on the isolation signal (rare,
     // event-driven), and a re-bridge attempt is part of the always-on

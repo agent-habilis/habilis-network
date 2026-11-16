@@ -23,7 +23,9 @@ use n0_future::time::Instant as PoolInstant;
 use tokio::sync::{Mutex, watch};
 
 use crate::transport::webrtc::close_code::IDLE;
-use crate::transport::{LOG_TARGET, PayloadPath, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
+use crate::transport::{
+    LOG_TARGET, PayloadPath, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on, probe,
+};
 use habilis_network_iroh_gossip_transport::{NOSTR_TRANSPORT_ID, transport_addr};
 
 use crate::util::clock::Instant;
@@ -324,11 +326,11 @@ impl UnicastPool {
     }
 
     /// The address that a dial to `eid` names: the one remembered for the peer, or its bare id,
-    /// and the Nostr address of the peer when the mesh lists Nostr. iroh learns the address of a
-    /// custom transport only from an address that names it, and a connection that was dialed
-    /// without it has no Nostr path to fall to when every other path is gone. The transport itself
-    /// drops the frames of a pair that has another selected path, so the address costs a pair that
-    /// is well served nothing.
+    /// and the Nostr address of the peer when the mesh lists Nostr and the engine wants Nostr for
+    /// the pair (no other usable path served it at the last reading, or a dial to it failed).
+    /// iroh learns the address of a custom transport only from an address that names it, and a
+    /// connection that was dialed without it has no Nostr path to fall to. A pair that is served
+    /// names none, so the first flight of a dial on a healthy mesh never rides Nostr.
     pub(crate) fn dial_address(&self, eid: EndpointId) -> EndpointAddr {
         let mut address: EndpointAddr = {
             let addrs = self.inner.addrs.lock().ok();
@@ -336,7 +338,21 @@ impl UnicastPool {
                 .and_then(|addrs| addrs.get(&eid).cloned())
                 .unwrap_or_else(|| EndpointAddr::new(eid))
         };
-        if self.inner.nostr_transport.load(Ordering::Relaxed) {
+        // A path that a test took away from this node is not dialed: its selector refuses it, and
+        // iroh would select it as soon as it validates (the test hooks block nothing without the
+        // `test-hooks` feature, so a product build keeps every address).
+        if let Some(endpoint) = &self.inner.endpoint {
+            let local = endpoint.id();
+            address
+                .addrs
+                .retain(|path| !probe::path_is_blocked(local, eid, path));
+        }
+        let wanted = self
+            .inner
+            .admission
+            .get()
+            .is_some_and(|table| table.nostr_wanted(eid));
+        if wanted && self.inner.nostr_transport.load(Ordering::Relaxed) {
             address
                 .addrs
                 .insert(iroh::TransportAddr::Custom(transport_addr(
@@ -822,6 +838,7 @@ impl UnicastPool {
         }
         #[cfg(test)]
         self.inner.dials_started.fetch_add(1, Ordering::Relaxed);
+        forget_blocked_addresses(&endpoint, eid).await;
         match dial(&endpoint, address).await {
             Ok(connection) => {
                 self.inner.dial_failures.lock().await.forget(&eid);
@@ -850,6 +867,11 @@ impl UnicastPool {
                     .lock()
                     .await
                     .note(eid, Instant::now());
+                // A pair that no path reaches is one that the engine wants Nostr for: the next
+                // dial names its Nostr address (a table with no Nostr transport ignores it).
+                if let Some(table) = self.inner.admission.get() {
+                    table.want_nostr(eid);
+                }
                 Err(error)
             }
         }
@@ -935,6 +957,33 @@ async fn wait_for_dial(mut outcome: watch::Receiver<DialOutcome>) -> result::Res
 /// Dial `eid` on the unicast ALPN within [`DIAL_TIMEOUT`]. The endpoint already
 /// knows the peer's address (registered via `add_peer_addr`), so a bare-id
 /// `EndpointAddr` resolves through the endpoint's address book + lookups.
+/// Tests only: take from iroh the addresses of `peer` that the block hooks took away from this
+/// node. The selector refuses a blocked path, but iroh keeps the address and validates the path
+/// at once, so a new connection would select it before any lower rung could open. A real outage
+/// leaves no such path. A product build has no hooks, and nothing is blocked.
+#[cfg(feature = "iroh-test-utils")]
+async fn forget_blocked_addresses(endpoint: &Endpoint, peer: EndpointId) {
+    let local = endpoint.id();
+    let Some(info) = endpoint.remote_info(peer).await else {
+        return;
+    };
+    let mut blocked: Vec<iroh::TransportAddr> = Vec::new();
+    for known in info.addrs() {
+        let path = known.addr();
+        if probe::path_is_blocked(local, peer, path) {
+            blocked.push(path.clone());
+        }
+    }
+    if !blocked.is_empty() {
+        endpoint
+            .remove_endpoint_addr(EndpointAddr::from_parts(peer, blocked))
+            .await;
+    }
+}
+
+#[cfg(not(feature = "iroh-test-utils"))]
+async fn forget_blocked_addresses(_endpoint: &Endpoint, _peer: EndpointId) {}
+
 async fn dial(endpoint: &Endpoint, address: EndpointAddr) -> Result<Connection> {
     match time::timeout(DIAL_TIMEOUT, endpoint.connect(address, UNICAST_ALPN)).await {
         Ok(Ok(connection)) => Ok(connection),

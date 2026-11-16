@@ -133,8 +133,25 @@ async fn a_nostr_only_browser_endpoint_binds_and_carries() {
     let key = SecretKey::generate();
     let custom: url::Url = "wss://relay.example".parse().expect("a relay URL");
     let lookups = LookupOpts::loopback().nostr(NostrChoice::Custom(vec![custom]));
+    let nostr = NostrTransport::new(key.public());
+    // The browser socket opens on activation: the transport serves this endpoint and carries no
+    // frame before an engine allows a pair.
+    assert!(
+        nostr.activate(
+            habilis_network::protocol::nostr::NostrKeys::derive(
+                &habilis_network::protocol::TopicId::from_bytes([1u8; 32])
+            ),
+            vec!["wss://relay.example".parse().expect("a relay URL")],
+        ),
+        "the first activation opens the data lane"
+    );
+    assert_eq!(
+        nostr.handle().app_id(),
+        key.public(),
+        "it serves the endpoint"
+    );
     let mut transports = TransportHandles::default();
-    transports.nostr = Some(NostrTransport::new(key.public()));
+    transports.nostr = Some(nostr);
     let options = TransportOpts::default().udp(false).relay(false);
     transports.options = options.webrtc(false).gossip(false).nostr(true);
     let endpoint = build_endpoint(&lookups, Some(key), None, Vec::new(), transports)

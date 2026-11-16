@@ -2439,6 +2439,18 @@ impl EventLoopState {
                 .is_some_and(|handle| handle.has_session(&peer))
     }
 
+    /// Whether the selected path of `peer` is Nostr. A gossip link never rides it (the hook closes
+    /// the connection), so a graft only makes the gossip layer dial a link that dies at once. Not
+    /// while a session is attached: it carries the pair, and the link rides it once iroh moves
+    /// the connection.
+    pub(crate) fn rides_nostr(&self, peer: EndpointId) -> bool {
+        self.pair_path_kind(peer) == Some(probe::PathKind::Nostr)
+            && !self
+                .webrtc
+                .as_ref()
+                .is_some_and(|handle| handle.has_session(&peer))
+    }
+
     /// Record a peer's endpoint address, learned from its published card.
     ///
     /// The whole address, not just the id: the retry pass has to know whether a

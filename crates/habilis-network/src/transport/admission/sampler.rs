@@ -23,9 +23,16 @@ pub(crate) fn gossip_view(kinds: &[probe::PathKind]) -> (bool, bool) {
 
 /// Pure: what the table tells the Nostr transport about a peer whose live connections read as
 /// `kinds`: whether it is established (any live connection) and whether frames may go to it
-/// (no other path is selected: see [`nostr_allow_for`](probe::nostr_allow_for)).
-pub(crate) fn nostr_view(kinds: &[probe::PathKind]) -> (bool, bool) {
-    (!kinds.is_empty(), probe::nostr_allow_for(kinds))
+/// (no other usable path: see [`nostr_allow_for`](probe::nostr_allow_for)).
+pub(crate) fn nostr_view(
+    kinds: &[probe::PathKind],
+    relay_carries: bool,
+    wanted: bool,
+) -> (bool, bool) {
+    (
+        !kinds.is_empty(),
+        probe::nostr_allow_for(kinds, relay_carries, wanted),
+    )
 }
 
 /// One timer for the whole table, ending with it.

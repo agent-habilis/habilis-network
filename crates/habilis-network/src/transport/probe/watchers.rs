@@ -278,6 +278,7 @@ pub(crate) async fn on_path_change(
     // all of its connections, so that this path and the sweep never disagree on what to tell
     // the gossip transport.
     state.webrtc_admission.sync_gossip();
+    state.webrtc_admission.sync_nostr();
     let Some(handle) = &state.webrtc else {
         return;
     };
@@ -298,7 +299,11 @@ pub(crate) async fn on_path_change(
             mark_proven(state, peer);
         }
         PathAction::Rerace => {
-            if matches!(kind, PathKind::Multihop | PathKind::Gossip) {
+            // A pair on Nostr is off the relay as well when the mesh lists Nostr: payload flows on
+            // it, no gossip link does, and the pair has no lane yet.
+            let off_the_relay = matches!(kind, PathKind::Multihop | PathKind::Gossip)
+                || (kind == PathKind::Nostr && state.relay_transport.nostr_allowed());
+            if off_the_relay {
                 // Off the relay, so frames may flow; but the pair has no lane yet.
                 mark_proven(state, peer);
                 tracing::info!(target: transport::LOG_TARGET, %peer, ?kind, "pair is off the relay; racing for a lane");

@@ -92,6 +92,8 @@ impl SignalAdmission {
                 path_sink: None,
                 gossip: None,
                 nostr: None,
+                nostr_wanted: HashSet::new(),
+                relay_carries: false,
                 closed_on_rung: HashMap::new(),
             })),
             cap,
@@ -154,18 +156,20 @@ impl SignalAdmission {
         probe::best_kind(kinds).or_else(|| self.recently_closed_on_rung(peer))
     }
 
-    /// The recursion rule closed a gossip connection of `peer`: for a while, the pair reads as
-    /// the gossip rung though no connection is left to read it from.
-    pub(crate) fn note_closed_on_rung(&self, peer: EndpointId) {
-        self.lock().closed_on_rung.insert(peer, Instant::now());
+    /// A rule closed a gossip connection of `peer` because its path is `kind` (the gossip rung, or
+    /// Nostr): for a while, the pair reads as that rung though no connection is left to read it
+    /// from.
+    pub(crate) fn note_closed_on_rung(&self, peer: EndpointId, kind: probe::PathKind) {
+        self.lock()
+            .closed_on_rung
+            .insert(peer, (Instant::now(), kind));
     }
 
-    /// The gossip rung, if the recursion rule closed a connection of `peer` lately.
+    /// The rung on which a rule closed a connection of `peer` lately, if one did.
     pub(crate) fn recently_closed_on_rung(&self, peer: EndpointId) -> Option<probe::PathKind> {
         let inner = self.lock();
-        let at = inner.closed_on_rung.get(&peer)?;
-        (Instant::now().saturating_duration_since(*at) < RUNG_CLOSE_MEMORY)
-            .then_some(probe::PathKind::Gossip)
+        let (at, kind) = inner.closed_on_rung.get(&peer)?;
+        (Instant::now().saturating_duration_since(*at) < RUNG_CLOSE_MEMORY).then_some(*kind)
     }
 
     /// Whether any live connection of `peer` with a selected path reads below IP: the relay, a
@@ -595,9 +599,9 @@ impl SignalAdmission {
     }
 
     /// The Nostr transport of this endpoint, kept by the table so that it can tell the transport
-    /// which pairs have no other selected path.
-    /// The table keeps the transport itself, not only its handle: the receive task of the
-    /// transport stops with the last clone, and the table lives as long as the endpoint does.
+    /// which pairs have no other usable path. The table keeps the transport itself, not only its
+    /// handle: the receive task of the transport stops with the last clone, and the table lives as
+    /// long as the endpoint does.
     pub(crate) fn set_nostr(
         &self,
         transport: habilis_network_iroh_nostr_transport::NostrTransport,
@@ -612,6 +616,33 @@ impl SignalAdmission {
         let transport = self.lock().nostr.clone();
         let (keys, ranking) = plan.into_parts();
         transport.is_some_and(|transport| transport.activate(keys, ranking))
+    }
+
+    /// Whether the mesh lets the relay carry payload: a relay path serves a pair only then, and
+    /// on a lookup-only relay the pair has no usable path there.
+    pub(crate) fn set_relay_carries(
+        &self,
+        // true when the mesh lets the relay carry payload
+        carries: bool,
+    ) {
+        self.lock().relay_carries = carries;
+    }
+
+    /// The engine wants Nostr for `peer`: a dial to it failed, so the next dial names the Nostr
+    /// address. A pair that is served leaves the set at the next reading of its connections.
+    pub(crate) fn want_nostr(&self, peer: EndpointId) {
+        let mut inner = self.lock();
+        if inner.nostr.is_some() {
+            inner.nostr_wanted.insert(peer);
+        }
+    }
+
+    /// Whether a dial to `peer` names the Nostr address: the table has a Nostr transport, and the
+    /// engine wants it for the pair. A table with no Nostr transport (an injected endpoint that
+    /// came without one) never wants it.
+    pub(crate) fn nostr_wanted(&self, peer: EndpointId) -> bool {
+        let inner = self.lock();
+        inner.nostr.is_some() && inner.nostr_wanted.contains(&peer)
     }
 
     /// Whether [`set_nostr`](Self::set_nostr) set a Nostr transport.
@@ -630,6 +661,12 @@ impl SignalAdmission {
     /// [`Inner::sync_gossip`], now. The sweep and every new connection do it too.
     pub(crate) fn sync_gossip(&self) {
         self.lock().sync_gossip();
+    }
+
+    /// [`Inner::sync_nostr`], now: a path change tells the Nostr transport at once, not at the
+    /// next sweep.
+    pub(crate) fn sync_nostr(&self) {
+        self.lock().sync_nostr();
     }
 
     /// The event loop's channel for the sessions that this node answered.

@@ -8,7 +8,7 @@ use iroh::EndpointId;
 
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState};
-use crate::transport::payload_path::{PROBE_DEADLINE, wait_direct};
+use crate::transport::payload_path::{PROBE_DEADLINE, wait_payload_path};
 use crate::transport::webrtc;
 use crate::util::clock::Instant;
 
@@ -66,9 +66,13 @@ pub(crate) fn ensure_direct(
     state.direct.insert(peer, DirectState::Pending);
     let pool = state.unicast_pool.clone();
     let tx = state.direct_proven.clone();
+    // A pair that only Nostr serves is proven for payload when the mesh lists Nostr: the probe
+    // waits for a direct path or for that rung. Nothing grafts a gossip link onto it
+    // (`request_graft`).
+    let payload = state.relay_transport;
     task::spawn(async move {
         let direct = match pool.probe_connection(peer).await {
-            Ok(connection) => wait_direct(&connection, PROBE_DEADLINE).await,
+            Ok(connection) => wait_payload_path(&connection, PROBE_DEADLINE, payload).await,
             Err(error) => {
                 tracing::debug!(target: transport::LOG_TARGET, %peer, %error, "direct-path probe could not connect");
                 false
@@ -116,6 +120,11 @@ pub(crate) async fn request_graft(
 ) -> Result<(), api::ApiError> {
     if peer != context.rendezvous_id && state.rides_gossip_rung(peer) {
         tracing::debug!(target: transport::LOG_TARGET, %peer, "graft skipped: the pair rides the gossip rung");
+        return Ok(());
+    }
+    // A gossip link never rides Nostr: the hook closes it, and the graft would dial it again.
+    if peer != context.rendezvous_id && state.rides_nostr(peer) {
+        tracing::debug!(target: transport::LOG_TARGET, %peer, "graft skipped: the pair rides Nostr");
         return Ok(());
     }
     match graft_request(

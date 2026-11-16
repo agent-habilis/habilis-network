@@ -78,13 +78,19 @@ pub(crate) fn close_gossip_links_to(remote: iroh::EndpointId) -> usize {
 
 /// Close `connection` with [`GOSSIP_NOSTR_REFUSED_CODE`] once its selected path is Nostr, now or
 /// after a path change. Unconditional: it reads no mesh policy, and the mesh may allow the relay.
-pub(crate) fn watch_gossip_on_nostr(connection: &Connection) {
+pub(crate) fn watch_gossip_on_nostr(
+    connection: &Connection,
+    admission: super::admission::SignalAdmission,
+) {
     let remote = connection.remote_id();
     habilis_network_iroh_gossip_transport::watch_transport_path(
         connection,
         habilis_network_iroh_gossip_transport::NOSTR_TRANSPORT_ID,
         GOSSIP_NOSTR_REFUSED_CODE,
         move || {
+            // The pair reads as Nostr for a while, so that a graft does not dial the link again
+            // at once (see `request_graft`).
+            admission.note_closed_on_rung(remote, super::probe::PathKind::Nostr);
             tracing::info!(target: LOG_TARGET, %remote, "gossip connection closed: its path is Nostr");
         },
     );
@@ -102,7 +108,7 @@ pub(crate) fn watch_gossip_recursion(
         GOSSIP_RECURSION_REFUSED_CODE,
         move || {
             GOSSIP_RECURSION_CLOSES.fetch_add(1, Ordering::Relaxed);
-            admission.note_closed_on_rung(remote);
+            admission.note_closed_on_rung(remote, super::probe::PathKind::Gossip);
             tracing::info!(target: LOG_TARGET, %remote, "gossip connection closed: its path is the gossip rung");
         },
     );
