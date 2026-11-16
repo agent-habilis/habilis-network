@@ -245,12 +245,8 @@ const WATCH: Duration = Duration::from_secs(10);
 /// no peer connected besides the units. A dial for the new member (a `PeerInfo` dial, a probe, a
 /// courtesy dial) would take a third unit, or it would leave an extra.
 fn beyond_the_units(snapshot: &TopologySnapshot) -> Option<String> {
-    let extras: Vec<&str> = snapshot
-        .peers
-        .iter()
-        .filter(|link| link.extra)
-        .map(|link| link.endpoint.as_str())
-        .collect();
+    let flagged = snapshot.peers.iter().filter(|link| link.extra);
+    let extras: Vec<&str> = flagged.map(|link| link.endpoint.as_str()).collect();
     let held = (
         snapshot.direct_units,
         snapshot.over_ceiling,

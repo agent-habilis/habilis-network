@@ -89,12 +89,13 @@ impl EventLoopState {
         } else {
             None
         };
+        let neighbor: bool = self.linked_endpoints.contains(&peer);
         PeerLink {
             endpoint: peer.to_string(),
             nickname: self.nickname_of_endpoint(peer),
             path: PathLabel::from(kind),
             via,
-            neighbor: self.linked_endpoints.contains(&peer),
+            neighbor,
             pinned: ledger.pinned.contains(&peer),
             extra: ledger.extras.contains(&peer),
         }
@@ -233,12 +234,8 @@ mod tests {
             MAX_CONNECTIONS + 1,
             "the extra counts toward the total cap: {snapshot:?}"
         );
-        let flagged: Vec<&str> = snapshot
-            .peers
-            .iter()
-            .filter(|peer| peer.extra)
-            .map(|peer| peer.endpoint.as_str())
-            .collect();
+        let extras = snapshot.peers.iter().filter(|peer| peer.extra);
+        let flagged: Vec<&str> = extras.map(|peer| peer.endpoint.as_str()).collect();
         assert_eq!(
             flagged,
             [extra.to_string().as_str()],
