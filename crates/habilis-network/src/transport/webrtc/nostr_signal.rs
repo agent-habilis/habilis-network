@@ -504,10 +504,14 @@ pub(crate) mod discovery {
             .nostr_poked
             .retain(|_, at| now.duration_since(*at) < SEEN_FRESH);
         // A `Hello` sets the lane flag of a peer that may never become a member, and no member
-        // release clears it: the flag stays only for a bound endpoint or a peer recent lately.
+        // release clears it: the flag stays only for a bound endpoint, a linked one, or a peer
+        // recent lately.
         let flagged: Vec<EndpointId> = state.lane_peers.iter().copied().collect();
         for peer in flagged {
-            if !state.endpoint_is_bound(peer) && !state.nostr_seen.contains_key(&peer) {
+            if !state.endpoint_is_bound(peer)
+                && !state.linked_endpoints.contains(&peer)
+                && !state.nostr_seen.contains_key(&peer)
+            {
                 state.lane_peers.remove(&peer);
             }
         }
@@ -1545,6 +1549,29 @@ mod tests {
             assert!(
                 state.lane_peers.contains(&member),
                 "a member keeps its lane flag"
+            );
+        }
+
+        /// The retry pass skips a lane peer with no flag, so a peer that is still linked must keep
+        /// the flag even when no nickname binds it and no `Hello` came lately.
+        #[test]
+        fn a_linked_endpoint_with_no_name_and_no_recent_hello_keeps_its_lane_flag() {
+            let mut state = fresh_state();
+            let (linked, gone) = (endpoint_id(7), endpoint_id(8));
+            let later = Instant::now() + Duration::from_mins(10);
+            state.linked_endpoints.insert(linked);
+            state.lane_peers.insert(linked);
+            state.lane_peers.insert(gone);
+
+            prune(&mut state, later);
+
+            assert!(
+                state.lane_peers.contains(&linked),
+                "a linked endpoint keeps its lane flag"
+            );
+            assert!(
+                !state.lane_peers.contains(&gone),
+                "an endpoint that is not linked loses its lane flag"
             );
         }
 
