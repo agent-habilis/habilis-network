@@ -258,6 +258,29 @@ mod tests {
         });
     }
 
+    /// The pool counts its dials for each peer, so that a test can say that a node dialed nobody
+    /// for a peer. A dial counts when it reaches the endpoint, and a send over a warm connection
+    /// does not.
+    #[test]
+    fn the_pool_counts_each_dial_it_makes_for_a_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(300)).await;
+            let other = testing::endpoint_id(8);
+            assert_eq!(pool.dials_to(server), 0, "no dial before the first send");
+            pool.warm_or_dial(server).await.expect("dial");
+            assert_eq!(pool.dials_to(server), 1, "the first send dials once");
+            pool.warm_or_dial(server).await.expect("warm");
+            assert_eq!(
+                pool.dials_to(server),
+                1,
+                "a send over the warm connection is not a dial"
+            );
+            assert_eq!(pool.dials_to(other), 0, "another peer is counted apart");
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
     /// A route to a peer, for the tests of a pinned dial: the dial itself fails, as the test
     /// endpoints run no multihop transport.
     fn a_route() -> iroh::TransportAddr {

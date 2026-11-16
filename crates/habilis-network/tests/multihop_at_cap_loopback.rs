@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{
-    self, Blocking, Inbound, Inspect, InspectHost, Membership, Messaging, Request, Routing,
+    self, Blocking, Inbound, Inspect, InspectHost, InspectTest, Membership, Messaging, Request,
+    Routing,
 };
 use habilis_network::net;
 use habilis_network::protocol::{Lookup, Transport};
@@ -165,6 +166,19 @@ impl Member {
     async fn direct_units(&self) -> (usize, usize) {
         self.membership
             .request(|reply| Request::Routing(Routing::DirectUnits { reply }))
+            .await
+            .expect("the loop answers")
+    }
+
+    /// How many dials this member made to the member `peer`, direct or through a route.
+    async fn dials_to(&self, peer: &str) -> u64 {
+        self.membership
+            .request(|reply| {
+                Request::InspectTest(InspectTest::DialsTo {
+                    peer: peer.to_owned(),
+                    reply,
+                })
+            })
             .await
             .expect("the loop answers")
     }
@@ -422,10 +436,15 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
             "alice never learned a route to dave: {}",
             counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
         );
+        let dials_before = alice.dials_to(far_nick).await;
         assert!(
             delivered(&alice, &mut dave, far_nick, "to dave through bob").await,
             "the frame of alice never reached dave: {}",
             counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
+        );
+        assert!(
+            alice.dials_to(far_nick).await > dials_before,
+            "the first send of alice to dave is a dial, and the pool counts it"
         );
         let after_send = alice.direct_units().await;
         assert_eq!(

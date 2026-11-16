@@ -418,6 +418,15 @@ pub enum InspectTest {
         /// Gets the reason, or `None` when there is none.
         reply: oneshot::Sender<Option<&'static str>>,
     },
+    /// Tests only: how many dials this node made to the member `peer` since it started, direct or
+    /// through a route. A send over a warm connection is not a dial. A peer that the node does not
+    /// know reads 0.
+    DialsTo {
+        /// The peer, by nickname.
+        peer: String,
+        /// Gets the count.
+        reply: oneshot::Sender<u64>,
+    },
 }
 
 /// Test-only reads of routes, on a host build.
@@ -1074,6 +1083,13 @@ impl MembershipApp {
             }
             InspectTest::EndpointId { reply } => {
                 let _ = reply.send(context.endpoint.id());
+                false
+            }
+            InspectTest::DialsTo { peer, reply } => {
+                let dials = known_peer(state, &peer)
+                    .ok()
+                    .map_or(0, |address| state.unicast_pool.dials_to(address.id));
+                let _ = reply.send(dials);
                 false
             }
             InspectTest::SelectedRung { peer, reply } => {

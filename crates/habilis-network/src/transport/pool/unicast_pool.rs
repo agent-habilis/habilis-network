@@ -111,6 +111,10 @@ pub(in crate::transport::pool) struct PoolInner {
     /// Tests only: the dials that reached the endpoint, where `dial_attempts` counts the calls.
     #[cfg(test)]
     pub(in crate::transport::pool) dials_started: AtomicU64,
+    /// Tests only: how many dials this pool made to each peer, direct or through a route. A test
+    /// that says a node dialed nobody for a peer reads it with [`UnicastPool::dials_to`].
+    #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+    pub(in crate::transport::pool) dials_made: std_Mutex<HashMap<EndpointId, u64>>,
     /// Endpoints with a dial or a path wait in flight, each with the receiver of the outcome that
     /// its dialer publishes, so that concurrent sends to one peer that has no usable connection
     /// yet share one dial or one wait instead of racing their own: the first is the dialer, the
@@ -190,6 +194,8 @@ impl UnicastPool {
                 dial_attempts: AtomicU64::new(0),
                 #[cfg(test)]
                 dials_started: AtomicU64::new(0),
+                #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+                dials_made: std_Mutex::new(HashMap::new()),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
                 dial_locks: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
@@ -323,6 +329,8 @@ impl UnicastPool {
                 dial_attempts: AtomicU64::new(0),
                 #[cfg(test)]
                 dials_started: AtomicU64::new(0),
+                #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+                dials_made: std_Mutex::new(HashMap::new()),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
                 dial_locks: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
@@ -598,6 +606,14 @@ impl UnicastPool {
             }
         });
         true
+    }
+
+    /// Tests only: how many dials this pool made to `eid`: each reaches the endpoint, whether it
+    /// takes a route or an address, and a send over a warm connection is not one.
+    #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+    pub(crate) fn dials_to(&self, eid: EndpointId) -> u64 {
+        let made = self.inner.dials_made.lock().ok();
+        made.and_then(|made| made.get(&eid).copied()).unwrap_or(0)
     }
 
     /// Tests only: hold the next dial until the returned [`Notify`](tokio::sync::Notify) is notified.
@@ -938,6 +954,10 @@ impl UnicastPool {
         }
         #[cfg(test)]
         self.inner.dials_started.fetch_add(1, Ordering::Relaxed);
+        #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+        if let Ok(mut made) = self.inner.dials_made.lock() {
+            *made.entry(eid).or_insert(0) += 1;
+        }
         match dial(&endpoint, address).await {
             Ok(connection) => {
                 self.inner.dial_failures.lock().await.forget(&eid);
