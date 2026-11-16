@@ -445,7 +445,9 @@ async fn send_courtesy(
         WarmSend::Cold if dial_back || state.linked_endpoints.contains(&eid) => {
             state
                 .unicast_pool
-                .dial_and_send_in_background(eid, bytes.into_bytes())
+                .dial_and_send_in_background(eid, bytes.into_bytes(), || {
+                    probe::route_to(state, eid)
+                })
                 .await
         }
         WarmSend::Cold | WarmSend::Refused => false,
