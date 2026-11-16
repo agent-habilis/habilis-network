@@ -364,6 +364,9 @@ struct Task {
     subs: HashMap<String, Subscription>,
     rate_limit: Backoff,
     last_limited: Option<Instant>,
+    /// The wait of the last rate limit, kept until the relay accepts an event:
+    /// it belongs to the relay, so a new socket starts `Limited`, not `Up`.
+    limited_until: Option<Instant>,
     resubscribe: Backoff,
     resubscribe_at: Option<Instant>,
     closed_subs: HashSet<String>,
@@ -397,6 +400,7 @@ async fn run(
         subs: HashMap::new(),
         rate_limit: RATE_LIMIT,
         last_limited: None,
+        limited_until: None,
         resubscribe: RESUBSCRIBE,
         resubscribe_at: None,
         closed_subs: HashSet::new(),
@@ -459,7 +463,8 @@ impl Task {
                 return outcome;
             }
         }
-        self.set_health(Health::Up);
+        let admitted = self.limited_until.map_or(Health::Up, Health::Limited);
+        self.set_health(admitted);
         let outcome = loop {
             let resubscribe_at = self.resubscribe_at;
             let resubscribe = async move {
@@ -566,6 +571,7 @@ impl Task {
                 {
                     self.rate_limit.reset();
                 }
+                self.limited_until = None;
                 if matches!(*self.health.borrow(), Health::Limited(_)) {
                     self.set_health(Health::Up);
                 }
@@ -614,6 +620,7 @@ impl Task {
         let now = Instant::now();
         let until = now + self.rate_limit.step();
         self.last_limited = Some(now);
+        self.limited_until = Some(until);
         self.set_health(Health::Limited(until));
         until
     }
@@ -696,9 +703,10 @@ mod flow_tests {
     use tokio::sync::mpsc;
     use url::Url;
 
-    use super::{Hub, Lease};
+    use super::{Health, Hub, Lease};
+    use crate::event::{Event, Keys};
     use crate::test_relay::TestRelay;
-    use crate::wire::Filter;
+    use crate::wire::{self, Filter};
 
     /// The first retirement wait of the hubs below: short enough to see a whole
     /// retire, retry and refuse-again cycle in a second or two.
@@ -775,6 +783,39 @@ mod flow_tests {
             "the second refusal waits twice as long as the first"
         );
         until("the doubled wait ends", || !blocked(hub, &url)).await;
+    }
+
+    /// A rate limit is the relay's, not the socket's: a reconnect inside the
+    /// wait must not make the relay count again before an event is accepted.
+    #[tokio::test]
+    async fn a_rate_limit_outlives_the_socket_it_was_set_on() {
+        let hub = hub();
+        let relay = TestRelay::spawn().await.expect("spawn test relay");
+        relay.refuse_events(Some("rate-limited: slow down"));
+        let url = relay.url();
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let lease = hub
+            .lease(&url, "one".into(), filter(), events)
+            .expect("a lease");
+        until("the relay is up", || lease.health() == Health::Up).await;
+        let signed = Event::sign(&Keys::generate(), crate::unix_now(), &[1u8; 32], "x".into());
+        lease.publish(wire::event(&signed));
+        until("the refusal limits the relay", || {
+            matches!(lease.health(), Health::Limited(_))
+        })
+        .await;
+
+        relay.drop_connections();
+        until("the socket is down", || lease.health() == Health::Down).await;
+        until("the relay is dialed again", || {
+            lease.health() != Health::Down
+        })
+        .await;
+        assert!(
+            matches!(lease.health(), Health::Limited(_)),
+            "the reconnect did not forgive the rate limit, but made it {:?}",
+            lease.health()
+        );
     }
 
     /// A relay that serves us after a retry (it finishes the REQ) is forgiven:
