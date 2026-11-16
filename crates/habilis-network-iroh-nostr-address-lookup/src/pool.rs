@@ -26,7 +26,7 @@ use crate::wire::{self, Filter};
 
 use crate::hub::Health;
 use n0_future::{task, time};
-use std::mem;
+use std::{future, mem};
 /// Choosing again on a timer is what notices an echo that is overdue.
 const RECHOOSE_EVERY: Duration = Duration::from_secs(5);
 /// A relay that has not echoed our event this long after we sent it is taken
@@ -71,6 +71,7 @@ pub struct Pool {
     keys: Arc<Keys>,
     commands: mpsc::UnboundedSender<Command>,
     connected: watch::Receiver<Vec<Url>>,
+    sendable: watch::Receiver<bool>,
     _task: task::AbortOnDropHandle<()>,
 }
 
@@ -96,6 +97,7 @@ impl Pool {
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let (connected_tx, connected) = watch::channel(Vec::new());
+        let (sendable_tx, sendable) = watch::channel(false);
         if ranking.is_empty() {
             tracing::warn!(target: "habilis_network::lookup", "a pool with no relays reaches no one");
         }
@@ -114,12 +116,22 @@ impl Pool {
         // The pool signs with this key, and so does every datagram it queues on a socket.
         let keys = Arc::new(Keys::generate());
         let own = keys.pubkey().to_owned();
-        let task = task::spawn(run(chooser, own, command_rx, out_tx, connected_tx));
+        let task = task::spawn(run(
+            chooser,
+            own,
+            command_rx,
+            out_tx,
+            Watches {
+                connected: connected_tx,
+                sendable: sendable_tx,
+            },
+        ));
         let pool = Self {
             lane,
             keys,
             commands,
             connected,
+            sendable,
             _task: task::AbortOnDropHandle::new(task),
         };
         (pool, out_rx)
@@ -164,6 +176,13 @@ impl Pool {
     pub fn connected(&self) -> impl Iterator<Item = Url> + use<> {
         let snapshot: Vec<Url> = self.connected.borrow().clone();
         snapshot.into_iter()
+    }
+
+    /// Whether a datagram sent now has a relay that takes it: one is `Up`, or one is limited
+    /// and its wait is over, so the datagram is its probe. A read of a flag, not of the list.
+    #[must_use]
+    pub fn sendable(&self) -> bool {
+        *self.sendable.borrow()
     }
 
     /// Wait until the connected set changes.
@@ -327,6 +346,26 @@ impl Chooser {
         }
     }
 
+    /// Some held relay takes a datagram now: it is `Up`, or limited with its wait over.
+    fn sendable(&self) -> bool {
+        let lane = self.hub.lane();
+        self.leases
+            .iter()
+            .any(|(url, lease)| lease.health().sendable(lane) && !self.swallows(url))
+    }
+
+    /// When the first wait of a limited relay ends, so the pool tells its owner then.
+    fn next_limit_end(&self) -> Option<Instant> {
+        let now = Instant::now();
+        self.leases
+            .iter()
+            .filter_map(|(_, lease)| match lease.health() {
+                Health::Limited(until) if until > now => Some(until),
+                _ => None,
+            })
+            .min()
+    }
+
     fn connected(&self) -> Vec<Url> {
         let mut urls = Vec::new();
         for (url, lease) in &self.leases {
@@ -338,12 +377,18 @@ impl Chooser {
     }
 }
 
+/// What a pool tells its owner about its relays.
+struct Watches {
+    connected: watch::Sender<Vec<Url>>,
+    sendable: watch::Sender<bool>,
+}
+
 async fn run(
     mut chooser: Chooser,
     own: String,
     mut commands: mpsc::UnboundedReceiver<Command>,
     out: mpsc::UnboundedSender<Event>,
-    connected: watch::Sender<Vec<Url>>,
+    watches: Watches,
 ) {
     let (events_tx, mut events) = mpsc::unbounded_channel();
     let mut changes = chooser.hub.changes();
@@ -351,7 +396,15 @@ async fn run(
     let mut rechoose = time::interval(RECHOOSE_EVERY);
     chooser.choose(&events_tx);
     loop {
+        let limit_end = chooser.next_limit_end();
+        let wait_limit = async move {
+            match limit_end {
+                Some(at) => time::sleep_until(at).await,
+                None => future::pending().await,
+            }
+        };
         tokio::select! {
+            () = wait_limit => {}
             command = commands.recv() => match command {
                 None => return,
                 Some(Command::Width(width)) => {
@@ -405,7 +458,7 @@ async fn run(
             }
             _ = rechoose.tick() => chooser.choose(&events_tx),
         }
-        connected.send_if_modified(|current| {
+        watches.connected.send_if_modified(|current| {
             let now = chooser.connected();
             if *current == now {
                 false
@@ -414,6 +467,7 @@ async fn run(
                 true
             }
         });
+        watches.sendable.send_replace(chooser.sendable());
     }
 }
 

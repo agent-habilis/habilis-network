@@ -102,6 +102,13 @@ impl DataPool {
         self.dropped.load(Ordering::Relaxed)
     }
 
+    /// Whether a datagram sent now has a relay that takes it. A node tells its transport this, so
+    /// a path that no relay serves is not valid.
+    #[must_use]
+    pub fn sendable(&self) -> bool {
+        self.pool.sendable()
+    }
+
     /// The relays held and connected now, in rank order.
     pub fn connected(&self) -> impl Iterator<Item = Url> + use<> {
         self.pool.connected()

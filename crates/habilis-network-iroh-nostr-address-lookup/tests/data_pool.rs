@@ -148,6 +148,36 @@ async fn a_relay_past_the_listen_cap_carries_no_data() {
     );
 }
 
+/// One data relay answers "rate-limited:" once. While the wait runs the lane takes nothing; when
+/// it ends the lane takes a frame again, and that frame is the probe that earns the relay `Up`.
+/// A transport that sends only while the lane is sendable must see that moment, or no frame ever
+/// goes and the lane stays shut.
+#[tokio::test]
+async fn a_lane_with_one_relay_recovers_from_one_rate_limit() {
+    let relays = relays(1).await;
+    relays[0].refuse_events(Some("rate-limited: slow down"));
+    let alice = node(urls(&relays), ALICE, ALICE_TAG);
+    let mut bob = node(urls(&relays), BOB, BOB_TAG);
+    eventually("the lane takes a frame", || alice.pool.sendable()).await;
+    alice.pool.send(&BOB_TAG, b"refused".to_vec());
+    eventually("the relay limits the lane", || !alice.pool.sendable()).await;
+    relays[0].refuse_events(None);
+    // The first wait is 1 s. The pool must say so when it ends, not at its next slow check.
+    let mut sendable_again = false;
+    for _ in 0..60 {
+        if alice.pool.sendable() {
+            sendable_again = true;
+            break;
+        }
+        time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        sendable_again,
+        "the lane took no frame 3 s after a 1 s wait"
+    );
+    warm_up(&alice, &BOB_TAG, &mut bob).await;
+}
+
 #[tokio::test]
 async fn a_dead_first_relay_moves_the_data_to_the_next() {
     let mut relays = relays(2).await;
