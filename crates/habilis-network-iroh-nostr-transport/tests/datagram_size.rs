@@ -1,6 +1,6 @@
 //! The largest frame that iroh hands a frame transport fits the datagram limit of the data lane
 //! (2048 B, see `DataPool`): QUIC sizes its packets by the path MTU, which iroh bounds at 1452 B
-//! whatever the transport, and the frame adds a 65 B header. A bulk transfer shows it on a real
+//! whatever the transport, and the frame adds a 66 B header. A bulk transfer shows it on a real
 //! connection: path MTU discovery has probed as high as it goes by the end.
 
 use std::sync::atomic::{AtomicUsize, Ordering};

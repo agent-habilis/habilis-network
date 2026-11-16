@@ -55,6 +55,9 @@ fn two_endpoints_with_only_nostr_echo_through_a_relay() {
             let alice = endpoint(alice_key, &alice_transport).await;
             let bob = endpoint(bob_key, &bob_transport).await;
             let router = Router::builder(bob.clone()).accept(ECHO_ALPN, Echo).spawn();
+            // The transport starts closed: alice names bob, and bob's replies pass because a
+            // frame of alice arrived first.
+            alice_transport.handle().allow(bob.id(), true);
 
             let target = EndpointAddr::from_parts(
                 bob.id(),
@@ -103,6 +106,9 @@ fn a_transport_activated_after_the_bind_links_and_echoes() {
             let alice = endpoint(alice_key, &alice_transport).await;
             let bob = endpoint(bob_key, &bob_transport).await;
             let router = Router::builder(bob.clone()).accept(ECHO_ALPN, Echo).spawn();
+            // The transport starts closed: alice names bob, and bob's replies pass because a
+            // frame of alice arrived first.
+            alice_transport.handle().allow(bob.id(), true);
             assert!(
                 alice_transport.activate(keys.clone(), vec![relay.url()]),
                 "the first activation opens the lane"
@@ -137,6 +143,54 @@ fn a_transport_activated_after_the_bind_links_and_echoes() {
                 .expect("read the echo");
             assert_eq!(echoed, b"late keys", "the echo returns the message");
             connection.close(0u32.into(), b"done");
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
+        },
+    );
+}
+
+/// A transport starts closed: with no `allow` and no frame received, nothing of it reaches the
+/// relay, so a healthy pair never carries a datagram on the last rung by accident.
+#[test]
+fn a_closed_transport_sends_nothing_to_a_peer_it_was_not_told_about() {
+    ::habilis_network_test_tracing::run_multi_thread(
+        ::habilis_network_test_tracing::init(),
+        2,
+        async {
+            let relay = TestRelay::spawn().await.expect("spawn a relay");
+            let keys = NostrKeys::derive(&TopicId::from_bytes([5u8; 32]));
+            let (alice_key, bob_key) = (
+                SecretKey::from_bytes(&[7; 32]),
+                SecretKey::from_bytes(&[8; 32]),
+            );
+            let alice_transport =
+                NostrTransport::open(alice_key.public(), keys.clone(), vec![relay.url()]);
+            let bob_transport = NostrTransport::open(bob_key.public(), keys, vec![relay.url()]);
+            let alice = endpoint(alice_key, &alice_transport).await;
+            let bob = endpoint(bob_key, &bob_transport).await;
+            let router = Router::builder(bob.clone()).accept(ECHO_ALPN, Echo).spawn();
+            let target = EndpointAddr::from_parts(
+                bob.id(),
+                [TransportAddr::Custom(transport_addr(
+                    NOSTR_TRANSPORT_ID,
+                    bob.id(),
+                ))],
+            );
+
+            let dialed = time::timeout(Duration::from_secs(4), alice.connect(target, ECHO_ALPN));
+            assert!(
+                !matches!(dialed.await, Ok(Ok(_))),
+                "a closed transport links no pair"
+            );
+            assert_eq!(
+                relay.data_events(),
+                0,
+                "nothing of the transport reached the relay"
+            );
+            assert!(
+                alice_transport.handle().stats().dropped_not_allowed > 0,
+                "the refused frames are counted"
+            );
             router.shutdown().await.expect("shutdown");
             alice.close().await;
         },

@@ -33,6 +33,8 @@ n0-future.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+# A test builds a frame outside the gossip transport crate.
+habilis-network-iroh-gossip-transport = { workspace = true, features = ["test-fixtures"] }
 habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
 # The block hooks: a test takes the IP rung away from one endpoint and gives it back.
 habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transport-util", features = ["test-hooks"] }

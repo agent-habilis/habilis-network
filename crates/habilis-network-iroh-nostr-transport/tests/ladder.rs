@@ -65,8 +65,12 @@ async fn expect_rung(
     expected: &str,
     step: &str,
 ) {
+    // A failure ends 30 s after it starts, whatever the dials take.
+    let deadline = time::Instant::now() + Duration::from_secs(30);
     let mut seen = None;
-    for round in 0..120 {
+    let mut round = 0u32;
+    while time::Instant::now() < deadline {
+        round += 1;
         seen = rung(connection);
         if seen == Some(expected) {
             return;
@@ -100,6 +104,9 @@ fn a_pair_falls_to_nostr_when_ip_is_taken_and_climbs_back_when_it_returns() {
             let alice = node(alice_key, &alice_transport).await;
             let bob = node(bob_key, &bob_transport).await;
             let router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
+            // The transport starts closed: alice names bob, and bob's replies pass because a
+            // frame of alice arrived first.
+            alice_transport.handle().allow(bob.id(), true);
 
             let mut both: Vec<TransportAddr> = bob.addr().addrs.into_iter().collect();
             both.push(TransportAddr::Custom(transport_addr(

@@ -49,6 +49,9 @@ impl NostrTransport {
     pub fn new(app_id: EndpointId) -> Self {
         let handle = GossipHandle::with_transport_id(app_id, NOSTR_TRANSPORT_ID);
         handle.set_budget(Some(DEFAULT_BUDGET_BYTES_PER_SEC));
+        // The last rung: no frame and no address of it leaves for a peer until the engine allows
+        // the pair, or a frame of that peer arrives and shows that it chose this path.
+        handle.set_default_allow(false);
         Self {
             handle,
             // the clones of the transport share one receive task
@@ -73,6 +76,9 @@ impl NostrTransport {
             let receiving = self.handle.clone();
             task::AbortOnDropHandle::new(task::spawn(async move {
                 while let Some(datagram) = datagrams.recv().await {
+                    if let Ok(sender) = EndpointId::from_bytes(&datagram.from) {
+                        receiving.allow(sender, true);
+                    }
                     let _ = receiving.deliver(&datagram.bytes);
                 }
             }))
