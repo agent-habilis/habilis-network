@@ -178,6 +178,7 @@ impl<'de> Deserialize<'de> for Route {
 mod tests {
     use super::{MAX_ROUTE_HOPS, Route, RouteHop};
     use crate::app_id::{AppId, UnderlayId};
+    use iroh::endpoint::transports::Addr;
     use iroh::{EndpointId, SecretKey};
     use std::fmt::Write as _;
 
@@ -186,6 +187,27 @@ mod tests {
         RouteHop {
             app_id: AppId::new(id),
             underlay_id: UnderlayId::new(id),
+        }
+    }
+
+    /// The util crate reads the destination out of the bytes of a route, so that a selector can tell
+    /// the remote of a set of paths. It writes the postcard form down once more, and this keeps the
+    /// two in step for a route of every length.
+    #[test]
+    fn the_util_crate_reads_the_destination_of_an_encoded_route() {
+        let _guard = ::habilis_network_test_tracing::init();
+        for hops in 1..=MAX_ROUTE_HOPS {
+            let seeds: Vec<u8> = (1..).take(hops).map(|seed| seed * 3).collect();
+            let route = Route::try_new(seeds.iter().map(|seed| hop(*seed)).collect())
+                .expect("a route of distinct hops is valid");
+            let last = seeds.last().expect("a route has a hop");
+            let destination: EndpointId = SecretKey::from_bytes(&[*last; 32]).public();
+            let address = Addr::Custom(route.encode());
+            assert_eq!(
+                habilis_network_iroh_transport_util::multihop_remote_of(&address),
+                Some(destination),
+                "the util crate reads the destination of a route of {hops} hops"
+            );
         }
     }
 
