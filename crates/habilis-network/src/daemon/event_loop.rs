@@ -453,7 +453,7 @@ fn wire_transports(
         state.underlay_webrtc = transports.underlay_webrtc;
     }
     state.has_rendezvous = rendezvous_params.has_rendezvous;
-    let nostr_rx = transports.nostr.map(|params| {
+    let nostr_rx: Option<mpsc::Receiver<NostrHello>> = transports.nostr.map(|params| {
         let (signal, hellos) =
             webrtc::nostr_signal::NostrSignal::start(webrtc::nostr_signal::NostrSignalParts {
                 endpoint: endpoint.clone(),

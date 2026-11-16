@@ -5,9 +5,9 @@ use crate::daemon::SetupError;
 use std::sync::Arc;
 
 use crate::embed::NodeSink;
-use crate::protocol::meshes::parse_nostr_urls;
 use crate::protocol::{
     DirectorySelection, JoinTarget, Lookup, MeshConfig, MeshName, Nickname, RelayLadder, Transport,
+    meshes,
 };
 use crate::runtime::{
     CreateParams, JoinParams, Node, Resolved, SetupKind, SetupParams, SignalHandling,
@@ -180,7 +180,8 @@ fn nostr_list(urls: &[String]) -> Result<Option<Vec<Url>>> {
     if urls.is_empty() {
         return Ok(None);
     }
-    let parsed = parse_nostr_urls(&urls.join(",")).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let parsed =
+        meshes::parse_nostr_urls(&urls.join(",")).map_err(|error| anyhow::anyhow!("{error}"))?;
     let list: Vec<Url> = parsed.collect();
     Ok(Some(list))
 }
@@ -779,7 +780,11 @@ mod tests {
         let NostrChoice::Custom(custom) = &config.lookups.nostr else {
             panic!("nostrUrls must resolve to a custom list")
         };
-        assert_eq!(custom.len(), 1);
+        assert_eq!(
+            custom.len(),
+            1,
+            "one Nostr url replaces the pinned list with one relay"
+        );
         assert!(
             resolve_kind(
                 &JoinOptions {

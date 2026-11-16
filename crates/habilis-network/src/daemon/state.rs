@@ -4574,6 +4574,9 @@ mod tests {
             .insert(nick("bob"), iroh::EndpointAddr::new(bob));
         state.lane_peers.insert(bob);
         state.forget_peer_endpoint("bob");
-        assert!(!state.lane_peers.contains(&bob));
+        assert!(
+            !state.lane_peers.contains(&bob),
+            "a departed peer leaves the lane set"
+        );
     }
 }

@@ -1449,7 +1449,10 @@ mod tests {
             true,
             peer_addr_error::peer_info_needs_lane(&copied_flag, scope),
         );
-        assert!(lane_peers.contains(&owner.public()));
+        assert!(
+            lane_peers.contains(&owner.public()),
+            "the proven PeerInfo of the owner sets the flag"
+        );
         note_lane_flag(
             &mut lane_peers,
             owner.public(),
