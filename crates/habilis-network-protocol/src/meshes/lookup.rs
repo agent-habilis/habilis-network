@@ -594,11 +594,22 @@ pub(super) const TRANSPORT_RELAY: u8 = 0b1000;
 /// Gossip as a path ([`Transport::Gossip`]). Written after the relay's bit, so an id that
 /// an older build made reads as gossip off and keeps its bytes.
 pub(super) const TRANSPORT_GOSSIP: u8 = 0b1_0000;
-pub(super) const KNOWN_TRANSPORT_BITS: u8 =
-    TRANSPORT_UDP | TRANSPORT_WEBRTC | TRANSPORT_MULTIHOP | TRANSPORT_RELAY | TRANSPORT_GOSSIP;
+/// The Nostr relays of a custom list may carry payload ([`Transport::Nostr`]). A build that
+/// predates it refuses the byte, so no old member joins a mesh that needs it.
+pub(super) const TRANSPORT_NOSTR: u8 = 0b10_0000;
+pub(super) const KNOWN_TRANSPORT_BITS: u8 = TRANSPORT_UDP
+    | TRANSPORT_WEBRTC
+    | TRANSPORT_MULTIHOP
+    | TRANSPORT_RELAY
+    | TRANSPORT_GOSSIP
+    | TRANSPORT_NOSTR;
 
 const KNOWN_FEATURES: u8 =
     FEATURE_PASSWORD | FEATURE_INVITE_ONLY | FEATURE_NOSTR | FEATURE_NOSTR_CUSTOM;
+
+/// The error for the Nostr transport with no custom relay list: only the relays a mesh names
+/// are trusted to carry payload, and the pinned public ones carry lookup and signalling alone.
+const NOSTR_NEEDS_A_CUSTOM_LIST: &str = "transport `nostr` needs lookup `nostr` with a custom relay list: the pinned public relays carry no payload";
 
 /// Byte length of the Ed25519 issuer public key an invite-only mesh carries.
 const ISSUER_PUBKEY_LEN: usize = 32;
@@ -717,6 +728,11 @@ impl MeshConfig {
         if transport.allows(Transport::Relay) && no_relay {
             return Err(ConfigError::Invalid("transport `relay` needs lookup `relay`: with the relay disabled there is none to carry payload".to_owned()));
         }
+        if transport.allows(Transport::Nostr)
+            && !matches!(self.lookups.nostr, NostrChoice::Custom(_))
+        {
+            return Err(ConfigError::Invalid(NOSTR_NEEDS_A_CUSTOM_LIST.to_owned()));
+        }
         // A native member without UDP has no address a peer could reach, so the
         // JSEP exchange that opens its data channel can only cross the relay or
         // Nostr.
@@ -768,11 +784,20 @@ impl MeshConfig {
         if let Some(urls) = nostr_urls {
             set = set.with_nostr_urls(urls)?;
         }
+        let resolved = resolve_lookups(set);
+        // Only here, and only for an empty list: a list the caller names decides for itself, and
+        // `TransportPolicy::default()` stays without the Nostr transport.
+        let nostr_by_default =
+            transports.is_empty() && matches!(resolved.nostr, NostrChoice::Custom(_));
+        let mut transport = TransportPolicy::try_from(transports)?;
+        if nostr_by_default {
+            transport = transport.nostr_transport(true);
+        }
         let config = MeshConfig {
-            lookups: resolve_lookups(set),
+            lookups: resolved,
             password: None,
             issuer_pubkey: None,
-            transport: TransportPolicy::try_from(transports)?,
+            transport,
         };
         config.validate()?;
         Ok(config)
@@ -2326,8 +2351,8 @@ mod lookup_tests {
     #[test]
     fn a_policy_byte_with_an_unknown_bit_asks_for_an_upgrade() {
         let _guard = ::habilis_network_test_tracing::init();
-        // Bit 4 is gossip now: the next one is the first unknown.
-        let error = MeshConfig::try_from(&[0b0111, 0b10_0111])
+        // Bit 5 is the Nostr transport now: the next one is the first unknown.
+        let error = MeshConfig::try_from(&[0b0111, 0b100_0111])
             .expect_err("a bit past the known transports is refused by MeshConfig::try_from")
             .to_string();
         assert!(error.contains("upgrade"), "{error}");
@@ -2453,6 +2478,10 @@ mod lookup_tests {
 #[cfg(test)]
 #[path = "lookup_tests.rs"]
 mod directory_selection_tests;
+
+#[cfg(test)]
+#[path = "nostr_transport_tests.rs"]
+mod nostr_transport_tests;
 
 #[cfg(test)]
 mod choice_tests {
