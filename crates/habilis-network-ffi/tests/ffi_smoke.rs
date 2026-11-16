@@ -120,10 +120,10 @@ fn a_bad_mesh_id_fails_with_a_reason() {
 #[test]
 fn a_bad_nostr_relay_is_refused() {
     let nick = CString::new("nostr").expect("no interior NUL");
-    let mut opts = create_opts(&nick);
-    opts.lookup = c"nostr".as_ptr();
-    opts.nostr_urls = c"https://relay.example/".as_ptr();
-    let handle = open(&opts);
+    let mut options = create_opts(&nick);
+    options.lookup = c"nostr".as_ptr();
+    options.nostr_urls = c"https://relay.example/".as_ptr();
+    let handle = open(&options);
     if !handle.is_null() {
         // SAFETY: the handle came from `habilis_network_mesh_open` and is not used after this.
         unsafe {
