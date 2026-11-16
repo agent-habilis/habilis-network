@@ -140,8 +140,7 @@ pub(in crate::transport::pool) struct PoolInner {
     /// The multihop route that the next dial of a peer takes, with no other address: the node is at
     /// its ceiling of direct connections, and the peer is pinned (see [`UnicastPool::plan_dial`]).
     /// The dial takes the entry.
-    pub(in crate::transport::pool) routes:
-        parking_lot::Mutex<HashMap<EndpointId, iroh::TransportAddr>>,
+    pub(in crate::transport::pool) routes: parking_lot::Mutex<HashMap<EndpointId, PlannedRoute>>,
     /// How long a pinned connection stays open with no send.
     pub(in crate::transport::pool) pinned_idle: Duration,
     /// `TransportPolicy::relay`. Off, a send on a connection whose selected
@@ -235,9 +234,20 @@ impl UnicastPool {
         match (plan, route) {
             (DialPlan::Multihop, Some(route)) => {
                 tracing::debug!(target: LOG_TARGET, %eid, "at the ceiling: dialing through multihop and pinning the peer");
-                routes.insert(eid, route);
+                routes.insert(eid, PlannedRoute { route, alone: true });
             }
-            (DialPlan::Direct | DialPlan::Multihop, _) => {
+            // A direct dial that has a route takes it as one more address: a peer that no direct
+            // path reaches is reached through multihop, and iroh keeps the best path of the set.
+            (DialPlan::Direct, Some(route)) => {
+                routes.insert(
+                    eid,
+                    PlannedRoute {
+                        route,
+                        alone: false,
+                    },
+                );
+            }
+            (DialPlan::Direct | DialPlan::Multihop, None) => {
                 routes.remove(&eid);
             }
         }
@@ -916,7 +926,7 @@ impl UnicastPool {
 
     /// The body of [`Self::dial_pooled`], run under the lock of the peer.
     async fn dial_pooled_turn(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
-        let route = self.inner.routes.lock().remove(&eid);
+        let planned = self.inner.routes.lock().remove(&eid);
         if let Some(connection) = self.open_pooled(eid, hold).await {
             self.release_plan(eid);
             return Ok(connection);
@@ -933,15 +943,8 @@ impl UnicastPool {
         {
             bail!("{COOLDOWN_REFUSED}");
         }
-        let pinned = route.is_some();
-        let address: EndpointAddr = if let Some(route) = route {
-            EndpointAddr::from_parts(eid, [route])
-        } else {
-            let addrs = self.inner.addrs.lock().ok();
-            addrs
-                .and_then(|addrs| addrs.get(&eid).cloned())
-                .unwrap_or_else(|| EndpointAddr::new(eid))
-        };
+        let pinned = planned.as_ref().is_some_and(|planned| planned.alone);
+        let address: EndpointAddr = self.dial_address(eid, planned);
         #[cfg(test)]
         {
             let gate = {
@@ -1015,6 +1018,26 @@ impl UnicastPool {
 
     /// The dial that [`Self::plan_dial`] planned ends without a new connection: the unit that it
     /// reserved and the pin that it set go back.
+    /// The address of the next dial of `eid`. A pinned dial takes its route and no other address. Any
+    /// other dial takes the address that the peer gave, and the route to the peer, if the plan had
+    /// one, as one more address.
+    pub(in crate::transport::pool) fn dial_address(
+        &self,
+        eid: EndpointId,
+        planned: Option<PlannedRoute>,
+    ) -> EndpointAddr {
+        if let Some(PlannedRoute { route, alone: true }) = planned {
+            return EndpointAddr::from_parts(eid, [route]);
+        }
+        let addrs = self.inner.addrs.lock().ok();
+        let stored = addrs.and_then(|addrs| addrs.get(&eid).cloned());
+        let mut address = stored.unwrap_or_else(|| EndpointAddr::new(eid));
+        if let Some(planned) = planned {
+            address.addrs.insert(planned.route);
+        }
+        address
+    }
+
     /// Whether the ledger still pins `eid`: a peer that became a gossip neighbor is not pinned any
     /// more, though its pooled connection was dialed on a route. With no table, the flag of the
     /// pooled connection decides alone.
@@ -1049,6 +1072,14 @@ impl UnicastPool {
             addrs.remove(&eid);
         }
     }
+}
+
+/// The multihop route that the plan of a dial found for a peer. `alone` says whether the dial takes
+/// it with no other address (a pinned dial), or as one more address beside the others.
+#[derive(Debug, Clone)]
+pub(in crate::transport::pool) struct PlannedRoute {
+    route: iroh::TransportAddr,
+    alone: bool,
 }
 
 /// The lock of one peer for one dial. Dropping it, when the dial ends, returns early, is cancelled or panics, gives

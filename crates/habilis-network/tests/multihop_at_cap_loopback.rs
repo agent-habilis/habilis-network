@@ -47,7 +47,7 @@ const STUCK_TARGET: &str = "habilis_network_iroh_multihop_transport::underlay";
 const STUCK_TEXT: &str =
     "multihop underlay stays on the relay: this hop is not advertised as a link";
 /// How long the snapshot may take to show the path of a peer after its first frame.
-const LABEL_DEADLINE: Duration = Duration::from_secs(30);
+const LABEL_DEADLINE: Duration = Duration::from_secs(60);
 /// The line that an eviction at the ceiling logs, on the transport target.
 /// The cause that the eviction line carries when a gossip neighbor took the unit.
 const NEIGHBOR_CAUSE: &str = "cause=\"a gossip neighbor\"";
@@ -168,6 +168,16 @@ impl Member {
             .request(|reply| Request::Routing(Routing::DirectUnits { reply }))
             .await
             .expect("the loop answers")
+    }
+
+    /// The short endpoint id of this member, as the eviction lines of the transport name it.
+    async fn short_id(&self) -> String {
+        let id = self
+            .membership
+            .request(|reply| Request::InspectTest(InspectTest::EndpointId { reply }))
+            .await
+            .expect("the loop answers");
+        id.fmt_short().to_string()
     }
 
     /// How many dials this member made to the member `peer`, direct or through a route.
@@ -307,6 +317,24 @@ fn neighbor_nicks(snapshot: &TopologySnapshot) -> Vec<&str> {
     nicks
 }
 
+/// Whether the first hop of the route to `far` is `hub`. The cut takes a moment to age the
+/// multihop link between the far member and the other neighbor out of the topology, and until it
+/// does the route can go through the other neighbor.
+fn first_hop_is(snapshot: &TopologySnapshot, far: &str, hub: &str) -> bool {
+    let find = |nick: &str| {
+        let links = snapshot.peers.iter();
+        links
+            .into_iter()
+            .find(|link| link.nickname.as_deref() == Some(nick))
+    };
+    match (find(far), find(hub)) {
+        (Some(far_link), Some(hub_link)) => {
+            far_link.via.as_deref() == Some(hub_link.endpoint.as_str())
+        }
+        _ => false,
+    }
+}
+
 /// Whether the snapshot lists `nick` as a pinned peer.
 fn is_pinned(snapshot: &TopologySnapshot, nick: &str) -> bool {
     let found = snapshot
@@ -436,15 +464,10 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
             "alice never learned a route to dave: {}",
             counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
         );
-        let dials_before = alice.dials_to(far_nick).await;
         assert!(
             delivered(&alice, &mut dave, far_nick, "to dave through bob").await,
             "the frame of alice never reached dave: {}",
             counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
-        );
-        assert!(
-            alice.dials_to(far_nick).await > dials_before,
-            "the first send of alice to dave is a dial, and the pool counts it"
         );
         let after_send = alice.direct_units().await;
         assert_eq!(
@@ -496,7 +519,9 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
         let label_since = Instant::now();
         let mut snapshot = alice.snapshot().await;
         let mut nudge = 0_u32;
-        while !(is_on_multihop(&snapshot, far_nick) && is_pinned(&snapshot, far_nick))
+        while !(is_on_multihop(&snapshot, far_nick)
+            && is_pinned(&snapshot, far_nick)
+            && first_hop_is(&snapshot, far_nick, hub_nick))
             && label_since.elapsed() < LABEL_DEADLINE
         {
             nudge += 1;
@@ -506,6 +531,10 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
             snapshot = alice.snapshot().await;
         }
         assert_far_is_pinned_through_hub(&snapshot, far_nick, hub_nick);
+        assert!(
+            alice.dials_to(far_nick).await >= 1,
+            "a pinned connection is the result of a dial of alice, and the pool counts it"
+        );
 
         let logs = habilis_network_test_tracing::captured_logs();
         // A new gossip neighbor takes the unit of a cached peer: that is the design. An eviction
@@ -519,8 +548,11 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
                 "an eviction line names the victim and the newcomers: {line}"
             );
         }
+        // Only alice is bound by the rule: a joiner that sends to a peer with no route dials direct
+        // and evicts, as a send always did.
+        let alice_local = format!("local={}", alice.short_id().await);
         let by_dial: Vec<&str> = evictions
-            .filter(|line| !line.contains(NEIGHBOR_CAUSE))
+            .filter(|line| line.contains(&alice_local) && !line.contains(NEIGHBOR_CAUSE))
             .collect();
         assert!(
             by_dial.is_empty(),

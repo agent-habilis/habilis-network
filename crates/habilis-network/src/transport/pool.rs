@@ -281,6 +281,56 @@ mod tests {
         });
     }
 
+    /// A direct dial that has a route takes it as one more address, beside the address of the peer:
+    /// a peer that no direct path reaches is reached through the route. A pinned dial takes the
+    /// route alone.
+    #[test]
+    fn a_direct_dial_adds_its_route_to_the_address_and_a_pinned_dial_takes_the_route_alone() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(300)).await;
+            let known = iroh::EndpointAddr::new(server).with_ip_addr(([192, 0, 2, 1], 4433).into());
+            pool.note_addr(&known);
+
+            let roomy = SignalAdmission::new(4);
+            pool.set_admission(roomy);
+            let registration = pool.register_planned_dial(server, || Some(a_route()));
+            let planned = pool.inner.routes.lock().remove(&server);
+            let address = pool.dial_address(server, planned);
+            assert!(
+                address.addrs.contains(&a_route())
+                    && address.addrs.iter().any(iroh::TransportAddr::is_ip),
+                "a direct dial keeps the address of the peer and adds the route: {address:?}"
+            );
+            drop(registration);
+
+            let full = SignalAdmission::new(1);
+            full.note_success(testing::endpoint_id(7));
+            let (full_pool, full_server, router_two, client_two) =
+                pool_with_idle(Duration::from_secs(300)).await;
+            full_pool.note_addr(
+                &iroh::EndpointAddr::new(full_server).with_ip_addr(([192, 0, 2, 2], 4433).into()),
+            );
+            full_pool.set_admission(full);
+            let pinned_registration =
+                full_pool.register_planned_dial(full_server, || Some(a_route()));
+            let pinned_plan = full_pool.inner.routes.lock().remove(&full_server);
+            let pinned_address = full_pool.dial_address(full_server, pinned_plan);
+            let pinned_addrs: Vec<iroh::TransportAddr> =
+                pinned_address.addrs.iter().cloned().collect();
+            assert_eq!(
+                pinned_addrs,
+                vec![a_route()],
+                "a pinned dial takes the route and no other address"
+            );
+            drop(pinned_registration);
+            router.shutdown().await.expect("shutdown");
+            router_two.shutdown().await.expect("shutdown");
+            client.close().await;
+            client_two.close().await;
+        });
+    }
+
     /// A route to a peer, for the tests of a pinned dial: the dial itself fails, as the test
     /// endpoints run no multihop transport.
     fn a_route() -> iroh::TransportAddr {

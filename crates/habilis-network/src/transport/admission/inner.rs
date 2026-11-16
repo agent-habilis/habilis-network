@@ -149,9 +149,14 @@ impl Inner {
     ) -> Victims {
         let shorts = evictions.newcomers.iter().map(iroh::PublicKey::fmt_short);
         let newcomers: Vec<String> = shorts.map(|short| short.to_string()).collect();
+        let local: String = match self.local {
+            Some(id) => id.fmt_short().to_string(),
+            None => "unknown".to_owned(),
+        };
         let mut victims = Victims {
             cause,
             newcomers: newcomers.join(","),
+            local,
             ..Victims::default()
         };
         for peer in &evictions.evict {

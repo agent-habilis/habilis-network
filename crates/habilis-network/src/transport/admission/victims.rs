@@ -21,6 +21,9 @@ pub(crate) struct Victims {
     /// The peers that took the units: the connection, the session or the gossip neighbors. A
     /// victim is never one of them.
     pub(crate) newcomers: String,
+    /// The node that evicts, as its short endpoint id, or `unknown`: a process that holds several
+    /// nodes tells the lines of one from another by it.
+    pub(crate) local: String,
 }
 
 impl fmt::Debug for Victims {
@@ -36,6 +39,7 @@ impl Victims {
                 target: transport::LOG_TARGET,
                 victim = %victim.remote_id().fmt_short(),
                 newcomers = %self.newcomers,
+                local = %self.local,
                 cause = self.cause,
                 "evicting a direct connection at the ceiling"
             );
@@ -46,6 +50,7 @@ impl Victims {
                 target: transport::LOG_TARGET,
                 victim = %peer.fmt_short(),
                 newcomers = %self.newcomers,
+                local = %self.local,
                 cause = self.cause,
                 "evicting a session at the ceiling"
             );
