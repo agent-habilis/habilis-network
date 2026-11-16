@@ -77,10 +77,13 @@ export function parseChatArgs(argv: string[]): ChatArgs {
   // someone hands you.
   const relayUrls = values['relay-url']
   const nostrUrls = values['nostr-url']
-  // The list crosses the FFI as one comma-separated string, which the engine
+  // Each list crosses the FFI as one comma-separated string, which the engine
   // splits again: a comma inside a URL would become two relays.
   if (nostrUrls?.some((url) => url.includes(',')) === true) {
     throw new Error('--nostr-url takes one URL per flag: repeat the flag, do not use a comma')
+  }
+  if (relayUrls?.some((url) => url.includes(',')) === true) {
+    throw new Error('--relay-url takes one URL per flag: repeat the flag, do not use a comma')
   }
   const transport = values.transport?.split(',') as Transport[] | undefined
   if ((relayUrls !== undefined || nostrUrls !== undefined || transport !== undefined) && values.id !== undefined) {

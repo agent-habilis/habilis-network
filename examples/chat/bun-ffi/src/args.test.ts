@@ -22,3 +22,9 @@ test('repeated --nostr-url values pass through as given', () => {
     'wss://b.example/',
   ])
 })
+
+test('a --relay-url that holds a comma is refused, not split into two relays', () => {
+  expect(() => parseChatArgs(['--topic', 'room', '--relay-url', 'https://relay.example/a,b'])).toThrow(
+    '--relay-url',
+  )
+})
