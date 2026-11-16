@@ -436,6 +436,17 @@ impl MultihopHandle {
         Some(chosen.route.encode())
     }
 
+    /// The application ids of the hops of the route that [`route_addr`](Self::route_addr) gives for
+    /// `dst`, in order: the first hop first, `dst` last. `None` when no route is known.
+    ///
+    /// # Panics
+    /// If the routing-table lock is poisoned by a panic in another thread.
+    #[must_use]
+    pub fn route_hops(&self, dst: AppId) -> Option<Vec<AppId>> {
+        let chosen = self.inner.chooser.choose(dst)?;
+        Some(chosen.route.hops().iter().map(|hop| hop.app_id).collect())
+    }
+
     /// Mark the hop `hop` (an application id) as refused by the gate now, without
     /// the stuck deadline having passed: for a test of a holder that chooses a
     /// route again when the gate refuses a hop. A hop whose underlay is unknown is
@@ -1255,6 +1266,55 @@ mod tests {
                 first_hop_resolved().await,
                 long_a,
                 "iroh is not handed the refused first hop"
+            );
+        });
+    }
+
+    /// The hops of the route that `route_addr` chooses, as application ids: the first hop first and
+    /// the destination last. A destination with no route has none.
+    #[test]
+    fn the_hops_of_a_route_are_listed_first_hop_first() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
+            let secrets = [91_u8, 92, 93, 94].map(|seed| SecretKey::from_bytes(&[seed; 32]));
+            let [alice, carol, bob, stranger] = &secrets;
+            let with_relay = |secret: &SecretKey| {
+                iroh::EndpointAddr::new(underlay_secret(secret).public())
+                    .with_relay_url(relay.clone())
+            };
+            let handle = MultihopHandle::new(
+                alice,
+                loopback_underlay(alice).await,
+                HandleConfig::default(),
+            )
+            .expect("a handle");
+            let app = |key: &SecretKey| AppId::new(key.public());
+            for (node, links) in [
+                (alice, vec![(app(carol), 1)]),
+                (carol, vec![(app(alice), 1), (app(bob), 1)]),
+                (bob, vec![(app(carol), 1)]),
+            ] {
+                let _ = handle.feed_topology(crate::LinkVector::signed(
+                    node,
+                    topology::wall_clock_ms(),
+                    with_relay(node),
+                    links,
+                ));
+            }
+            assert_eq!(
+                handle.route_hops(app(bob)),
+                Some(vec![app(carol), app(bob)]),
+                "the route to bob goes through carol"
+            );
+            assert_eq!(
+                handle.route_hops(app(carol)),
+                Some(vec![app(carol)]),
+                "a neighbor is one hop"
+            );
+            assert_eq!(
+                handle.route_hops(app(stranger)),
+                None,
+                "a node that no vector names has no route"
             );
         });
     }
