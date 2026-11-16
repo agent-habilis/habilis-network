@@ -23,6 +23,7 @@ use crate::event::{Event, TAG};
 use std::{mem, sync};
 use tokio::net;
 /// A running test relay. Dropping it stops the listener and every connection.
+#[must_use]
 #[derive(Debug)]
 pub struct TestRelay {
     url: Url,
