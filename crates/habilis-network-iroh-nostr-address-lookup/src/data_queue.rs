@@ -307,19 +307,20 @@ impl DataQueue {
             .round_start
             .is_some_and(|start| now >= start + FLUSH_TICK);
         if tick_due {
-            let mut open: Vec<(Instant, Destination)> = self
-                .pending
-                .iter()
-                .filter(|(destination, _)| !self.is_waiting(destination))
-                .map(|(destination, pending)| (pending.since, *destination))
-                .collect();
+            let mut open: Vec<(Instant, Destination)> = Vec::new();
+            for (destination, pending) in &self.pending {
+                if !self.is_waiting(destination) {
+                    open.push((pending.since, *destination));
+                }
+            }
             open.sort_unstable_by_key(|(since, _)| *since);
             if self.ready.is_empty() {
                 for (_, destination) in open {
                     self.close(now, destination, Place::Back);
                 }
             } else {
-                for (_, destination) in open.into_iter().rev() {
+                open.reverse();
+                for (_, destination) in open {
                     self.close(now, destination, Place::Front);
                 }
             }
@@ -353,7 +354,7 @@ impl DataQueue {
     /// When the socket next has something to do: close the open batches, or send a frame.
     pub(crate) fn next_wake(&mut self, now: Instant) -> Option<Instant> {
         self.refill(now);
-        let closable = self
+        let closable: bool = self
             .pending
             .keys()
             .any(|destination| !self.is_waiting(destination));

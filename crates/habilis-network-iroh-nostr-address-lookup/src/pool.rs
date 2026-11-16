@@ -345,7 +345,7 @@ impl Chooser {
     fn datagram(&mut self, outgoing: Outgoing) {
         let lane = self.hub.lane();
         let now = Instant::now();
-        let up = self
+        let up: Option<usize> = self
             .leases
             .iter()
             .position(|(_, lease)| lease.health() == Health::Up);
@@ -353,7 +353,7 @@ impl Chooser {
         for (url, lease) in &self.leases {
             let limited =
                 matches!(lease.health(), Health::Limited(_)) && lease.health().sendable(lane);
-            let quiet = self
+            let quiet: bool = self
                 .probed
                 .get(url)
                 .is_none_or(|at| now.saturating_duration_since(*at) >= PROBE_EVERY);
@@ -371,7 +371,7 @@ impl Chooser {
                 lease.datagram(outgoing);
             }
         } else {
-            let first = self
+            let first: Option<&(Url, Lease)> = self
                 .leases
                 .iter()
                 .find(|(_, lease)| lease.health().sendable(lane));
@@ -387,9 +387,12 @@ impl Chooser {
     /// Some held relay takes a datagram now: it is `Up`, or limited with its wait over.
     fn sendable(&self) -> bool {
         let lane = self.hub.lane();
-        self.leases
-            .iter()
-            .any(|(url, lease)| lease.health().sendable(lane) && !self.swallows(url))
+        for (url, lease) in &self.leases {
+            if lease.health().sendable(lane) && !self.swallows(url) {
+                return true;
+            }
+        }
+        false
     }
 
     /// When the first wait of a limited relay ends, so the pool tells its owner then.
