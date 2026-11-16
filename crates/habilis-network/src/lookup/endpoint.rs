@@ -73,6 +73,17 @@ pub(crate) fn install_transports(
             builder = builder.path_selector(handle.path_selector());
         }
     }
+    // Nostr is the last rung, on the member endpoint only. Its selector is the ladder that every
+    // transport shares, so a node with no other custom transport still ranks it below the relay.
+    if let Some(nostr) = transports.nostr {
+        let handle = nostr.handle();
+        builder = builder
+            .add_custom_transport(handle.custom_transport())
+            .address_lookup(handle.address_lookup());
+        if !selector_set {
+            builder = builder.path_selector(handle.path_selector());
+        }
+    }
     if let Some(admission) = transports.admission {
         builder = builder.hooks(admission.connection_hook());
     }

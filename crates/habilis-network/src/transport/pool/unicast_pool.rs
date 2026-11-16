@@ -24,6 +24,7 @@ use tokio::sync::{Mutex, watch};
 
 use crate::transport::webrtc::close_code::IDLE;
 use crate::transport::{LOG_TARGET, PayloadPath, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
+use habilis_network_iroh_gossip_transport::{NOSTR_TRANSPORT_ID, transport_addr};
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
@@ -320,6 +321,30 @@ impl UnicastPool {
         };
         self.probe_done(eid).await;
         won
+    }
+
+    /// The address that a dial to `eid` names: the one remembered for the peer, or its bare id,
+    /// and the Nostr address of the peer when the mesh lists Nostr. iroh learns the address of a
+    /// custom transport only from an address that names it, and a connection that was dialed
+    /// without it has no Nostr path to fall to when every other path is gone. The transport itself
+    /// drops the frames of a pair that has another selected path, so the address costs a pair that
+    /// is well served nothing.
+    pub(crate) fn dial_address(&self, eid: EndpointId) -> EndpointAddr {
+        let mut address: EndpointAddr = {
+            let addrs = self.inner.addrs.lock().ok();
+            addrs
+                .and_then(|addrs| addrs.get(&eid).cloned())
+                .unwrap_or_else(|| EndpointAddr::new(eid))
+        };
+        if self.inner.nostr_transport.load(Ordering::Relaxed) {
+            address
+                .addrs
+                .insert(iroh::TransportAddr::Custom(transport_addr(
+                    NOSTR_TRANSPORT_ID,
+                    eid,
+                )));
+        }
+        address
     }
 
     /// Remember `addr` as the address to dial its peer at.
@@ -784,12 +809,7 @@ impl UnicastPool {
         {
             bail!("{COOLDOWN_REFUSED}");
         }
-        let address: EndpointAddr = {
-            let addrs = self.inner.addrs.lock().ok();
-            addrs
-                .and_then(|addrs| addrs.get(&eid).cloned())
-                .unwrap_or_else(|| EndpointAddr::new(eid))
-        };
+        let address: EndpointAddr = self.dial_address(eid);
         #[cfg(test)]
         {
             let gate = {

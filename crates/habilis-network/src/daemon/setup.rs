@@ -34,7 +34,8 @@ use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::lookup;
 use crate::protocol::crypto::Password;
 use crate::protocol::meshes::{LookupOpts, Mesh, MeshConfig, MeshName, NostrChoice, Transport};
-use crate::protocol::{MeshId, Nickname};
+use crate::protocol::nostr::NostrKeys;
+use crate::protocol::{MeshId, Nickname, TopicId as MeshTopicId};
 use crate::util::tuning::{RELAY_RUNG_PROBE, SETUP_RUNG_READ};
 use lookup::{
     ProbeAnswer, StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
@@ -389,6 +390,25 @@ async fn build_member_endpoint(
     let (endpoint, webrtc, mdns) =
         lookup::build_peer_webrtc_with(build.lookups, build.transports, Some(&admission)).await?;
     Ok((endpoint, None, webrtc, admission, None, mdns))
+}
+
+/// Open the data lane of the Nostr transport of the member endpoint, once the mesh knows its topic.
+/// A mesh with no custom relay list has no plan, and its transport stays inactive.
+fn activate_nostr(
+    build: &SetupBuild<'_>,
+    admission: &transport::SignalAdmission,
+    topic: &proto::TopicId,
+) {
+    if let Some(plan) = nostr_plan(build, topic) {
+        admission.activate_nostr(plan);
+    }
+}
+
+/// The Nostr plan of this mesh: the keys of its topic and the custom relay list, or `None` when the
+/// mesh has no custom list (the pinned relays carry no payload).
+fn nostr_plan(build: &SetupBuild<'_>, topic: &proto::TopicId) -> Option<lookup::NostrPlan> {
+    let keys = NostrKeys::derive(&MeshTopicId::from_bytes(*topic.as_bytes()));
+    lookup::NostrPlan::for_mesh(&keys, &build.lookups.nostr)
 }
 
 /// The endpoint and its `WebRTC` transport must share one key: the transport
@@ -1837,6 +1857,7 @@ async fn setup_create(
     // Keeping the conversion here is what lets habilis-network-protocol build
     // without iroh-gossip at all (see habilis_network_protocol::topic).
     let topic_id = proto::TopicId::from_bytes(mesh.topic_id().to_bytes());
+    activate_nostr(build, &admission, &topic_id);
     let lan_contacts = lookup::lan_contacts(&endpoint, mdns, &topic_id).await?;
     lifecycle::log_ready(
         topic_id,
@@ -1919,6 +1940,7 @@ async fn setup_join(
     let (endpoint, multihop, webrtc, admission, underlay_webrtc, mdns) =
         build_member_endpoint(build, injected).await?;
 
+    activate_nostr(build, &admission, &topic_id);
     let lan_contacts = lookup::lan_contacts(&endpoint, mdns, &topic_id).await?;
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
     let (gossip, router, webrtc_admission, address_book, webrtc_ice) =
@@ -3749,6 +3771,7 @@ mod tests {
                 multihop: Some(handle),
                 webrtc: Some(webrtc),
                 gossip: None,
+                nostr: None,
                 admission: None,
                 underlay: false,
                 options: lookup::TransportOpts::default(),
@@ -3775,6 +3798,7 @@ mod tests {
                     multihop,
                     webrtc,
                     gossip: None,
+                    nostr: None,
                     admission: None,
                     underlay: false,
                     options: lookup::TransportOpts::default(),

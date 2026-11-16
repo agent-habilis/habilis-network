@@ -113,7 +113,18 @@ impl InjectedEndpoint {
         super::check_webrtc_key(bound, &webrtc)?;
         #[cfg(feature = "multihop")]
         super::check_hop_key(bound, transports.multihop.as_ref())?;
+        if let Some(nostr) = &transports.nostr {
+            anyhow::ensure!(
+                nostr.handle().app_id() == bound,
+                "injected endpoint binds {bound} but its Nostr transport serves {}; they must share one key",
+                nostr.handle().app_id()
+            );
+        }
         let admission = transport::SignalAdmission::new(max_direct);
+        // The table keeps the transport and opens its lane once the mesh knows its topic.
+        if let Some(nostr) = &transports.nostr {
+            admission.set_nostr(nostr.clone());
+        }
         transports.admission = Some(admission.clone());
         #[cfg(all(feature = "multihop", feature = "host"))]
         let multihop = transports.multihop.clone();

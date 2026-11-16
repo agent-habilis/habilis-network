@@ -1,4 +1,5 @@
 //! The admission gate of the signalling plane.
+use crate::lookup::NostrPlan;
 use crate::transport::{ceiling, probe, webrtc};
 
 use std::collections::{HashMap, HashSet};
@@ -595,14 +596,28 @@ impl SignalAdmission {
 
     /// The Nostr transport of this endpoint, kept by the table so that it can tell the transport
     /// which pairs have no other selected path.
-    // TODO(nostr transport): the engine calls this once the endpoint registers the Nostr
-    // transport, which waits for the data sender of the nostr-address-lookup crate (P3).
-    #[expect(
-        dead_code,
-        reason = "the engine registers the Nostr transport after the data sender lands"
-    )]
-    pub(crate) fn set_nostr(&self, handle: habilis_network_iroh_gossip_transport::GossipHandle) {
-        self.lock().nostr = Some(handle);
+    /// The table keeps the transport itself, not only its handle: the receive task of the
+    /// transport stops with the last clone, and the table lives as long as the endpoint does.
+    pub(crate) fn set_nostr(
+        &self,
+        transport: habilis_network_iroh_nostr_transport::NostrTransport,
+    ) {
+        self.lock().nostr = Some(transport);
+    }
+
+    /// Open the data lane of the Nostr transport that [`set_nostr`](Self::set_nostr) set, now that
+    /// the mesh knows its topic. Returns whether it opened the lane: `false` for a table with no
+    /// Nostr transport, and for one that is active already. Call it inside a runtime.
+    pub(crate) fn activate_nostr(&self, plan: NostrPlan) -> bool {
+        let transport = self.lock().nostr.clone();
+        let (keys, ranking) = plan.into_parts();
+        transport.is_some_and(|transport| transport.activate(keys, ranking))
+    }
+
+    /// Whether [`set_nostr`](Self::set_nostr) set a Nostr transport.
+    #[cfg(test)]
+    pub(crate) fn has_nostr(&self) -> bool {
+        self.lock().nostr.is_some()
     }
 
     /// The gossip transport that [`set_gossip`](Self::set_gossip) set, if the mesh has gossip.

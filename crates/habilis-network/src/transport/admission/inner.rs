@@ -44,7 +44,7 @@ pub(crate) struct Inner {
     pub(crate) gossip: Option<habilis_network_iroh_gossip_transport::GossipHandle>,
     /// The Nostr transport of the endpoint, when the mesh lists it. The table lets it carry only a
     /// pair that has no other selected path (see [`Inner::sync_nostr`]).
-    pub(crate) nostr: Option<habilis_network_iroh_gossip_transport::GossipHandle>,
+    pub(crate) nostr: Option<habilis_network_iroh_nostr_transport::NostrTransport>,
     /// The peers that we evicted. A peer whose session we detach has no connection to read the code
     /// on, so we refuse its offer for the same minute instead.
     pub(crate) we_evicted: ceiling::EvictionBackoff,
@@ -190,9 +190,10 @@ impl Inner {
     /// `nostr_view`). Like [`Inner::sync_gossip`], it runs when a connection is noted and on every
     /// sweep. A session that carries a pair with no connection left is another path too.
     pub(crate) fn sync_nostr(&self) {
-        let Some(nostr) = &self.nostr else {
+        let Some(transport) = &self.nostr else {
             return;
         };
+        let nostr = transport.handle();
         for (peer, slot) in &self.slots {
             let open = slot.conns.iter().filter_map(WeakConnectionHandle::upgrade);
             let live = open.filter(|connection| connection.close_reason().is_none());

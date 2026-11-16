@@ -210,6 +210,7 @@ pub(crate) async fn build_peer_webrtc_with(
     let secret = mint_secret();
     let handle = build_webrtc_handle(secret.public());
     let gossip = build_gossip_handle(options, secret.public(), admission);
+    let nostr = build_nostr_transport(options, secret.public(), admission);
     let (endpoint, mdns) = super::build_endpoint_keeping_mdns(
         lookups,
         Some(secret),
@@ -220,6 +221,7 @@ pub(crate) async fn build_peer_webrtc_with(
             multihop: None,
             webrtc: Some(handle.clone()),
             gossip,
+            nostr,
             admission: admission.cloned(),
             underlay: false,
             options,
@@ -239,6 +241,23 @@ pub(crate) async fn build_peer_webrtc_with(
 /// runs without one. The admission table keeps the handle: the table sees the connections, so
 /// it is what tells the handle which peers are established and which pairs a higher rung
 /// carries, and the event loop reads the handle back from it.
+/// The Nostr transport of a member endpoint, when `options` has it: inactive, because the endpoint
+/// is built before the mesh knows its topic. The admission table keeps a clone and activates it
+/// once the keys exist (`SignalAdmission::activate_nostr`).
+fn build_nostr_transport(
+    options: super::TransportOpts,
+    local: iroh::EndpointId,
+    admission: Option<&transport::SignalAdmission>,
+) -> Option<habilis_network_iroh_nostr_transport::NostrTransport> {
+    options.nostr.is_on().then(|| {
+        let nostr = habilis_network_iroh_nostr_transport::NostrTransport::new(local);
+        if let Some(admission) = admission {
+            admission.set_nostr(nostr.clone());
+        }
+        nostr
+    })
+}
+
 fn build_gossip_handle(
     options: super::TransportOpts,
     local: iroh::EndpointId,
@@ -352,6 +371,7 @@ pub(crate) async fn build_peer_multihop_with(
     let secret = mint_secret();
     let webrtc = build_webrtc_handle(secret.public());
     let gossip = build_gossip_handle(options, secret.public(), admission);
+    let nostr = build_nostr_transport(options, secret.public(), admission);
     let underlay_secret = habilis_network_iroh_multihop_transport::underlay_secret(&secret);
     // The `WebRTC` leg of the underlay: the handle and the table are made before
     // the endpoint, because the endpoint takes the transport and reports its
@@ -432,6 +452,7 @@ pub(crate) async fn build_peer_multihop_with(
             multihop: Some(handle.clone()),
             webrtc: Some(webrtc.clone()),
             gossip,
+            nostr,
             admission: admission.cloned(),
             underlay: false,
             options,

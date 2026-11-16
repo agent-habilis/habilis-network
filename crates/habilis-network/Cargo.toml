@@ -168,6 +168,8 @@ futures-util.workspace = true
 # The Nostr lookup and JSEP carrier, on both targets: a browser's WebSocket
 # natively, tokio-websockets on a host.
 habilis-network-iroh-nostr-address-lookup = { path = "../habilis-network-iroh-nostr-address-lookup" }
+# Nostr as an iroh custom transport: the last rung, for a mesh with a custom relay list.
+habilis-network-iroh-nostr-transport = { path = "../habilis-network-iroh-nostr-transport" }
 url.workspace = true
 # End-to-end sealing of directed frames: a NaCl-style sealed box (ephemeral
 # X25519 ECDH → ChaCha20-Poly1305) so only the addressed recipient can read a
