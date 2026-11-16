@@ -204,7 +204,7 @@ mod tests {
                 let mut conns = pool.inner.conns.lock().await;
                 let pooled = conns.get_mut(&server).expect("the connection is pooled");
                 pooled.pinned = true;
-                pooled.last_used = n0_future::time::Instant::now();
+                pooled.last_used = time::Instant::now();
             }
             advance_secs(55).await;
             assert!(
