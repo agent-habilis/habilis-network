@@ -107,9 +107,14 @@ impl<'ladder> RungFollower<'ladder> {
     /// return to, once it answered every round for the hold.
     pub(super) fn round_ended(&mut self, answered: &[RelayUrl], now: Instant) -> Option<RelayUrl> {
         self.round_runs = false;
+        // This round was due one wait (the current one, which doubles after empty rounds) after the
+        // last, started at the next pass of the loop (a read interval at most), and ended within
+        // the probe time. A longer gap had no round, so it is no evidence for the hold.
+        let max_gap = self.return_wait + self.times.interval + self.times.probe;
         self.return_wait = next_return_wait(self.return_wait, !answered.is_empty(), self.times);
         self.next_round = now + self.return_wait;
-        self.watch.observe(answered, now, self.times.return_hold)
+        self.watch
+            .observe(answered, now, self.times.return_hold, max_gap)
     }
 
     /// Note the move of the member to `rung`, done at `now`. The failed reads of the old rung say
@@ -468,6 +473,76 @@ mod tests {
             follower.walk_due(),
             None,
             "1 failed read of the new rung is a blip"
+        );
+    }
+
+    /// **A round after a backed-off wait is not a gap.**
+    ///
+    /// Rung 0 answers, misses a round, and the wait doubles to 2 minutes. The round after that wait
+    /// is on time, so the rung returns 3 minutes after it answered again, not later.
+    #[test]
+    fn a_round_after_a_backed_off_wait_counts_to_the_hold() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let ladder = ladder();
+        let start = Instant::now();
+        let mut follower = RungFollower::new(&ladder, rung("c"), TIMES, true, start);
+        let minute = |count: u32| start + TIMES.return_every * count;
+        assert_eq!(
+            round(&mut follower, &[rung("a")], minute(1)),
+            None,
+            "minute 1"
+        );
+        assert_eq!(
+            round(&mut follower, &[], minute(2)),
+            None,
+            "rung 0 misses minute 2"
+        );
+        assert_eq!(
+            follower.round_due(minute(3)),
+            None,
+            "the wait doubled, so no round at minute 3"
+        );
+        for count in 4..7 {
+            assert_eq!(
+                round(&mut follower, &[rung("a")], minute(count)),
+                None,
+                "minute {count}"
+            );
+        }
+        assert_eq!(
+            round(&mut follower, &[rung("a")], minute(7)),
+            Some(rung("a")),
+            "rung 0 answered every round for the hold since minute 4"
+        );
+    }
+
+    /// **A round after a stall of the member is a gap.**
+    ///
+    /// Rung 0 answers 1 round, then the member stalls for 3 minutes. The answer before the stall
+    /// does not count: the hold starts at the round after it.
+    #[test]
+    fn a_round_after_a_stall_starts_the_hold_again() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let ladder = ladder();
+        let start = Instant::now();
+        let mut follower = RungFollower::new(&ladder, rung("c"), TIMES, true, start);
+        let minute = |count: u32| start + TIMES.return_every * count;
+        assert_eq!(
+            round(&mut follower, &[rung("a")], minute(1)),
+            None,
+            "minute 1"
+        );
+        for count in 4..7 {
+            assert_eq!(
+                round(&mut follower, &[rung("a")], minute(count)),
+                None,
+                "minute {count}"
+            );
+        }
+        assert_eq!(
+            round(&mut follower, &[rung("a")], minute(7)),
+            Some(rung("a")),
+            "the hold counts from minute 4, the first round after the stall"
         );
     }
 }

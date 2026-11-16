@@ -9,19 +9,27 @@ use n0_future::time::Instant;
 #[derive(Debug, Default)]
 pub(super) struct ReturnWatch {
     answering: Vec<(RelayUrl, Instant)>,
+    last_round: Option<Instant>,
 }
 
 impl ReturnWatch {
     /// Note the rungs below the home that answered the probe round at `now`, lowest first. Returns
     /// the lowest rung that answered every round for `hold`. A rung that misses a round starts its
-    /// own wait again, and only its own: a rung that flaps does not hold back a steady one.
+    /// own wait again, and only its own: a rung that flaps does not hold back a steady one. A round
+    /// more than `max_gap` after the one before it starts every wait again: no round probed the
+    /// rungs in the gap (the member slept, or its task stalled), so the gap is no evidence.
     pub(super) fn observe(
         &mut self,
         answered: &[RelayUrl],
         now: Instant,
         hold: Duration,
+        max_gap: Duration,
     ) -> Option<RelayUrl> {
-        let previous = mem::take(&mut self.answering);
+        let last_round = self.last_round.replace(now);
+        let mut previous = mem::take(&mut self.answering);
+        if last_round.is_some_and(|last| now.duration_since(last) > max_gap) {
+            previous.clear();
+        }
         for rung in answered {
             let seen = previous.iter().find(|(seen, _)| seen == rung);
             let since = seen.map_or(now, |(_, since)| *since);
@@ -44,6 +52,8 @@ mod tests {
 
     const HOLD: Duration = Duration::from_mins(3);
     const ROUND: Duration = Duration::from_mins(1);
+    /// The rounds come each `ROUND`, plus a read interval and a probe at most.
+    const MAX_GAP: Duration = Duration::from_secs(63);
 
     fn rung(host: &str) -> RelayUrl {
         format!("https://{host}.example/")
@@ -58,13 +68,13 @@ mod tests {
         let mut watch = ReturnWatch::default();
         for round in 0..3 {
             assert_eq!(
-                watch.observe(&[rung("a")], start + ROUND * round, HOLD),
+                watch.observe(&[rung("a")], start + ROUND * round, HOLD, MAX_GAP),
                 None,
                 "no return in round {round}, before the hold"
             );
         }
         assert_eq!(
-            watch.observe(&[rung("a")], start + ROUND * 3, HOLD),
+            watch.observe(&[rung("a")], start + ROUND * 3, HOLD, MAX_GAP),
             Some(rung("a")),
             "the rung answered every round for the hold"
         );
@@ -75,15 +85,17 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let mut watch = ReturnWatch::default();
-        watch.observe(&[rung("a")], start, HOLD);
-        watch.observe(&[], start + ROUND, HOLD);
+        watch.observe(&[rung("a")], start, HOLD, MAX_GAP);
+        watch.observe(&[], start + ROUND, HOLD, MAX_GAP);
         assert_eq!(
-            watch.observe(&[rung("a")], start + ROUND * 3, HOLD),
+            watch.observe(&[rung("a")], start + ROUND * 3, HOLD, MAX_GAP),
             None,
             "the rung missed a round, so its wait starts at round 3"
         );
+        watch.observe(&[rung("a")], start + ROUND * 4, HOLD, MAX_GAP);
+        watch.observe(&[rung("a")], start + ROUND * 5, HOLD, MAX_GAP);
         assert_eq!(
-            watch.observe(&[rung("a")], start + ROUND * 6, HOLD),
+            watch.observe(&[rung("a")], start + ROUND * 6, HOLD, MAX_GAP),
             Some(rung("a")),
             "the rung answered every round since round 3"
         );
@@ -106,7 +118,7 @@ mod tests {
             } else {
                 vec![steady.clone()]
             };
-            returned = watch.observe(&answered, start + ROUND * round, HOLD);
+            returned = watch.observe(&answered, start + ROUND * round, HOLD, MAX_GAP);
         }
         assert_eq!(
             returned,
@@ -123,12 +135,41 @@ mod tests {
         let mut watch = ReturnWatch::default();
         let both = [rung("b"), rung("c")];
         for round in 0..3 {
-            watch.observe(&both, start + ROUND * round, HOLD);
+            watch.observe(&both, start + ROUND * round, HOLD, MAX_GAP);
         }
         assert_eq!(
-            watch.observe(&both, start + ROUND * 3, HOLD),
+            watch.observe(&both, start + ROUND * 3, HOLD, MAX_GAP),
             Some(rung("b")),
             "both rungs answered for the hold, and rung 1 is the lower one"
+        );
+    }
+
+    /// **A round after a gap starts the wait again.**
+    ///
+    /// The member pauses for 3 minutes after 1 round, and rung 0 answers the round after the pause.
+    /// No round probed rung 0 in the gap, so its 2 answers do not make a hold of 3 minutes.
+    #[test]
+    fn a_round_after_a_gap_starts_the_wait_again() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut watch = ReturnWatch::default();
+        watch.observe(&[rung("a")], start, HOLD, MAX_GAP);
+        assert_eq!(
+            watch.observe(&[rung("a")], start + HOLD + ROUND, HOLD, MAX_GAP),
+            None,
+            "2 answers around a gap of 3 minutes are not a hold"
+        );
+        for round in 2..4 {
+            assert_eq!(
+                watch.observe(&[rung("a")], start + HOLD + ROUND * round, HOLD, MAX_GAP),
+                None,
+                "the wait started again after the gap, round {round}"
+            );
+        }
+        assert_eq!(
+            watch.observe(&[rung("a")], start + HOLD + ROUND * 4, HOLD, MAX_GAP),
+            Some(rung("a")),
+            "the rung answered every round for the hold after the gap"
         );
     }
 }

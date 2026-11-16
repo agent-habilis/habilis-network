@@ -299,6 +299,7 @@ Each minute, the member probes every rung below its rung, in a task beside the l
 Each lower rung keeps the time since which it answered every round.
 When a lower rung answered every round for 3 minutes, the member moves to the lowest such rung.
 A rung that flaps restarts only its own wait, so it does not hold back a steady rung above it.
+A round that comes later than its wait plus a read interval and a probe starts every wait again, because no round probed the rungs in the gap.
 The hold keeps a relay that restarts or flaps from moving every member back and forth.
 A round that finds no lower rung doubles the wait to the next round, up to 5 minutes.
 A walk after a failure can pick a healthy lower rung with no hold, because the member must leave its rung anyway.
