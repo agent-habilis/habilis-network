@@ -438,7 +438,7 @@ pub const BROWSER_HAS_NO_PATH: &str = "a browser cannot carry payload in this me
 ///
 /// # Errors
 /// A node that can never reach anyone: without UDP, one that
-/// [cannot signal](can_signal). On a browser, also a mesh [`refuse_in_browser`]
+/// [cannot reach](reaches_without_udp) a peer. On a browser, also a mesh [`refuse_in_browser`]
 /// refuses. Refused here rather than left as a member that links to nobody
 /// and says nothing. Whether a reachable node may carry payload in this mesh
 /// is the accept gate's call at runtime, not this one's.
@@ -451,8 +451,8 @@ fn member_transports(
     #[cfg(target_arch = "wasm32")]
     refuse_in_browser(lookups, policy, transports)?;
     anyhow::ensure!(
-        transports.udp || can_signal(lookups, transports),
-        "this node has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node) or `nostr` in lookup"
+        transports.udp || reaches_without_udp(lookups, transports),
+        "this node has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node) or a data channel (`webrtc`) with `nostr` in lookup"
     );
     Ok(transports)
 }
@@ -462,6 +462,15 @@ fn member_transports(
 /// the relay, and a data channel's handshake crosses the relay too.
 fn reaches_relay(lookups: &LookupOpts, transports: lookup::TransportOpts) -> bool {
     lookups.relay_lookup != RelayChoice::Disabled && transports.relay
+}
+
+/// Whether a node without UDP can reach a peer at all: over the relay, or over a data channel that
+/// Nostr opens with no relay. Nostr alone is not enough: it only signals, so a node with no data
+/// channel gets nothing from it. Whether the mesh lets payload ride the path is the accept gate's
+/// call at runtime, as for the relay.
+fn reaches_without_udp(lookups: &LookupOpts, transports: lookup::TransportOpts) -> bool {
+    reaches_relay(lookups, transports)
+        || (lookups.nostr != NostrChoice::Disabled && transports.webrtc)
 }
 
 /// Whether a node without UDP has a path for the JSEP that opens its data
@@ -3340,6 +3349,45 @@ mod tests {
             .expect("a browser signals over Nostr");
         super::member_transports(&nostr_only, no_relay, &policy)
             .expect("a native node without UDP signals over Nostr");
+    }
+
+    // Nostr only signals: a node without UDP reaches a peer through it only with a data channel to
+    // open. A node with neither the data channel nor the relay lookup reaches nobody, so it is
+    // refused. The relay transport alone does not help on a Nostr-only mesh: no lookup names a relay.
+    #[test]
+    fn a_native_node_without_udp_that_can_only_signal_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let nostr_only = LookupOpts::loopback().nostr(NostrChoice::Pinned);
+        let policy =
+            TransportPolicy::try_from(&[Transport::Udp, Transport::WebRtc]).expect("valid");
+        let bare = lookup::TransportOpts {
+            webrtc: false,
+            relay: false,
+            ..lookup::TransportOpts::webrtc_only()
+        };
+        let relay_only = lookup::TransportOpts {
+            relay: true,
+            ..bare
+        };
+
+        assert!(
+            super::member_transports(&nostr_only, bare, &policy).is_err(),
+            "no UDP, no data channel and no relay transport: the node signals and reaches nobody"
+        );
+        assert!(
+            super::member_transports(&nostr_only, relay_only, &policy).is_err(),
+            "a relay transport on a Nostr-only mesh reaches nobody: no lookup names a relay"
+        );
+        assert!(
+            super::member_transports(&nostr_only, lookup::TransportOpts::webrtc_only(), &policy)
+                .is_ok(),
+            "Nostr opens a data channel for a node with no UDP"
+        );
+        let relay_lookup = LookupOpts::new(RelayChoice::Pinned);
+        assert!(
+            super::member_transports(&relay_lookup, relay_only, &policy).is_ok(),
+            "the relay reaches a peer for a node with no data channel"
+        );
     }
 
     // A native node without UDP signals its data channel over the relay, as a
