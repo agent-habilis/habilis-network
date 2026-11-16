@@ -1981,7 +1981,7 @@ async fn handle_peer_info(
     // state — a `PeerInfo` normally arrives over an already-formed link,
     // and recovery (`heal::rebridge_known`, the starvation watchdog's
     // precondition) needs the memory precisely *after* that link dies.
-    let first_sighting = state.known_endpoints.insert(peer_id);
+    let first_sighting = state.note_known_endpoint(peer_id);
     let peer_ips: Vec<_> = peer_addr.ip_addrs().collect();
     let local = context.endpoint.id().fmt_short();
     let peer = peer_id.fmt_short();

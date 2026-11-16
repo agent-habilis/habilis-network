@@ -459,7 +459,7 @@ pub(crate) mod discovery {
         } else {
             state.lane_peers.remove(&peer);
         }
-        state.known_endpoints.insert(peer);
+        state.note_known_endpoint(peer);
         // A `Hello` on our own tag is a poke: a newcomer that cannot offer (a higher id) asks us to.
         let addressed = hello.to == Some(context.endpoint.id());
         match hello_action(state, context.endpoint.id(), hello, now) {

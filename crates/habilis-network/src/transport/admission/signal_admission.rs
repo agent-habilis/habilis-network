@@ -153,7 +153,8 @@ impl SignalAdmission {
         let connections = handles.iter().filter_map(WeakConnectionHandle::upgrade);
         let live = connections.filter(|connection| connection.close_reason().is_none());
         let kinds = live.map(|connection| probe::selected_kind(&connection));
-        probe::best_kind(kinds).or_else(|| self.recently_closed_on_rung(peer))
+        let relay_carries = self.lock().relay_carries;
+        probe::best_kind(kinds, relay_carries).or_else(|| self.recently_closed_on_rung(peer))
     }
 
     /// A rule closed a gossip connection of `peer` because its path is `kind` (the gossip rung, or

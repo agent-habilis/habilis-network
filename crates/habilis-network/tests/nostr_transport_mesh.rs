@@ -436,6 +436,58 @@ fn a_pair_on_the_default_list_plus_nostr_exchanges_a_message_over_nostr() {
     });
 }
 
+/// Only alice dials bob: bob has no pooled connection to alice and no want of his own. His table
+/// must not keep a refusal by name for alice, or he drops her handshake and no reply goes back.
+#[test]
+fn a_one_way_dial_over_nostr_gets_its_reply() {
+    let guard = habilis_network_test_tracing::init();
+    guard.allow_warn(
+        "iroh::socket::transports::relay::actor",
+        "Lost connection to relay server",
+    );
+    guard.allow_warn(
+        "iroh::socket::remote_map::remote_state",
+        "No paths to remote endpoint known",
+    );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
+        let nostr = TestRelay::spawn().await.expect("local Nostr relay");
+        let list = vec![Transport::Udp, Transport::Relay, Transport::Nostr];
+        let alice = Member::create("alice", &relay, &nostr, list).await;
+        let mut bob = Member::join("bob", &alice).await;
+        let carol = Member::join("carol", &alice).await;
+        assert!(
+            all_know_each_other(&[&alice, &bob, &carol], Duration::from_mins(1)).await,
+            "the three members never formed a mesh"
+        );
+
+        alice.block_ip_to(bob.ports()).await;
+        bob.block_ip_to(alice.ports()).await;
+        alice.block_rung_to(Rung::Relay, "bob").await;
+        bob.block_rung_to(Rung::Relay, "alice").await;
+        alice.close_link("bob").await;
+        bob.close_link("alice").await;
+        // Bob drops his connection and never dials: only alice does.
+        bob.forget_connection("alice").await;
+        alice.forget_connection("bob").await;
+        alice
+            .expect_rung_redialing("bob", "nostr", "IP and the relay cut, alice dials alone")
+            .await;
+        alice.send_when_proven("bob", "one way").await;
+        let started = Instant::now();
+        while !bob.saw_msg("one way") {
+            assert!(
+                started.elapsed() < PAYLOAD_DEADLINE,
+                "the message never reached bob: his table refused the handshake of alice"
+            );
+            time::sleep(Duration::from_millis(250)).await;
+        }
+        for member in [alice, bob, carol] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
+}
+
 #[test]
 fn two_members_with_no_other_path_exchange_a_message_over_nostr() {
     let guard = habilis_network_test_tracing::init();

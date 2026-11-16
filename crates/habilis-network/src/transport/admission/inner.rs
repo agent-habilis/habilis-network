@@ -10,6 +10,7 @@ use iroh::endpoint::WeakConnectionHandle;
 
 use crate::util::clock::Instant;
 
+use super::nostr_name::NostrName;
 use super::{RefusalBackoff, Sessions, Slot, Victims, sampler};
 use tokio::sync::mpsc;
 
@@ -213,7 +214,12 @@ impl Inner {
             nostr.set_established(*peer, established);
             let session_hub = self.hub.as_ref();
             let carried = kinds.is_empty() && session_hub.is_some_and(|hub| hub.has_session(peer));
-            nostr.allow(*peer, allowed && !carried);
+            match sampler::nostr_name(&kinds, self.relay_carries, wanted, carried) {
+                NostrName::Allow => nostr.allow(*peer, true),
+                NostrName::Stop => nostr.allow(*peer, false),
+                // No refusal by name outlives the idle slot: a peer that dials first gets its reply.
+                NostrName::Forget => nostr.forget_destination(*peer),
+            }
             // A pair with connections and no usable path is one that the engine wants Nostr for,
             // and a pair with a usable path is not. A pair with no connection keeps its want.
             if !kinds.is_empty() {

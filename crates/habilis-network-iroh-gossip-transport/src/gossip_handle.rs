@@ -151,6 +151,14 @@ impl GossipHandle {
         }
     }
 
+    /// Forget everything the engine said about `dst`: it is a destination that was never named
+    /// again. The engine calls this for a pair with no connection and no want, so that no
+    /// refusal by name outlives the slot of the pair.
+    pub fn forget_destination(&self, dst: EndpointId) {
+        locked(&self.shared.blocked).remove(&dst);
+        locked(&self.shared.permitted).remove(&dst);
+    }
+
     /// Allow frames to `dst` as replies to a frame that it sent, unless the engine stopped `dst`
     /// by name: `allow(dst, false)` stands. On a closed handle (see [`Self::set_default_allow`])
     /// this is how a pair that chose this path gets its answers.
@@ -995,6 +1003,28 @@ mod tests {
             !handle.is_allowed(carol),
             "the engine can stop a reply after it"
         );
+    }
+
+    /// A destination that the engine stopped and then forgot is a stranger again: a reply to it
+    /// passes. A slot with no connection and no want must not keep a refusal by name, or the
+    /// handshake of a peer that dials first is refused.
+    #[test]
+    fn a_forgotten_destination_takes_a_reply_again() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        handle.set_default_allow(false);
+        let bob = secret(2).public();
+
+        handle.allow(bob, false);
+        handle.allow_reply(bob);
+        assert!(!handle.is_allowed(bob), "stopped by name");
+        handle.forget_destination(bob);
+        assert!(
+            !handle.is_allowed(bob),
+            "a forgotten destination is a stranger on a closed handle"
+        );
+        handle.allow_reply(bob);
+        assert!(handle.is_allowed(bob), "and a reply to it passes");
     }
 
     /// A destination that was never named is allowed: its handshake must pass.

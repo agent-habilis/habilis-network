@@ -123,14 +123,20 @@ pub(crate) fn nostr_allow_for(kinds: &[PathKind], relay_carries: bool, wanted: b
 /// can sit beside a connection that is already direct: the first reading must not speak for the
 /// pair. The order is the ladder's: do not reorder it (`path_action` relies on `[WebRtc, Ip]`
 /// reading IP).
-pub(crate) fn best_kind(kinds: impl IntoIterator<Item = PathKind>) -> Option<PathKind> {
+pub(crate) fn best_kind(
+    kinds: impl IntoIterator<Item = PathKind>,
+    // false where the relay carries no payload: Nostr ranks above it, as in the selector
+    relay_carries: bool,
+) -> Option<PathKind> {
     let rank = |kind: &PathKind| match kind {
         PathKind::Ip => 0,
         PathKind::WebRtc => 1,
         PathKind::Multihop => 2,
         PathKind::Gossip => 3,
-        PathKind::Relay => 4,
-        PathKind::Nostr => 5,
+        PathKind::Relay if relay_carries => 4,
+        PathKind::Relay => 5,
+        PathKind::Nostr if relay_carries => 5,
+        PathKind::Nostr => 4,
         PathKind::None => 6,
     };
     kinds
@@ -180,17 +186,17 @@ mod tests {
     fn a_nostr_path_ranks_below_the_relay_and_above_no_path() {
         let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
-            best_kind([PathKind::Nostr, PathKind::Relay]),
+            best_kind([PathKind::Nostr, PathKind::Relay], true),
             Some(PathKind::Relay),
             "the relay beats Nostr"
         );
         assert_eq!(
-            best_kind([PathKind::Nostr, PathKind::Gossip]),
+            best_kind([PathKind::Nostr, PathKind::Gossip], true),
             Some(PathKind::Gossip),
             "gossip beats Nostr"
         );
         assert_eq!(
-            best_kind([PathKind::None, PathKind::Nostr]),
+            best_kind([PathKind::None, PathKind::Nostr], true),
             Some(PathKind::Nostr),
             "Nostr is a path, and no path is not"
         );
@@ -241,6 +247,23 @@ mod tests {
             "another remote is not blocked"
         );
         habilis_network_iroh_webrtc_transport::block_rung_to(local, Rung::Relay, remote, false);
+    }
+
+    /// The pair kind ranks like the selector: where the relay carries no payload, Nostr is above
+    /// the relay, so the Nostr proof is recorded for a pair that reads both.
+    #[test]
+    fn the_best_kind_ranks_nostr_above_a_relay_that_carries_no_payload() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            best_kind([PathKind::Relay, PathKind::Nostr], false),
+            Some(PathKind::Nostr),
+            "a lookup-only relay yields to Nostr"
+        );
+        assert_eq!(
+            best_kind([PathKind::Relay, PathKind::Nostr], true),
+            Some(PathKind::Relay),
+            "a relay that carries payload keeps its place"
+        );
     }
 
     #[test]

@@ -29,6 +29,12 @@ failed dial marks the pair as one that the engine wants Nostr for, and the next 
 Nostr address. The pair then links over Nostr. Expect about the idle timeout, plus the sweep (up
 to 5 s), plus one failed dial, plus one dial.
 
+A pair whose relay stays reachable takes a different road. A connection that loses IP moves to
+the relay path and stays there. On a mesh whose relay carries payload this is the normal rung. On
+a lookup-only relay the selector ranks Nostr above the relay, but a connection that already
+exists gets the Nostr path only on a new dial: the pool keeps a connection for 15 s, or for 15 min
+once it has carried a send. Expect that long before such a pair moves to Nostr.
+
 A gossip link never rides Nostr: the engine closes it with its own code. A pair on Nostr carries
 directed payload, not the mesh topic.
 

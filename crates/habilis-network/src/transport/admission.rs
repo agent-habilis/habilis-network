@@ -60,6 +60,7 @@ mod admission_guard;
 mod busy_guard;
 mod connection_hook;
 mod inner;
+mod nostr_name;
 mod refusal;
 mod refusal_backoff;
 mod round;
@@ -1655,6 +1656,42 @@ mod tests {
             sampler::nostr_view(&[Relay], false, false),
             (true, true),
             "a lookup-only relay carries no payload"
+        );
+    }
+
+    /// A peer with no connection and no want gets no refusal by name: the peer may dial first, and
+    /// its handshake needs the reply. A peer with a usable path is stopped, and a peer with no
+    /// usable path or a want is allowed.
+    #[test]
+    fn a_peer_with_no_connection_and_no_want_is_forgotten_and_not_stopped() {
+        use super::super::probe::PathKind::{Ip, Nostr};
+        use super::nostr_name::NostrName;
+        use super::sampler::nostr_name;
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            nostr_name(&[], true, false, false),
+            NostrName::Forget,
+            "no connection, no want"
+        );
+        assert_eq!(
+            nostr_name(&[], true, true, false),
+            NostrName::Allow,
+            "a want"
+        );
+        assert_eq!(
+            nostr_name(&[], true, false, true),
+            NostrName::Stop,
+            "a session carries it"
+        );
+        assert_eq!(
+            nostr_name(&[Ip], true, false, false),
+            NostrName::Stop,
+            "a usable path"
+        );
+        assert_eq!(
+            nostr_name(&[Nostr], true, false, false),
+            NostrName::Allow,
+            "Nostr carries it"
         );
     }
 

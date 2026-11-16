@@ -2444,6 +2444,18 @@ impl EventLoopState {
                 .is_some_and(|handle| handle.has_session(&peer))
     }
 
+    /// A new endpoint is known: remember it and tell the Nostr transport at once, so that a newcomer
+    /// that dials first gets its reply without waiting for the alive tick. Returns whether the
+    /// endpoint is new.
+    pub(crate) fn note_known_endpoint(&mut self, peer: EndpointId) -> bool {
+        let first = self.known_endpoints.insert(peer);
+        if first {
+            self.webrtc_admission
+                .set_known_peers(self.known_endpoints.iter().copied());
+        }
+        first
+    }
+
     /// A probe proved `peer` over Nostr: see [`Self::rides_nostr`].
     pub(crate) fn note_proven_over_nostr(&mut self, peer: EndpointId) {
         self.nostr_proven.insert(peer);
