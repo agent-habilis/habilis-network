@@ -1423,14 +1423,18 @@ mod lookup_tests {
         let with_gossip = MeshConfig::try_from(&[0b0111, 0b1_1111])
             .expect("the bits in this test name a valid transport set")
             .transport;
-        assert!(
-            with_gossip.allows(Transport::Udp)
-                && with_gossip.allows(Transport::WebRtc)
-                && with_gossip.allows(Transport::Multihop)
-                && with_gossip.allows(Transport::Relay)
-                && with_gossip.allows(Transport::Gossip),
-            "the policy with gossip keeps the default paths on"
-        );
+        for transport in [
+            Transport::Udp,
+            Transport::WebRtc,
+            Transport::Multihop,
+            Transport::Relay,
+            Transport::Gossip,
+        ] {
+            assert!(
+                with_gossip.allows(transport),
+                "the policy with gossip allows {transport:?}"
+            );
+        }
     }
 
     #[test]

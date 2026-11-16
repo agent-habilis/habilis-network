@@ -663,16 +663,23 @@ impl SignalAdmission {
     pub(crate) fn ledger(&self) -> LedgerView {
         let inner = self.lock();
         let ceiling = &inner.ceiling;
+        let units: usize = ceiling.units();
+        let over_ceiling: usize = ceiling.over_ceiling();
+        let connections: usize = ceiling.connections();
+        let total_cap: usize = ceiling.total_cap();
+        let quic_peers: Vec<EndpointId> = ceiling.quic_peers();
+        let session_peers: Vec<EndpointId> = ceiling.session_peers();
+        let pinned: Vec<EndpointId> = ceiling.pinned_connected();
         LedgerView {
             local: inner.local,
             cap: self.cap,
-            units: ceiling.units(),
-            over_ceiling: ceiling.over_ceiling(),
-            connections: ceiling.connections(),
-            total_cap: ceiling.total_cap(),
-            quic_peers: ceiling.quic_peers(),
-            session_peers: ceiling.session_peers(),
-            pinned: ceiling.pinned_connected(),
+            units,
+            over_ceiling,
+            connections,
+            total_cap,
+            quic_peers,
+            session_peers,
+            pinned,
         }
     }
 

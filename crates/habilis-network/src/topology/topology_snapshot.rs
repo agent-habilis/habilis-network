@@ -1,10 +1,14 @@
 use std::collections::BTreeSet;
 
-use habilis_network_iroh_multihop_transport::{AppId, MultihopHandle, TopologyView};
 use iroh::EndpointId;
 use serde::Serialize;
 
-use super::{PathLabel, PeerLink};
+#[cfg(feature = "multihop")]
+use habilis_network_iroh_multihop_transport::{AppId, TopologyView};
+
+#[cfg(feature = "multihop")]
+use super::TopologyLink;
+use super::{PathLabel, PeerLink, TopologyGraph};
 use crate::daemon::state::EventLoopState;
 use crate::transport::LedgerView;
 use crate::transport::probe::PathKind;
@@ -38,7 +42,7 @@ pub struct TopologySnapshot {
     /// Every peer that the node holds a connection, a session or a gossip link to.
     pub peers: Vec<PeerLink>,
     /// The multihop link-state graph, or `None` when multihop is off.
-    pub graph: Option<TopologyView>,
+    pub graph: Option<TopologyGraph>,
 }
 
 impl EventLoopState {
@@ -63,7 +67,7 @@ impl EventLoopState {
             quic_connections: ledger.connections,
             quic_cap: ledger.total_cap,
             peers,
-            graph: self.multihop().map(MultihopHandle::topology_view),
+            graph: self.graph(),
         }
     }
 
@@ -99,9 +103,41 @@ impl EventLoopState {
     }
 
     /// The first hop of the multihop route to `peer`, in hex.
+    #[cfg(feature = "multihop")]
     fn first_hop(&self, peer: EndpointId) -> Option<String> {
-        let hops: Vec<AppId> = self.multihop()?.route_hops(AppId::new(peer))?;
-        hops.first().map(|hop| hop.get().to_string())
+        let mut hops = self.multihop()?.route_hops(AppId::new(peer))?;
+        hops.next().map(|hop| hop.get().to_string())
+    }
+
+    /// Without multihop no path is a multihop path, so there is no first hop.
+    #[cfg(not(feature = "multihop"))]
+    fn first_hop(&self, _peer: EndpointId) -> Option<String> {
+        None
+    }
+
+    /// The multihop link-state graph of this node.
+    #[cfg(feature = "multihop")]
+    fn graph(&self) -> Option<TopologyGraph> {
+        let view: TopologyView = self.multihop()?.topology_view();
+        let edges: Vec<TopologyLink> = view
+            .edges
+            .iter()
+            .map(|edge| TopologyLink {
+                from: edge.from.clone(),
+                to: edge.to.clone(),
+                metric: edge.metric,
+            })
+            .collect();
+        Some(TopologyGraph {
+            self_id: view.self_id,
+            edges,
+        })
+    }
+
+    /// Without multihop there is no graph.
+    #[cfg(not(feature = "multihop"))]
+    fn graph(&self) -> Option<TopologyGraph> {
+        None
     }
 }
 
