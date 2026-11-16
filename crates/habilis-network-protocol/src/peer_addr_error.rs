@@ -150,21 +150,22 @@ fn lane_message(scope: &[u8], id: &EndpointId, needs_lane: bool) -> Vec<u8> {
 /// fill that member's session slots.
 ///
 /// # Panics
-/// If `secret` is not the key of `addr`: a caller bug.
+/// If `secret` is not the key of `address`: a caller bug.
 #[must_use]
 pub fn peer_info_to_json(
-    addr: &EndpointAddr,
+    address: &EndpointAddr,
+    // true when the node has no IP transport and needs a data channel
     needs_lane: bool,
     secret: &SecretKey,
     scope: &[u8],
 ) -> serde_json::Value {
     assert_eq!(
         secret.public(),
-        addr.id,
+        address.id,
         "a lane flag is signed by its endpoint"
     );
-    let signature = secret.sign(&lane_message(scope, &addr.id, needs_lane));
-    let mut json = endpoint_addr_to_json(addr);
+    let signature = secret.sign(&lane_message(scope, &address.id, needs_lane));
+    let mut json = endpoint_addr_to_json(address);
     json["webrtc"] = serde_json::Value::Bool(needs_lane);
     json["lane_sig"] = serde_json::Value::String(bs58::encode(signature.to_bytes()).into_string());
     json
@@ -177,11 +178,9 @@ pub fn peer_info_to_json(
 pub fn peer_info_needs_lane(json: &serde_json::Value, scope: &[u8]) -> Option<bool> {
     let needs_lane = json["webrtc"].as_bool()?;
     let id: EndpointId = json["id"].as_str()?.parse().ok()?;
-    let signature: [u8; 64] = bs58::decode(json["lane_sig"].as_str()?)
-        .into_vec()
-        .ok()?
-        .try_into()
-        .ok()?;
+    let encoded = json["lane_sig"].as_str()?;
+    let bytes = bs58::decode(encoded).into_vec().ok()?;
+    let signature: [u8; 64] = bytes.try_into().ok()?;
     id.verify(
         &lane_message(scope, &id, needs_lane),
         &Signature::from_bytes(&signature),
@@ -192,7 +191,11 @@ pub fn peer_info_needs_lane(json: &serde_json::Value, scope: &[u8]) -> Option<bo
 
 #[cfg(test)]
 mod lane_tests {
-    use super::*;
+    use iroh_base::{EndpointAddr, SecretKey};
+
+    use super::{
+        endpoint_addr_from_json, endpoint_addr_to_json, peer_info_needs_lane, peer_info_to_json,
+    };
 
     const MESH: &[u8] = b"mesh-a";
 
@@ -201,12 +204,20 @@ mod lane_tests {
         let bob = SecretKey::from_bytes(&[3u8; 32]);
         let empty = EndpointAddr::new(bob.public());
         let json = peer_info_to_json(&empty, true, &bob, MESH);
-        assert_eq!(peer_info_needs_lane(&json, MESH), Some(true));
+        assert_eq!(
+            peer_info_needs_lane(&json, MESH),
+            Some(true),
+            "the flag reads back as signed"
+        );
         let (id, parsed) = endpoint_addr_from_json(&json).expect("the body decodes");
-        assert_eq!(id, bob.public());
-        assert!(parsed.is_empty());
+        assert_eq!(id, bob.public(), "the body still names the endpoint");
+        assert!(parsed.is_empty(), "the address stays empty");
         let has_ip = peer_info_to_json(&empty, false, &bob, MESH);
-        assert_eq!(peer_info_needs_lane(&has_ip, MESH), Some(false));
+        assert_eq!(
+            peer_info_needs_lane(&has_ip, MESH),
+            Some(false),
+            "a false flag reads back as false, not as missing"
+        );
     }
 
     /// The attack the signature closes: a member names another member's
@@ -226,9 +237,17 @@ mod lane_tests {
         // A flag with no signature at all.
         let mut bare = endpoint_addr_to_json(&bobs);
         bare["webrtc"] = serde_json::Value::Bool(true);
-        assert_eq!(peer_info_needs_lane(&bare, MESH), None);
+        assert_eq!(
+            peer_info_needs_lane(&bare, MESH),
+            None,
+            "a flag with no signature is ignored"
+        );
         // Bob's own flag, replayed into another mesh.
         let real = peer_info_to_json(&bobs, true, &bob, MESH);
-        assert_eq!(peer_info_needs_lane(&real, b"mesh-b"), None);
+        assert_eq!(
+            peer_info_needs_lane(&real, b"mesh-b"),
+            None,
+            "a flag signed for one mesh is ignored in another"
+        );
     }
 }

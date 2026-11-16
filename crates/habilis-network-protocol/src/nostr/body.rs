@@ -45,16 +45,20 @@ pub(super) struct Body {
 
 impl From<&Signal> for Body {
     fn from(signal: &Signal) -> Self {
+        let from = *signal.from.as_bytes();
+        let to = signal.to.map(|to| *to.as_bytes());
+        let envelope = signal.envelope.clone();
+        let addrs = signal.addrs.clone();
         Self {
             version: VERSION,
             kind: signal.kind,
-            from: *signal.from.as_bytes(),
-            to: signal.to.map(|to| *to.as_bytes()),
+            from,
+            to,
             ts: signal.ts,
             nonce: signal.nonce,
             re: signal.re,
-            envelope: signal.envelope.clone(),
-            addrs: signal.addrs.clone(),
+            envelope,
+            addrs,
             webrtc: signal.webrtc,
         }
     }

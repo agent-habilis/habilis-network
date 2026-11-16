@@ -7,7 +7,7 @@ use iroh_base::{EndpointId, SecretKey};
 use super::body::{Body, Envelope, signed_message};
 use super::nostr_keys::NostrKeys;
 use super::signal_kind::SignalKind;
-use crate::seal_error::seal_symmetric;
+use crate::seal_error;
 
 /// One signal, in the clear. Only [`seal`] and [`Opener::open`](super::Opener::open)
 /// see it on the wire.
@@ -75,5 +75,5 @@ pub fn seal(keys: &NostrKeys, secret: &SecretKey, signal: &Signal) -> String {
         signature: BASE64.encode(signature.to_bytes()),
     })
     .expect("an envelope always serializes");
-    BASE64.encode(seal_symmetric(&keys.seal_key, &envelope))
+    BASE64.encode(seal_error::seal_symmetric(&keys.seal_key, &envelope))
 }

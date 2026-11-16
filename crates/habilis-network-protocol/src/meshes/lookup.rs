@@ -487,10 +487,11 @@ fn validate_nostr_urls(urls: &[Url]) -> Result<(), NostrError> {
 /// use habilis_network_protocol::meshes::parse_nostr_urls;
 ///
 /// let urls = parse_nostr_urls("wss://a.example,wss://b.example").expect("two relays");
-/// assert_eq!(urls.len(), 2);
+/// assert_eq!(urls.count(), 2);
 /// ```
-pub fn parse_nostr_urls(raw: &str) -> Result<Vec<Url>, NostrError> {
-    raw.split(',')
+pub fn parse_nostr_urls(raw: &str) -> Result<impl Iterator<Item = Url> + use<>, NostrError> {
+    let parsed: Result<Vec<Url>, NostrError> = raw
+        .split(',')
         .map(|entry| {
             let trimmed = entry.trim();
             if trimmed.is_empty() {
@@ -502,7 +503,8 @@ pub fn parse_nostr_urls(raw: &str) -> Result<Vec<Url>, NostrError> {
                 entry: trimmed.to_owned(),
             })
         })
-        .collect()
+        .collect();
+    parsed.map(IntoIterator::into_iter)
 }
 
 /// Decode `count` length-prefixed relay URLs from the cursor, advancing `pos`.
@@ -1689,75 +1691,82 @@ mod lookup_tests {
     fn the_lookup_pair_carries_no_nostr() {
         let _guard = ::habilis_network_test_tracing::init();
         let lookups = LookupOpts::public_preset();
-        assert_eq!(lookups.nostr, NostrChoice::Pinned);
+        assert_eq!(
+            lookups.nostr,
+            NostrChoice::Pinned,
+            "the public preset has Nostr on"
+        );
         let mut buffer = Vec::new();
         lookups.encode_into(&mut buffer);
         assert_eq!(buffer, vec![0b0111], "the bytes are those of main");
         let mut position = 0;
         let decoded = LookupOpts::decode_from(&buffer, &mut position).expect("decodes");
-        assert_eq!(decoded.nostr, NostrChoice::Disabled);
+        assert_eq!(
+            decoded.nostr,
+            NostrChoice::Disabled,
+            "the pair reads back without Nostr"
+        );
     }
 
     #[test]
     fn only_a_set_with_nostr_and_nothing_else_is_nostr_only() {
+        let nostr_alone = LookupOpts::loopback().nostr(NostrChoice::Pinned);
         assert!(
-            LookupOpts::loopback()
-                .nostr(NostrChoice::Pinned)
-                .is_nostr_only()
+            nostr_alone.is_nostr_only(),
+            "a blob ticket made from it would read as loopback"
         );
         assert!(
             !LookupOpts::public_preset().is_nostr_only(),
-            "mdns, dht, relay too"
+            "mdns, dht and relay too"
         );
         assert!(!LookupOpts::loopback().is_nostr_only(), "no Nostr");
-        assert!(
-            !LookupOpts::loopback()
-                .mdns(true)
-                .nostr(NostrChoice::Pinned)
-                .is_nostr_only()
-        );
+        let with_mdns = LookupOpts::loopback().mdns(true).nostr(NostrChoice::Pinned);
+        assert!(!with_mdns.is_nostr_only(), "Nostr and mDNS");
+    }
+
+    /// A relay URL for a test.
+    fn relay(text: &str) -> url::Url {
+        text.parse().expect("a valid relay URL")
+    }
+
+    /// The config a create makes from `urls` as its Nostr relays.
+    fn nostr_config(urls: Vec<url::Url>) -> Result<MeshConfig, super::ConfigError> {
+        let set = LookupSet::choose(&[Lookup::Nostr], None)?.with_nostr_urls(urls)?;
+        Ok(MeshConfig {
+            lookups: resolve_lookups(set),
+            ..MeshConfig::loopback()
+        })
     }
 
     /// One set of relays gives one id, whatever order the caller names them in.
     #[test]
     fn a_custom_nostr_list_is_sorted_and_has_no_duplicate() {
         let _guard = ::habilis_network_test_tracing::init();
-        let alpha: url::Url = "wss://a.example/".parse().expect("a valid relay URL");
-        let beta: url::Url = "wss://b.example/".parse().expect("a valid relay URL");
-        let resolve = |urls: Vec<url::Url>| {
-            let set = LookupSet::choose(&[Lookup::Nostr], None)
-                .expect("a lookup set")
-                .with_nostr_urls(urls)?;
-            Ok::<_, super::ConfigError>(MeshConfig {
-                lookups: resolve_lookups(set),
-                ..MeshConfig::loopback()
-            })
-        };
-        let forward = resolve(vec![alpha.clone(), beta.clone()]).expect("a sorted list");
+        let alpha = relay("wss://a.example/");
+        let beta = relay("wss://b.example/");
+        let forward = nostr_config(vec![alpha.clone(), beta.clone()]).expect("a sorted list");
         let backward =
-            resolve(vec![beta.clone(), alpha.clone()]).expect("an unsorted list is sorted");
+            nostr_config(vec![beta.clone(), alpha.clone()]).expect("an unsorted list is sorted");
         assert_eq!(
             forward.to_bytes(),
             backward.to_bytes(),
             "the same relays make the same id in any order"
         );
-        let duplicate = resolve(vec![alpha.clone(), beta, alpha])
+        let duplicate = nostr_config(vec![alpha.clone(), beta, alpha])
             .expect_err("a duplicate is refused")
             .to_string();
         assert!(duplicate.contains("twice"), "{duplicate}");
 
         // A list that skipped the sorting is refused at validate and at decode.
         let unsorted = LookupOpts::loopback().nostr(NostrChoice::Custom(vec![
-            "wss://b.example/".parse().expect("a valid relay URL"),
-            "wss://a.example/".parse().expect("a valid relay URL"),
+            relay("wss://b.example/"),
+            relay("wss://a.example/"),
         ]));
-        assert!(
-            unsorted
-                .validate()
-                .expect_err("an unsorted list is refused")
-                .to_string()
-                .contains("ascending order")
-        );
+        let refusal = unsorted
+            .validate()
+            .expect_err("an unsorted list is refused")
+            .to_string();
+        assert!(refusal.contains("ascending order"), "{refusal}");
         let mut bytes = forward.to_bytes();
         // Swap the two 16-byte URLs: [lookup, transport, features, count] then
         // two `[len u16][url]` entries.

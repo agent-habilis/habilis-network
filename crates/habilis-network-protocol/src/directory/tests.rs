@@ -135,13 +135,21 @@ fn directory_topic_couples_to_lookups() {
 fn a_nostr_only_mesh_advertises_into_its_own_directory() {
     let _guard = ::habilis_network_test_tracing::init();
     let nostr_only = LookupOpts::loopback().nostr(NostrChoice::Pinned);
-    assert!(validate_advertise(&DirectorySelection::Default, &nostr_only).is_ok());
+    assert!(
+        validate_advertise(&DirectorySelection::Default, &nostr_only).is_ok(),
+        "a Nostr-only mesh is reachable, so it may advertise"
+    );
     let name = directory("global");
     let advertiser = directory_mesh(&name, nostr_only.clone()).to_string();
-    assert_eq!(advertiser, directory_mesh(&name, nostr_only).to_string());
+    assert_eq!(
+        advertiser,
+        directory_mesh(&name, nostr_only).to_string(),
+        "the same lookups give the same directory"
+    );
     assert_ne!(
         advertiser,
-        directory_mesh(&name, LookupOpts::public_preset()).to_string()
+        directory_mesh(&name, LookupOpts::public_preset()).to_string(),
+        "a discoverer meets a Nostr-only mesh only by naming Nostr alone"
     );
 }
 

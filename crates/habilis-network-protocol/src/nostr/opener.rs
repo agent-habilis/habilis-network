@@ -10,7 +10,7 @@ use super::nostr_keys::NostrKeys;
 use super::signal::Signal;
 use super::signal_kind::SignalKind;
 use crate::nostr_error::NostrError;
-use crate::seal_error::open_symmetric;
+use crate::seal_error;
 
 /// A signal older or newer than this, by the sender's clock against ours, is
 /// refused. It bounds how long a captured signal can be replayed.
@@ -53,8 +53,8 @@ impl Opener {
         use base64::Engine as _;
 
         let sealed = BASE64.decode(content).map_err(|_| NostrError::NotBase64)?;
-        let plain =
-            open_symmetric(&self.keys.seal_key, &sealed).map_err(|_| NostrError::NotSealed)?;
+        let plain = seal_error::open_symmetric(&self.keys.seal_key, &sealed)
+            .map_err(|_| NostrError::NotSealed)?;
         let envelope: Envelope =
             serde_json::from_slice(&plain).map_err(|_| NostrError::Malformed {
                 step: "malformed envelope",
@@ -180,11 +180,11 @@ mod tests {
     use iroh_base::SecretKey;
 
     use super::{MAX_SEEN, Opener, REPLAY_WINDOW_SECS};
-    use crate::nostr::body::{Body, Envelope, VERSION, signed_message};
+    use crate::nostr::body::{Body, Envelope, signed_message};
     use crate::nostr::nostr_keys::NostrKeys;
     use crate::nostr::signal::{Signal, seal};
     use crate::nostr::signal_kind::SignalKind;
-    use crate::seal_error::{open_symmetric, seal_symmetric};
+    use crate::seal_error;
     use crate::topic::TopicId;
 
     const NOW: u64 = 1_790_000_000;
@@ -240,26 +240,15 @@ mod tests {
         let (alice, bob, mallory) = (member(), member(), member());
         let claimed = offer(&alice, &bob);
         // Mallory builds alice's body and signs it with her own key.
-        let body = serde_json::to_string(&Body {
-            version: VERSION,
-            kind: claimed.kind,
-            from: *alice.public().as_bytes(),
-            to: Some(*bob.public().as_bytes()),
-            ts: NOW,
-            nonce: claimed.nonce,
-            re: None,
-            envelope: claimed.envelope,
-            addrs: Vec::new(),
-            webrtc: false,
-        })
-        .expect("a body serializes");
+        let alices_body = Body::from(&claimed);
+        let body = serde_json::to_string(&alices_body).expect("a body serializes");
         let signature = mallory.sign(&signed_message(&keys().room_tag, &body));
         let envelope = serde_json::to_vec(&Envelope {
             body,
             signature: BASE64.encode(signature.to_bytes()),
         })
         .expect("an envelope serializes");
-        let forged = BASE64.encode(seal_symmetric(&keys().seal_key, &envelope));
+        let forged = BASE64.encode(seal_error::seal_symmetric(&keys().seal_key, &envelope));
         let error = refusal(&mut Opener::new(keys(), bob.public()), &forged, NOW);
         assert!(error.contains("signature does not match"), "{error}");
     }
@@ -405,7 +394,8 @@ mod tests {
         let hello = Signal::new(SignalKind::Hello, alice.public(), NOW);
         let sealed = seal(&keys(), &alice, &hello);
         let sealed_bytes = BASE64.decode(&sealed).expect("the seal is base64");
-        let plain = open_symmetric(&keys().seal_key, &sealed_bytes).expect("the seal opens");
+        let plain =
+            seal_error::open_symmetric(&keys().seal_key, &sealed_bytes).expect("the seal opens");
         let envelope: Envelope = serde_json::from_slice(&plain).expect("an envelope");
         let body = envelope.body.replacen('{', r#"{"extra":1,"#, 1);
         let signature = alice.sign(&signed_message(&keys().room_tag, &body));
@@ -414,7 +404,7 @@ mod tests {
             signature: BASE64.encode(signature.to_bytes()),
         })
         .expect("an envelope serializes");
-        let resealed = BASE64.encode(seal_symmetric(&keys().seal_key, &rebuilt));
+        let resealed = BASE64.encode(seal_error::seal_symmetric(&keys().seal_key, &rebuilt));
         let error = refusal(&mut Opener::new(keys(), bob.public()), &resealed, NOW);
         assert!(error.contains("malformed signal body"), "{error}");
     }
