@@ -32,3 +32,5 @@ iroh.workspace = true
 habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
 # `CustomAddr` is not re-exported through `iroh`; a test builds one to read its id.
 iroh-base.workspace = true
+# `PathSelectionData::for_test` builds the paths of a selector test without a live connection.
+iroh = { workspace = true, features = ["selector-test-utils"] }

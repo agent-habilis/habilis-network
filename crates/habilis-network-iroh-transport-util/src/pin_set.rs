@@ -222,12 +222,83 @@ pub fn pin_allows(
 #[cfg(test)]
 mod tests {
     use iroh::SecretKey;
+    use iroh::endpoint::transports::{Addr, FourTuple, PathSelectionData};
+    use iroh_base::CustomAddr;
 
-    use super::{is_pinned, pin, pin_allows, unpin};
-    use crate::Rung;
+    use super::{climb_pinned, is_pinned, pin, pin_allows, unpin};
+    use crate::{MULTIHOP_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID, custom_rung};
 
     fn node(seed: u8) -> iroh::EndpointId {
         SecretKey::from_bytes(&[seed; 32]).public()
+    }
+
+    /// The address of a source route through `hops`, in the form that the multihop crate writes:
+    /// one byte for the hop count, then the application id and the underlay id of each hop.
+    fn route_to(hops: &[iroh::EndpointId]) -> Addr {
+        let count = u8::try_from(hops.len()).expect("a short route");
+        let mut data = vec![count];
+        for hop in hops {
+            data.extend_from_slice(hop.as_bytes());
+            data.extend_from_slice(hop.as_bytes());
+        }
+        Addr::Custom(CustomAddr::from_parts(MULTIHOP_TRANSPORT_ID, &data))
+    }
+
+    fn rung_of_choice(tuples: &[FourTuple], local: iroh::EndpointId) -> Option<Rung> {
+        let paths: Vec<PathSelectionData<'_>> = tuples
+            .iter()
+            .map(|tuple| PathSelectionData::for_test(tuple, None))
+            .collect();
+        let chosen = climb_pinned(local, &paths, custom_rung, |_rung, _path| true)?;
+        Some(crate::rung_of(chosen, custom_rung))
+    }
+
+    #[test]
+    fn a_pinned_peer_with_a_direct_path_stays_on_multihop() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (local, remote, relay_hop) = (node(51), node(52), node(53));
+        let tuples = [
+            FourTuple::from_remote(Addr::Ip(([192, 0, 2, 7], 4433).into())),
+            FourTuple::from_remote(Addr::Custom(CustomAddr::from_parts(
+                WEBRTC_TRANSPORT_ID,
+                remote.as_bytes(),
+            ))),
+            FourTuple::from_remote(route_to(&[relay_hop, remote])),
+        ];
+        pin(local, remote);
+        let unpinned = rung_of_choice(&tuples, node(54));
+        let pinned = rung_of_choice(&tuples, local);
+        unpin(local, remote);
+        assert_eq!(
+            unpinned,
+            Some(Rung::Ip),
+            "control: a node with no pin takes the direct IP path"
+        );
+        assert_eq!(
+            pinned,
+            Some(Rung::Multihop),
+            "a pinned peer stays on multihop though an IP and a WebRTC path are usable"
+        );
+    }
+
+    #[test]
+    fn a_pinned_peer_stays_on_multihop_when_only_direct_paths_are_listed() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (local, remote) = (node(55), node(56));
+        let tuples = [
+            FourTuple::from_remote(Addr::Ip(([192, 0, 2, 8], 4433).into())),
+            FourTuple::from_remote(Addr::Custom(CustomAddr::from_parts(
+                WEBRTC_TRANSPORT_ID,
+                remote.as_bytes(),
+            ))),
+        ];
+        pin(local, remote);
+        let chosen = rung_of_choice(&tuples, local);
+        unpin(local, remote);
+        assert_eq!(
+            chosen, None,
+            "a pinned peer with no multihop path takes no direct path"
+        );
     }
 
     #[test]
