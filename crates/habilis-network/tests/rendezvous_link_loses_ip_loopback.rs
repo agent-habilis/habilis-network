@@ -94,9 +94,9 @@ impl Member {
         let options = membership::JoinOptions::default()
             .nick(Some(nick.to_owned()))
             .lookup(vec![Lookup::Relay]);
-        let options = options
-            .relay_urls(vec![relay.to_string()])
-            .transport(OLD_DEFAULT.to_vec());
+        let relay_urls = vec![relay.to_string()];
+        let options = options.relay_urls(relay_urls);
+        let options = options.transport(OLD_DEFAULT.to_vec());
         Self::open(&options).await
     }
 
