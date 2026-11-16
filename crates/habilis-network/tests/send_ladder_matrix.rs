@@ -758,6 +758,10 @@ fn stays_on_relay(name: &str) -> bool {
 /// Runs a cell on a runtime that drops before the guard of the test.
 fn run_cell(cell: Cell, name: &str, sender_id: SenderId) {
     let guard = habilis_network_test_tracing::init();
+    if !cell.has(Transport::Relay) {
+        // Without the relay in its list the policy refuses payload cells on the relay, and says so once.
+        habilis_network_test_tracing::allow_relay_cell_refusal();
+    }
     if stays_on_relay(name) {
         guard.expect_warn(STAYS_ON_RELAY.0, STAYS_ON_RELAY.1);
     }

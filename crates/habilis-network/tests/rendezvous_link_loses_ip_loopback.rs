@@ -152,6 +152,8 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
     let guard = habilis_network_test_tracing::init_capturing(
         "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info",
     );
+    // The list has no relay: a cell that reaches a hop over the relay is refused, and said once.
+    habilis_network_test_tracing::allow_relay_cell_refusal();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;

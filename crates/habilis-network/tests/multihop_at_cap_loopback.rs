@@ -52,8 +52,6 @@ const LABEL_DEADLINE: Duration = Duration::from_secs(60);
 /// The cause that the eviction line carries when a gossip neighbor took the unit.
 const NEIGHBOR_CAUSE: &str = "cause=\"a gossip neighbor\"";
 const EVICTION_LINE: &str = "evicting a direct connection at the ceiling";
-/// The WARN of a forwarder that gets a cell over the relay: a cut pair still has its relay path.
-const RELAY_CELL_TEXT: &str = "multihop forwarder refusing cells";
 
 struct Member {
     membership: Membership,
@@ -455,7 +453,7 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
         cut_between(&alice, &dave, "alice", far_nick).await;
         cut_between(&carol, &dave, other_nick, far_nick).await;
         habilis_network_test_tracing::allow_warn(STUCK_TARGET, STUCK_TEXT);
-        habilis_network_test_tracing::allow_warn(STUCK_TARGET, RELAY_CELL_TEXT);
+        habilis_network_test_tracing::allow_relay_cell_refusal();
 
         // The first frame goes while no route may be known yet: a send that finds no route
         // dials as it always did, and the test waits for a route before it counts.

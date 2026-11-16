@@ -43,11 +43,6 @@ const STEP_DEADLINE: Duration = Duration::from_mins(3);
 const STUCK_TARGET: &str = "habilis_network_iroh_multihop_transport::underlay";
 const STUCK_TEXT: &str =
     "multihop underlay stays on the relay: this hop is not advertised as a link";
-/// The WARN of a forwarder that gets a cell over the relay. The transport list of this test has no
-/// `relay`, so the policy refuses payload on the relay, as it must. The first cells of a hop can
-/// reach the forwarder before the connection has its direct path, and a cut pair still has its
-/// relay path. The sender sends again, and the forwarder says it once.
-const RELAY_CELL_TEXT: &str = "multihop forwarder refusing cells";
 
 /// How long a message may take over a route that is already up.
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(30);
@@ -248,7 +243,7 @@ fn a_pair_that_denied_each_other_still_gets_a_message_through_a_third_member() {
         // it does not. It is part of the scenario. The test does not wait for it: waiting made the
         // test twice as long and let timers fire that no other run reaches.
         habilis_network_test_tracing::allow_warn(STUCK_TARGET, STUCK_TEXT);
-        habilis_network_test_tracing::allow_warn(STUCK_TARGET, RELAY_CELL_TEXT);
+        habilis_network_test_tracing::allow_relay_cell_refusal();
 
         // The rung is read on bob's pooled connection to carol. A probe goes out each second,
         // because it is traffic that makes the engine try a better path.

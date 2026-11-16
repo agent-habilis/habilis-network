@@ -184,6 +184,31 @@ pub fn allow_warn(target: &str, text: &str) {
     });
 }
 
+/// The target of the multihop forwarder, the module that logs its refusals.
+const FORWARDER_TARGET: &str = "habilis_network_iroh_multihop_transport::underlay";
+
+/// Allow the WARN of the multihop forwarder for a cell that came over the relay, as
+/// [`allow_warn`] does: it may come, or not. Call it in a test of a mesh whose transport list has
+/// no `relay`: the policy then refuses payload on the relay, as it must, and the first cells of a hop
+/// can reach the forwarder before the connection has its direct path, or a cut pair still has its
+/// relay path. A mesh whose list has the `relay` accepts such cells and never says this. Only the
+/// refusal for that reason is allowed: a refusal for another reason, and any other WARN, still
+/// fail the test.
+///
+/// # Panics
+///
+/// Panics if the calling thread is not the thread of a live guard.
+///
+/// # Examples
+///
+/// ```no_run
+/// let _guard = habilis_network_test_tracing::init();
+/// habilis_network_test_tracing::allow_relay_cell_refusal();
+/// ```
+pub fn allow_relay_cell_refusal() {
+    allow_warn(FORWARDER_TARGET, "reason=\"cell arrived over the relay\"");
+}
+
 /// Whether the test of the calling thread has logged a WARN from `target` (a
 /// module path: the target itself or a module below it) whose message contains `text`. A test that expects the
 /// WARN with [`Guard::expect_warn`] polls it to wait until the WARN came.

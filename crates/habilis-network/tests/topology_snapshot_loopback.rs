@@ -93,6 +93,8 @@ async fn rosters_hold(members: &[&Member], peers: usize) -> bool {
 #[ignore = "runs real members; run alone in the host slot"]
 fn the_snapshot_of_a_member_names_its_peers_units_cap_and_graph() {
     let guard = habilis_network_test_tracing::init();
+    // The list has no relay: a cell that reaches a hop over the relay is refused, and said once.
+    habilis_network_test_tracing::allow_relay_cell_refusal();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
