@@ -102,42 +102,45 @@ impl EventLoopState {
         None
     }
 
-    /// The first hop of the multihop route to `peer`, in hex.
-    #[cfg(feature = "multihop")]
+    /// The first hop of the multihop route to `peer`, in hex. Without multihop no path is a
+    /// multihop path, so there is none.
     fn first_hop(&self, peer: EndpointId) -> Option<String> {
-        let mut hops = self.multihop()?.route_hops(AppId::new(peer))?;
-        hops.next().map(|hop| hop.get().to_string())
+        #[cfg(feature = "multihop")]
+        {
+            let mut hops = self.multihop()?.route_hops(AppId::new(peer))?;
+            hops.next().map(|hop| hop.get().to_string())
+        }
+        #[cfg(not(feature = "multihop"))]
+        {
+            let _ = (self, peer);
+            None
+        }
     }
 
-    /// Without multihop no path is a multihop path, so there is no first hop.
-    #[cfg(not(feature = "multihop"))]
-    fn first_hop(&self, _peer: EndpointId) -> Option<String> {
-        None
-    }
-
-    /// The multihop link-state graph of this node.
-    #[cfg(feature = "multihop")]
+    /// The multihop link-state graph of this node. Without multihop there is none.
     fn graph(&self) -> Option<TopologyGraph> {
-        let view: TopologyView = self.multihop()?.topology_view();
-        let edges: Vec<TopologyLink> = view
-            .edges
-            .iter()
-            .map(|edge| TopologyLink {
-                from: edge.from.clone(),
-                to: edge.to.clone(),
-                metric: edge.metric,
+        #[cfg(feature = "multihop")]
+        {
+            let view: TopologyView = self.multihop()?.topology_view();
+            let edges: Vec<TopologyLink> = view
+                .edges
+                .iter()
+                .map(|edge| TopologyLink {
+                    from: edge.from.clone(),
+                    to: edge.to.clone(),
+                    metric: edge.metric,
+                })
+                .collect();
+            Some(TopologyGraph {
+                self_id: view.self_id,
+                edges,
             })
-            .collect();
-        Some(TopologyGraph {
-            self_id: view.self_id,
-            edges,
-        })
-    }
-
-    /// Without multihop there is no graph.
-    #[cfg(not(feature = "multihop"))]
-    fn graph(&self) -> Option<TopologyGraph> {
-        None
+        }
+        #[cfg(not(feature = "multihop"))]
+        {
+            let _ = self;
+            None
+        }
     }
 }
 
