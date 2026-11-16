@@ -283,7 +283,7 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             .topic(topic_name)
             .nick(nick_name)
             .name(display_name);
-        let limited = base
+        let limited: JoinOptions = base
             .lookup(lookup)
             .transport(transport)
             .relay_urls(relay_urls)
