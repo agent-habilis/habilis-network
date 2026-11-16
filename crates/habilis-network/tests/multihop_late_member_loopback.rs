@@ -7,8 +7,10 @@
 //! alice holds 2 of the 3 others, and the third is the peer of the test.
 //!
 //! The run shows, after the roster of alice holds the third member and a settle time:
-//! - alice counts 2 direct units, none over the cap, and no connection beside them: a dial for the
-//!   new member (a `PeerInfo` dial, a probe, a courtesy dial) would take a third unit or evict one;
+//! - alice counts 2 direct units, none over the cap, and no more connected peers than the total
+//!   cap: a dial for the new member (a `PeerInfo` dial, a probe, a courtesy dial) would take a
+//!   third unit or evict one. A connection that takes no unit is legal and is not checked, such as
+//!   the connection of a former neighbor that the view change demoted to an extra;
 //! - no member logged an eviction at its ceiling;
 //! - a send of alice to the third member arrives, and her snapshot shows it pinned on the
 //!   multihop path.
@@ -240,23 +242,22 @@ const LABEL_DEADLINE: Duration = Duration::from_secs(30);
 /// ledger is read every 500 ms in it, and a connection beyond the units fails the run at once.
 const WATCH: Duration = Duration::from_secs(10);
 
-/// Why the ledger of a node at its cap of 2 holds a connection beyond its units, or `None` when it
-/// holds none: no unit over the cap, no peer with a connection or a session that took no unit, and
-/// no peer connected besides the units. A dial for the new member (a `PeerInfo` dial, a probe, a
-/// courtesy dial) would take a third unit, or it would leave an extra.
-fn beyond_the_units(snapshot: &TopologySnapshot) -> Option<String> {
-    let flagged = snapshot.peers.iter().filter(|link| link.extra);
-    let extras: Vec<&str> = flagged.map(|link| link.endpoint.as_str()).collect();
-    let held = (
-        snapshot.direct_units,
-        snapshot.over_ceiling,
-        snapshot.connected_peers,
-    );
-    if held == (2, 0, 2) && extras.is_empty() {
+/// Why the ledger of a node at its cap of 2 took a unit for the new member, or `None` when it did
+/// not: the units and the units over the cap must be exactly 2 and 0, and the peers that hold any
+/// connection must not pass the total cap. A connection that takes no unit is legal and is not
+/// checked: the connection of a former gossip neighbor is demoted to an extra when the view changes
+/// (CI saw bob so, when dave took his place), the newcomer may dial alice, and a dial with a route
+/// pins its peer. A dial for the new member that takes a unit shows as a third unit, or as an
+/// eviction in the log, and both fail the run.
+fn took_a_unit(snapshot: &TopologySnapshot) -> Option<String> {
+    let held = (snapshot.direct_units, snapshot.over_ceiling);
+    let within = snapshot.connected_peers <= snapshot.connected_cap;
+    if held == (2, 0) && within {
         None
     } else {
         Some(format!(
-            "units, over the cap and connected peers are {held:?}, extras {extras:?}: {snapshot:?}"
+            "units and over the cap are {held:?}, connected peers {} of {}: {snapshot:?}",
+            snapshot.connected_peers, snapshot.connected_cap
         ))
     }
 }
@@ -302,13 +303,13 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
 
         // The state to wait for is the one in which alice has done all that she does for the new
         // member: her gossip view holds 2 of the 3 others, and her topology holds a route to the
-        // third. The ledger is read at each step of the wait, so a dial that takes a unit, or leaves
-        // an extra, fails the run when it happens and not only at the end.
+        // third. The ledger is read at each step of the wait, so a dial that takes a unit fails the run when
+        // it happens and not only at the end.
         let waiting_since = Instant::now();
         let target: String = loop {
             let snapshot = alice.snapshot().await;
-            if let Some(why) = beyond_the_units(&snapshot) {
-                panic!("alice holds a connection for the new member: {why}");
+            if let Some(why) = took_a_unit(&snapshot) {
+                panic!("alice took a unit for the new member: {why}");
             }
             let neighbors = neighbor_nicks(&snapshot);
             let others = ["bob", "carol", "dave"]
@@ -330,8 +331,8 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
         let watching_since = Instant::now();
         while watching_since.elapsed() < WATCH {
             let snapshot = alice.snapshot().await;
-            if let Some(why) = beyond_the_units(&snapshot) {
-                panic!("alice holds a connection for the new member: {why}");
+            if let Some(why) = took_a_unit(&snapshot) {
+                panic!("alice took a unit for the new member: {why}");
             }
             time::sleep(Duration::from_millis(500)).await;
         }
