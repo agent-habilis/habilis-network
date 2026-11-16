@@ -259,6 +259,30 @@ mod tests {
         assert_eq!(dropped.load(Ordering::Relaxed), 1, "and counted");
     }
 
+    /// The first datagram after an idle spell is due at once: the socket does not wait for a tick.
+    /// The clock is virtual, so a wait of one tick would show as a timeout.
+    #[tokio::test(start_paused = true)]
+    async fn the_first_datagram_after_idle_is_due_without_waiting_for_a_tick() {
+        let (writer, mut written): (mpsc::Sender<Frame>, mpsc::Receiver<Frame>) = mpsc::channel(1);
+        let mut outbound = Outbound::Paced(Paced {
+            queue: DataQueue::new(Instant::now()),
+            writer,
+            writer_dropped: Arc::new(AtomicU64::new(0)),
+        });
+        let keys = Arc::new(Keys::generate());
+        outbound.datagram(outgoing(&keys, b"first".to_vec()));
+        let permit: mpsc::OwnedPermit<Frame> =
+            timeout(Duration::from_millis(1), outbound.wake(Pace::Open).permit())
+                .await
+                .expect("the frame is due before any tick")
+                .expect("the writer is alive");
+        assert!(outbound.pump(permit), "the frame goes to the writer");
+        assert!(
+            matches!(written.try_recv(), Ok(Frame::Data(_))),
+            "the writer holds a data frame"
+        );
+    }
+
     /// While the writer is held up the socket gets no permit, and the queue must still age its
     /// batches and drop the old ones: the check runs when a datagram arrives, not when a frame
     /// can go. The clock is virtual.

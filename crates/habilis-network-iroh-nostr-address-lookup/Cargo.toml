@@ -28,8 +28,10 @@ anyhow.workspace = true
 base64.workspace = true
 futures-util.workspace = true
 hex = "0.4"
-# BIP-340 Schnorr only. `ecdsa` and `precomputed-tables` stay off: we sign about
-# one event a minute, and the tables cost size, not correctness.
+# BIP-340 Schnorr only. `ecdsa` stays off. `precomputed-tables` stays off: a data socket
+# signs at most 200 events a second (its pacer), and a native release build signs a full
+# batch event in about 62 us, or 47 us with the tables (measured 2026-11-16). The cap costs
+# about 1 % of one core, and the tables cost binary size. A browser build is not measured.
 k256 = { version = "0.14", default-features = false, features = ["schnorr", "std"] }
 n0-future.workspace = true
 rand.workspace = true

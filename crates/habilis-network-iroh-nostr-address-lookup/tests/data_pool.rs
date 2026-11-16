@@ -64,15 +64,29 @@ async fn warm_up(from: &Node, to_tag: &[u8; 32], to: &mut Node) {
     panic!("no delivery after 50 tries");
 }
 
+/// Wait until everything `from` sent before this call has come out of `to`: send a marker and read
+/// up to it. The copies of the warm-up that a retry left behind come first, in order, because one
+/// sender and one relay keep the order. A fixed sleep would only guess how long they take.
+async fn settle(from: &Node, to_tag: &[u8; 32], to: &mut Node) {
+    from.pool.send(to_tag, b"marker".to_vec());
+    loop {
+        let datagram = time::timeout(Duration::from_secs(5), to.datagrams.recv())
+            .await
+            .expect("the marker in time")
+            .expect("the channel is open");
+        if datagram.bytes == b"marker" {
+            return;
+        }
+    }
+}
+
 #[tokio::test]
 async fn datagrams_cross_a_relay_in_order_with_the_sender_id() {
     let relays = relays(1).await;
     let alice = node(urls(&relays), ALICE, ALICE_TAG);
     let mut bob = node(urls(&relays), BOB, BOB_TAG);
     warm_up(&alice, &BOB_TAG, &mut bob).await;
-    // The tail of the warm-up copies: a retry can leave extras behind.
-    time::sleep(Duration::from_millis(400)).await;
-    while bob.datagrams.try_recv().is_ok() {}
+    settle(&alice, &BOB_TAG, &mut bob).await;
 
     for number in 0..20u8 {
         alice.pool.send(&BOB_TAG, vec![number; 100]);
@@ -195,6 +209,11 @@ async fn two_pools_of_one_process_stay_under_the_relay_budgets() {
         "{bytes} bytes in {seconds} s"
     );
     assert!(bytes > 262_144.0, "the data flowed: {bytes} bytes");
+    assert_eq!(
+        relays[0].accepted(),
+        1,
+        "both pools of the process share one socket to the relay"
+    );
 }
 
 /// A consumer that never drains: the channel holds its capacity, and the rest is dropped and
@@ -205,8 +224,7 @@ async fn a_consumer_that_does_not_drain_loses_datagrams_and_counts_them() {
     let alice = node(urls(&relays), ALICE, ALICE_TAG);
     let mut bob = node(urls(&relays), BOB, BOB_TAG);
     warm_up(&alice, &BOB_TAG, &mut bob).await;
-    time::sleep(Duration::from_millis(400)).await;
-    while bob.datagrams.try_recv().is_ok() {}
+    settle(&alice, &BOB_TAG, &mut bob).await;
 
     let total = RECEIVE_CAPACITY * 3;
     for index in 0..total {
@@ -222,28 +240,27 @@ async fn a_consumer_that_does_not_drain_loses_datagrams_and_counts_them() {
     while bob.datagrams.try_recv().is_ok() {
         held += 1;
     }
-    assert!(held <= RECEIVE_CAPACITY, "the channel held {held}");
+    assert_eq!(
+        held, RECEIVE_CAPACITY,
+        "the channel was full when the first datagram was dropped, and nobody drained it"
+    );
 }
 
+/// That the first datagram after an idle spell goes out at once, with no wait for a tick, is
+/// shown in virtual time by the tests of the queue and of the socket. This one shows that it
+/// arrives.
 #[tokio::test]
-async fn the_first_datagram_after_idle_arrives_before_a_tick_would_matter() {
+async fn the_first_datagram_after_idle_arrives() {
     let relays = relays(1).await;
     let alice = node(urls(&relays), ALICE, ALICE_TAG);
     let mut bob = node(urls(&relays), BOB, BOB_TAG);
     warm_up(&alice, &BOB_TAG, &mut bob).await;
-    time::sleep(Duration::from_millis(500)).await;
-    while bob.datagrams.try_recv().is_ok() {}
+    settle(&alice, &BOB_TAG, &mut bob).await;
 
-    let sent = Instant::now();
     alice.pool.send(&BOB_TAG, b"after idle".to_vec());
-    let datagram = time::timeout(Duration::from_secs(2), bob.datagrams.recv())
+    let datagram = time::timeout(Duration::from_secs(5), bob.datagrams.recv())
         .await
         .expect("a datagram in time")
         .expect("the channel is open");
     assert_eq!(datagram.bytes, b"after idle", "the datagram");
-    assert!(
-        sent.elapsed() < Duration::from_millis(250),
-        "the first datagram took {:?}",
-        sent.elapsed()
-    );
 }
