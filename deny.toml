@@ -1,0 +1,2 @@
+# cargo-deny: only the RustSec advisories gate. Each lockfile of the repo is checked in CI.
+[advisories]

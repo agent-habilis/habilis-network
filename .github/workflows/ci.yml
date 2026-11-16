@@ -35,6 +35,20 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
+      # The RustSec advisories of every lockfile of the repo: the root and the 4 example workspaces.
+      # deny.toml holds only the advisories section. cargo-deny is pinned, so a new release does not
+      # change the gate without a commit.
+      - name: Advisories
+        run: |
+          cargo install --locked cargo-deny@0.20.2
+          for manifest in Cargo.toml \
+            crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/Cargo.toml \
+            crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/chat-web/Cargo.toml \
+            crates/habilis-network-netplay/examples/light-cycles/native/Cargo.toml \
+            crates/habilis-network-netplay/examples/light-cycles/web/wasm/Cargo.toml; do
+            cargo deny --manifest-path "$manifest" --locked --config deny.toml check advisories
+          done
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
