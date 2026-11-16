@@ -186,7 +186,7 @@ impl Member {
                 mesh,
                 topic_string: topic.to_owned(),
             },
-            SetupParams::new(nick(name), Arc::clone(&saw)).max_peers(16),
+            SetupParams::new(nick(name), Arc::clone(&saw)).max_connections(16),
         )
         .await
         .expect("setup_mesh on a loopback mesh must not touch the network");

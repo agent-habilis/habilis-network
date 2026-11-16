@@ -311,7 +311,7 @@ impl LoggingMember {
                 // The membership keeps its sink as a trait object for its whole life.
                 Arc::new(Quiet),
             )
-            .max_peers(16),
+            .max_connections(16),
         )
         .await
         .expect("setup_mesh on a loopback mesh");

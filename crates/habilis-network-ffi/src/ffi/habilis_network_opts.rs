@@ -2,8 +2,7 @@ use std::ffi::c_char;
 
 use std::ptr;
 /// The mesh selectors, mirroring `habilis_network_opts` in the header. String fields are
-/// NUL-terminated C strings or NULL; `max_peers == 0` and `max_direct == 0` take
-/// the engine defaults (G is 32, C is 64).
+/// NUL-terminated C strings or NULL; `max_connections == 0` takes the engine default (32).
 #[repr(C)]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -24,10 +23,9 @@ pub struct HabilisNetworkOpts {
     pub transport: *const c_char,
     /// Comma-separated custom relay ladder; NULL ⇒ the default ladder.
     pub relay_urls: *const c_char,
-    /// G: the gossip active-view cap.
-    pub max_peers: usize,
-    /// C: the ceiling of direct connections, `WebRTC` sessions and unicast connections together.
-    pub max_direct: usize,
+    /// The cap on the direct connections of the node: gossip neighbors, `WebRTC` sessions and
+    /// unicast connections together. It is also the size of the gossip active view.
+    pub max_connections: usize,
 }
 
 impl HabilisNetworkOpts {
@@ -42,8 +40,7 @@ impl HabilisNetworkOpts {
             lookup: ptr::null(),
             transport: ptr::null(),
             relay_urls: ptr::null(),
-            max_peers: 0,
-            max_direct: 0,
+            max_connections: 0,
         }
     }
 }
@@ -62,7 +59,7 @@ const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
     assert!(
-        size_of::<HabilisNetworkOpts>() == 72,
+        size_of::<HabilisNetworkOpts>() == 64,
         "opts-struct.ts OPTS_BYTES"
     );
     assert!(
@@ -98,11 +95,7 @@ const _: () = {
         "relay_urls is at offset 48 of HabilisNetworkOpts"
     );
     assert!(
-        offset_of!(HabilisNetworkOpts, max_peers) == 56,
-        "max_peers is at offset 56 of HabilisNetworkOpts"
-    );
-    assert!(
-        offset_of!(HabilisNetworkOpts, max_direct) == 64,
-        "max_direct is at offset 64 of HabilisNetworkOpts"
+        offset_of!(HabilisNetworkOpts, max_connections) == 56,
+        "max_connections is at offset 56 of HabilisNetworkOpts"
     );
 };

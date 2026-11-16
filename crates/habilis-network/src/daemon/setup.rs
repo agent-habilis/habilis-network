@@ -285,15 +285,15 @@ async fn build_member_endpoint(
     }
     // Made before the endpoint, because the endpoint reports its connections
     // to this table from the first handshake on.
-    let admission = transport::SignalAdmission::new(build.max_direct);
+    let admission = transport::SignalAdmission::new(build.max_connections);
     if build.multihop {
-        // G caps the sessions of the underlay: it holds one to each known member that needs one.
+        // The cap also bounds the sessions of the underlay: it holds one to each known member that needs one.
         let (endpoint, handle, webrtc, underlay_webrtc, mdns) = lookup::build_peer_multihop_with(
             build.lookups,
             build.transports,
             Some(&admission),
             lookup::multihop_handle_config(build.relay_transport),
-            lookup::underlay_cap(build.max_peers),
+            lookup::underlay_cap(build.max_connections),
         )
         .await?;
         Ok((
@@ -346,7 +346,7 @@ async fn build_member_endpoint(
             injected.mdns,
         ));
     }
-    let admission = transport::SignalAdmission::new(build.max_direct);
+    let admission = transport::SignalAdmission::new(build.max_connections);
     #[cfg(feature = "multihop")]
     if build.multihop {
         let (endpoint, handle, webrtc, underlay_webrtc, mdns) = lookup::build_peer_multihop_with(
@@ -354,7 +354,7 @@ async fn build_member_endpoint(
             build.transports,
             Some(&admission),
             lookup::browser_handle_config(build.relay_transport),
-            lookup::underlay_cap(build.max_peers),
+            lookup::underlay_cap(build.max_connections),
         )
         .await?;
         return Ok((
@@ -493,8 +493,7 @@ fn refuse_in_browser_checked(
 struct SetupBuild<'build> {
     author: &'build Nickname,
     sink: &'build dyn NodeSink,
-    max_peers: usize,
-    max_direct: usize,
+    max_connections: usize,
     lookups: &'build LookupOpts,
     unicast_acceptor: &'build transport::UnicastAcceptor,
     /// The mesh policy's `multihop`: register the multi-hop transport on the
@@ -591,22 +590,15 @@ struct Assembled {
     topic_string: Option<String>,
 }
 
-/// G and C with `0` taken as the default. Every option set (`Opts`, the C
+/// `max_connections` with `0` taken as the default. Every option set (`Opts`, the C
 /// struct, the browser object, a caller's own `SetupParams`) ends in
 /// [`setup_mesh`], so this is the one place where that has to hold.
-fn resolve_caps(max_peers: usize, max_direct: usize) -> (usize, usize) {
-    (
-        if max_peers == 0 {
-            tuning::GOSSIP_ACTIVE_VIEW_CAPACITY
-        } else {
-            max_peers
-        },
-        if max_direct == 0 {
-            transport::MAX_DIRECT_PEERS
-        } else {
-            max_direct
-        },
-    )
+fn resolve_max_connections(max_connections: usize) -> usize {
+    if max_connections == 0 {
+        tuning::MAX_CONNECTIONS
+    } else {
+        max_connections
+    }
 }
 
 /// # Errors
@@ -1472,8 +1464,7 @@ fn owner_of(injected: Option<&InjectedEndpoint>) -> EndpointOwner {
 async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
     let SetupParams {
         author,
-        max_peers,
-        max_direct,
+        max_connections,
         runtime_base,
         state_file,
         keys_in_default_state,
@@ -1495,7 +1486,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     )?;
     let key_lock = hold_member_key(early_state.as_deref()).await?;
     let endpoint_owner = owner_of(injected.as_ref());
-    let (max_peers, max_direct) = resolve_caps(max_peers, max_direct);
+    let max_connections = resolve_max_connections(max_connections);
     // The localhost binding is owned + bound by the caller; the engine only needs
     // the resolved port for the `ready` event. `Some(0)` (ephemeral) is resolved
     // caller-side and passed back in here as the real port.
@@ -1516,8 +1507,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     let build = SetupBuild {
         author: &author,
         sink: sink.as_ref(),
-        max_peers,
-        max_direct,
+        max_connections,
         lookups: &lookups,
         unicast_acceptor: &unicast_acceptor,
         // The mesh policy's `multihop`, on a node that has a direct path for its underlay to
@@ -1610,7 +1600,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         },
         runtime: RuntimeConfig {
             sink,
-            max_peers,
+            max_connections,
             runtime_base,
             state_file,
             live_count,
@@ -1689,7 +1679,7 @@ fn build_overlay(
         .then(|| (webrtc.clone(), admission.clone(), ice));
     let (gossip, router, address_book) = build_mesh(
         endpoint.clone(),
-        build.max_peers,
+        build.max_connections,
         Some(unicast),
         webrtc_lane,
         build.take_protocols(),
@@ -3357,7 +3347,7 @@ mod tests {
                 let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
                 let config = super::setup_mesh(
                     kind,
-                    super::SetupParams::new(author, embed::SilentSink).max_peers(8),
+                    super::SetupParams::new(author, embed::SilentSink).max_connections(8),
                 )
                 .await
                 .expect("a loopback mesh sets up");
@@ -3421,7 +3411,7 @@ mod tests {
                     let options = membership::JoinOptions::default();
                     let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
                     let params = super::SetupParams::new(author, embed::SilentSink)
-                        .max_peers(8)
+                        .max_connections(8)
                         .state_file(state);
                     let config = super::setup_mesh(kind, params)
                         .await
@@ -3497,7 +3487,7 @@ mod tests {
                 let config = super::setup_mesh(
                     kind,
                     super::SetupParams::new(author, embed::SilentSink)
-                        .max_peers(8)
+                        .max_connections(8)
                         .transports(transports),
                 )
                 .await
@@ -3532,7 +3522,7 @@ mod tests {
             let config = super::setup_mesh(
                 kind,
                 super::SetupParams::new(author, embed::SilentSink)
-                    .max_peers(8)
+                    .max_connections(8)
                     .transports(lookup::TransportOpts {
                         udp: false,
                         ..lookup::TransportOpts::default()
@@ -3555,34 +3545,32 @@ mod tests {
         });
     }
 
-    // G and C come from the caller, and `0` takes the default. Every option set
+    // `max_connections` comes from the caller, and `0` takes the default. Every option set
     // (`Opts`, the C struct, the browser object) ends in `setup_mesh`, so this is
     // the one place that has to hold.
     #[test]
-    fn the_caps_follow_the_params_and_zero_takes_the_default() {
+    fn the_cap_follows_the_params_and_zero_takes_the_default() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            use crate::transport::MAX_DIRECT_PEERS;
-            use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
+            use crate::util::tuning::MAX_CONNECTIONS;
 
-            for (max_peers, max_direct, want_g, want_c) in [
-                (0, 0, GOSSIP_ACTIVE_VIEW_CAPACITY, MAX_DIRECT_PEERS),
-                (5, 3, 5, 3),
-            ] {
+            for (max_connections, want) in [(0, MAX_CONNECTIONS), (5, 5)] {
                 let options = membership::JoinOptions::default();
                 let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
                 let config = super::setup_mesh(
                     kind,
                     super::SetupParams::new(author, embed::SilentSink)
-                        .max_peers(max_peers)
-                        .max_direct(max_direct),
+                        .max_connections(max_connections),
                 )
                 .await
                 .expect("a loopback mesh sets up");
-                assert_eq!(config.runtime.max_peers, want_g, "G for {max_peers}");
+                assert_eq!(
+                    config.runtime.max_connections, want,
+                    "the gossip view for {max_connections}"
+                );
                 assert_eq!(
                     config.transports.webrtc_admission.cap(),
-                    want_c,
-                    "C for {max_direct}"
+                    want,
+                    "the ceiling for {max_connections}"
                 );
                 config
                     .endpoints
@@ -3597,20 +3585,15 @@ mod tests {
         });
     }
 
-    // The defaults of the two bounds: G is 32 gossip neighbors, and C (decision D11) is 64
-    // direct peers, counting `WebRTC` sessions and unicast connections.
+    // The default of the one bound: 32 direct connections, gossip neighbors, `WebRTC` sessions
+    // and unicast connections together.
     #[test]
-    fn the_default_bounds_are_32_neighbors_and_64_direct_peers() {
+    fn the_default_bound_is_32_connections() {
         let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
-            tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+            tuning::MAX_CONNECTIONS,
             32,
-            "the gossip active view is capped at 32 neighbors"
-        );
-        assert_eq!(
-            transport::MAX_DIRECT_PEERS,
-            64,
-            "the direct peer bound is 64"
+            "the default of max_connections is 32"
         );
     }
 
@@ -3654,7 +3637,7 @@ mod tests {
                 underlay: false,
                 options: lookup::TransportOpts::default(),
             },
-            transport::MAX_DIRECT_PEERS,
+            tuning::MAX_CONNECTIONS,
         )
         .await
         .expect("the injected endpoint binds")
@@ -3680,7 +3663,7 @@ mod tests {
                     underlay: false,
                     options: lookup::TransportOpts::default(),
                 },
-                transport::MAX_DIRECT_PEERS,
+                tuning::MAX_CONNECTIONS,
             )
         };
         let own_webrtc = lookup::build_webrtc_handle(secret.public());
@@ -3707,7 +3690,7 @@ mod tests {
             .expect("handles on the bound key are accepted");
         accepted.endpoint.close().await;
 
-        let table = transport::SignalAdmission::new(transport::MAX_DIRECT_PEERS);
+        let table = transport::SignalAdmission::new(tuning::MAX_CONNECTIONS);
         let table_error = super::InjectedEndpoint::bind(
             &lookups,
             secret.clone(),
@@ -3717,7 +3700,7 @@ mod tests {
                 admission: Some(table),
                 ..lookup::TransportHandles::default()
             },
-            transport::MAX_DIRECT_PEERS,
+            tuning::MAX_CONNECTIONS,
         )
         .await
         .expect_err("a caller's admission table");
@@ -3742,7 +3725,7 @@ mod tests {
                 webrtc: Some(lookup::build_webrtc_handle(secret.public())),
                 ..lookup::TransportHandles::default()
             },
-            transport::MAX_DIRECT_PEERS,
+            tuning::MAX_CONNECTIONS,
         )
         .await
         .expect("the injected endpoint binds");
@@ -3793,7 +3776,7 @@ mod tests {
         super::setup_mesh(
             kind,
             super::SetupParams::new(author, embed::SilentSink)
-                .max_peers(8)
+                .max_connections(8)
                 .endpoint(injected),
         )
         .await
@@ -3916,7 +3899,7 @@ mod tests {
             let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
             let config = super::setup_mesh(
                 kind,
-                super::SetupParams::new(author, embed::SilentSink).max_peers(8),
+                super::SetupParams::new(author, embed::SilentSink).max_connections(8),
             )
             .await
             .expect("a loopback mesh sets up");
@@ -3969,7 +3952,7 @@ mod browser_tests {
             let mut config = super::setup_mesh(
                 kind,
                 super::SetupParams::new(author, crate::embed::SilentSink)
-                    .max_peers(8)
+                    .max_connections(8)
                     .transports(crate::lookup::TransportOpts {
                         udp: false,
                         ..crate::lookup::TransportOpts::default()

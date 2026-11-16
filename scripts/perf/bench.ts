@@ -3,13 +3,13 @@
 //
 // usage: bun scripts/perf/bench.ts <app binary> <arm> [--nodes <N>] [--seed 1] [--stagger 0.5]
 //          [--settle 480] [--idle 600] [--loaded 600] [--lookup <list>] [--min-avail-gib 2] [--out-root ~/bench-results]
-//          [--record ~/bench-results/baseline/<arm>.json] [--max-peers <N>] [--join-time 1]
+//          [--record ~/bench-results/baseline/<arm>.json] [--max-connections <N>] [--join-time 1]
 //
 // --record names the JSON that build-arm.ts wrote. The runner copies it into result.json as `build`.
 // Use it for the sha and the dirty flag: the version text of a binary built with an engine override
 // can say dirty:true, because cargo rewrites Cargo.lock before the build script runs.
 //
-// --max-peers is passed to `create` and `join`: the cap on direct links of each daemon. Without it the daemon
+// --max-connections is passed to `create` and `join`: the cap on direct links of each daemon. Without it the daemon
 // uses its own default. --join-time 1 polls the rosters during the settle phase and writes join_ms to
 // result.json: the time from the last join until every daemon lists the other N-1 members.
 //
@@ -59,8 +59,8 @@ const LOADED = num("loaded", 600);
 // No --lookup flag: `create` then uses the loopback ladder, so the 64 daemons meet over 127.0.0.1 and
 // need no network. Name a lookup (mdns, dht, relay) only to test that lookup.
 const LOOKUP = flags.get("lookup") ?? "";
-const MAX_PEERS = flags.get("max-peers") ?? "";
-const maxPeers = MAX_PEERS ? ["--max-peers", MAX_PEERS] : [];
+const MAX_CONNECTIONS = flags.get("max-connections") ?? "";
+const maxConnections = MAX_CONNECTIONS ? ["--max-connections", MAX_CONNECTIONS] : [];
 const PERIOD = num("period", 30);
 const DRAIN_MAX = 120;
 const DELIVERY_WAIT = 60;
@@ -107,7 +107,7 @@ const result: Record<string, unknown> = {
   nodes: NODES,
   nodes_choice: flags.has("nodes") ? "flag" : chosen.why,
   lookup: LOOKUP,
-  max_peers: MAX_PEERS || null,
+  max_connections: MAX_CONNECTIONS || null,
   phases: [] as { name: string; start_ms: number; end_ms: number }[],
   load: [] as { ts: number; load1: number }[],
 };
@@ -259,7 +259,7 @@ const sampler = setInterval(() => {
 // Join.
 const owner = String(process.pid);
 const created = await cli([
-  "create", "--name", `bench-${stamp}`, "--nickname", nick(1), ...(LOOKUP ? ["--lookup", LOOKUP] : []), ...maxPeers,
+  "create", "--name", `bench-${stamp}`, "--nickname", nick(1), ...(LOOKUP ? ["--lookup", LOOKUP] : []), ...maxConnections,
   "--owner-pid", owner, "--state-file", stateFile(1),
 ]);
 if (created.code !== 0) await abort(`create failed: ${created.err.trim()}`);
@@ -269,7 +269,7 @@ if (!gossip) await abort(`no gossip id: ${ready.out.trim()} ${ready.err.trim()}`
 for (let i = 2; i <= NODES; i++) {
   const limit = overLimit(sample());
   if (limit) await abort(`start-up stopped before ${nick(i)}: ${limit}`);
-  const joined = await cli(["join", gossip, "--nickname", nick(i), "--owner-pid", owner, "--state-file", stateFile(i), ...maxPeers]);
+  const joined = await cli(["join", gossip, "--nickname", nick(i), "--owner-pid", owner, "--state-file", stateFile(i), ...maxConnections]);
   if (joined.code !== 0) await abort(`join ${nick(i)} failed: ${joined.err.trim()}`);
   await sleep(STAGGER);
 }

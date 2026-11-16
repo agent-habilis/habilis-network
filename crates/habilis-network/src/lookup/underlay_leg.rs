@@ -36,7 +36,7 @@ pub fn set_underlay_leg_off(
     UNDERLAY_LEG_OFF.store(off, Ordering::SeqCst);
 }
 
-/// The cap of the `WebRTC` leg of the underlay for a node with `max_peers` (G):
+/// The cap of the `WebRTC` leg of the underlay for a node with `max_connections` (G):
 /// `Some(G)`, or `None` while a test switched the leg off.
 #[cfg(feature = "multihop")]
 #[cfg_attr(
@@ -46,10 +46,10 @@ pub fn set_underlay_leg_off(
         reason = "None only when a test switched the leg off"
     )
 )]
-pub(crate) fn underlay_cap(max_peers: usize) -> Option<usize> {
+pub(crate) fn underlay_cap(max_connections: usize) -> Option<usize> {
     #[cfg(feature = "iroh-test-utils")]
     if UNDERLAY_LEG_OFF.load(Ordering::SeqCst) {
         return None;
     }
-    Some(max_peers)
+    Some(max_connections)
 }

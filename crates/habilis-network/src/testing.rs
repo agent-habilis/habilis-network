@@ -22,6 +22,7 @@ use crate::daemon::state::{EventLoopState, FrameOverheads, MeshSecrets, RunKeys,
 use crate::protocol::identity::Identity;
 use crate::protocol::{AuthorKey, Channel, MeshId, Nickname, peer_addr_error};
 use crate::util::clock::Instant;
+use crate::util::tuning;
 
 use iroh::address_lookup::memory;
 
@@ -88,7 +89,7 @@ fn fresh_state_that_waits_with_book_and_member(
                 keys_state: None,
             },
             secrets: MeshSecrets::default(),
-            webrtc_admission: transport::SignalAdmission::new(transport::MAX_DIRECT_PEERS),
+            webrtc_admission: transport::SignalAdmission::new(tuning::MAX_CONNECTIONS),
             address_book,
             webrtc_ice: transport::IceProfile::default(),
         },

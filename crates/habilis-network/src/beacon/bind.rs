@@ -2,6 +2,7 @@ use iroh::Endpoint;
 use iroh::address_lookup::memory;
 
 use crate::util::clock::Instant;
+use crate::util::tuning;
 
 use crate::lookup::{TransportHandles, build_endpoint};
 
@@ -37,7 +38,7 @@ pub(crate) async fn build_rendezvous_endpoint(
         let webrtc = lookup::build_webrtc_handle(params.secret.public());
         // Made before the endpoint: the endpoint reports its connections to it
         // from the first handshake on.
-        let admission = transport::SignalAdmission::new(transport::MAX_DIRECT_PEERS);
+        let admission = transport::SignalAdmission::new(tuning::MAX_CONNECTIONS);
         let transport_handles = TransportHandles {
             webrtc: Some(webrtc.clone()),
             admission: Some(admission.clone()),

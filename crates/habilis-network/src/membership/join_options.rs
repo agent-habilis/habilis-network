@@ -12,7 +12,6 @@ use crate::runtime::{
     CreateParams, JoinParams, Node, Resolved, SetupKind, SetupParams, SignalHandling,
     derive_topic_mesh_config, setup_mesh,
 };
-use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
 use anyhow::Result;
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -82,10 +81,9 @@ pub struct JoinOptions {
     /// different meshes. Empty ⇒ the default ladder. Ignored when joining
     /// by id.
     pub relay_urls: Vec<String>,
-    /// Active-view cap (G); `0` takes the engine default.
-    pub max_peers: usize,
-    /// Ceiling of direct connections (C); `0` takes the engine default.
-    pub max_direct: usize,
+    /// Cap on the direct connections of the node, and the size of the gossip active view; `0`
+    /// takes the engine default.
+    pub max_connections: usize,
 }
 
 impl JoinOptions {
@@ -138,17 +136,10 @@ impl JoinOptions {
         self
     }
 
-    /// Set the peer cap.
+    /// Set the cap on the direct connections of the node.
     #[must_use]
-    pub fn max_peers(mut self, max_peers: usize) -> Self {
-        self.max_peers = max_peers;
-        self
-    }
-
-    /// Set the direct-session cap.
-    #[must_use]
-    pub fn max_direct(mut self, max_direct: usize) -> Self {
-        self.max_direct = max_direct;
+    pub fn max_connections(mut self, max_connections: usize) -> Self {
+        self.max_connections = max_connections;
         self
     }
 }
@@ -251,11 +242,6 @@ pub async fn join<S: NodeSink + 'static>(
         .transpose()
         .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
     let (kind, author) = resolve_kind(options, nickname)?;
-    let max_peers = if options.max_peers == 0 {
-        GOSSIP_ACTIVE_VIEW_CAPACITY
-    } else {
-        options.max_peers
-    };
 
     // A browser has no UDP socket, so the loopback ladder a selector-less create
     // resolves to is a mesh of exactly one, forever — and it fails *silently*:
@@ -279,9 +265,7 @@ pub async fn join<S: NodeSink + 'static>(
     let (inbound_tx, inbound) = mpsc::channel(INBOUND_CAP);
     let config = setup_mesh(
         kind,
-        SetupParams::new(author, sink)
-            .max_peers(max_peers)
-            .max_direct(options.max_direct),
+        SetupParams::new(author, sink).max_connections(options.max_connections),
     )
     .await?;
 

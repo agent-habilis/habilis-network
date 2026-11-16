@@ -44,8 +44,7 @@ export async function join(opts: JoinOpts & WasmOpts): Promise<Mesh> {
       nick: opts.nick,
       transport: opts.transport ?? [],
       relayUrls: opts.relayUrls ?? [],
-      maxPeers: opts.maxPeers ?? 0,
-      maxDirect: opts.maxDirect ?? 0,
+      maxConnections: opts.maxConnections ?? 0,
     },
     opts,
   )
@@ -61,8 +60,7 @@ export async function create(opts: CreateOpts & WasmOpts): Promise<Mesh> {
       lookup: opts.lookup ?? [],
       transport: opts.transport ?? [],
       relayUrls: opts.relayUrls ?? [],
-      maxPeers: opts.maxPeers ?? 0,
-      maxDirect: opts.maxDirect ?? 0,
+      maxConnections: opts.maxConnections ?? 0,
     },
     opts,
   )

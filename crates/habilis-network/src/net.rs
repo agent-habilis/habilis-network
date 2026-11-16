@@ -25,11 +25,11 @@ pub use crate::lookup::{
 #[cfg(feature = "host")]
 pub use crate::lookup::{NetworkCapability, capability_probe};
 pub use crate::protocol::peer_addr_error::{endpoint_addr_from_json, endpoint_addr_to_json};
-/// The direct-`WebRTC`-session ceiling this engine enforces, so a consumer
-/// renders the same denominator the engine checks. It used to be written out
+/// The default of `max_connections`, the one cap on the direct connections of a node, so a
+/// consumer renders the same denominator the engine checks. It used to be written out
 /// once here and again in each frontend, and the UI's copy drifted from the
 /// one that was enforced.
-pub use crate::transport::MAX_DIRECT_PEERS;
+pub use crate::util::tuning::MAX_CONNECTIONS;
 /// The ids of the custom transports, so a consumer that names the path of a
 /// peer (`TransportAddr::Custom(addr)` with `addr.id()`) reads the engine's
 /// values. A copy in the consumer would drift with no error. They are here
@@ -45,6 +45,7 @@ pub use habilis_network_iroh_transport_util::{
 /// is the second caller.
 pub mod direct {
     pub use crate::lookup::build_peer_webrtc;
+    pub use crate::transport::SignalAdmission;
     pub use crate::transport::payload_path::{
         PROBE_DEADLINE, PayloadPath, refuse_unless_direct, wait_direct,
     };
@@ -52,7 +53,7 @@ pub mod direct {
         IceProfile, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN, NudgeAcceptor, UdpTransport,
         WebRtcSignalAcceptor, dial_signal, pair_needs_lane,
     };
-    pub use crate::transport::{MAX_DIRECT_PEERS, SignalAdmission};
+    pub use crate::util::tuning::MAX_CONNECTIONS;
     pub use habilis_network_iroh_webrtc_transport::WebRtcHandle;
     /// Tests only: take UDP away from every connection in the process.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]

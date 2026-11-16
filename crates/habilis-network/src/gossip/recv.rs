@@ -1831,11 +1831,11 @@ async fn greet_new_peer(message: &Verified, state: &mut EventLoopState, context:
 /// because the measurements of the churn (0.8 link-ups per member per minute at
 /// N = 24 and G = 8) were made with it. Whether to drop it is open: it would let
 /// a `PeerInfo` fill the last slot too, and it needs a new run to show the effect.
-fn peer_info_graft_below(max_peers: usize, members: usize) -> usize {
-    if members <= max_peers.saturating_add(1) {
-        max_peers
+fn peer_info_graft_below(max_connections: usize, members: usize) -> usize {
+    if members <= max_connections.saturating_add(1) {
+        max_connections
     } else {
-        max_peers.saturating_sub(1).max(1)
+        max_connections.saturating_sub(1).max(1)
     }
 }
 
@@ -2056,7 +2056,7 @@ async fn handle_peer_info(
     // No `rendezvous_wanted` gate on this graft: `peer_id` is never the
     // rendezvous here, which returned above.
     let below = state.linked_endpoints.len()
-        < peer_info_graft_below(context.max_peers, state.member_addresses().len() + 1);
+        < peer_info_graft_below(context.max_connections, state.member_addresses().len() + 1);
     if !defer_first_dial
         && below
         && !state.linked_endpoints.contains(&peer_id)
@@ -2323,7 +2323,7 @@ mod first_contact_tests {
                 author: &self.author,
                 identity: &self.identity,
                 our_pubkey: self.our_pubkey,
-                max_peers: 16,
+                max_connections: 16,
                 rendezvous_id: endpoint_id(9),
                 external_msg_tx: None,
                 sink: &self.sink,
@@ -5163,7 +5163,7 @@ mod first_contact_tests {
                 author: &node.author,
                 identity: &node.identity,
                 our_pubkey: node.our_pubkey,
-                max_peers: 16,
+                max_connections: 16,
                 rendezvous_id: endpoint_id(9),
                 external_msg_tx: None,
                 sink: &sink,
@@ -6613,7 +6613,7 @@ mod first_contact_tests {
 
             let node = Node::spawn().await;
             let context = node.context();
-            let max_peers = context.max_peers;
+            let max_connections = context.max_connections;
             // Higher than ours, so the first-sighting tie-break does not defer it.
             let newcomer = loop {
                 let id = iroh::SecretKey::generate().public();
@@ -6645,8 +6645,8 @@ mod first_contact_tests {
 
             // More than G + 1 members, one link short of G: the last slot waits.
             let mut crowded = fresh_state();
-            crowd(&mut crowded, max_peers + 2);
-            fill_view(&mut crowded, max_peers - 1);
+            crowd(&mut crowded, max_connections + 2);
+            fill_view(&mut crowded, max_connections - 1);
             super::handle_peer_info(&peer_info, &mut crowded, &context).await;
             assert!(
                 !crowded.direct.contains_key(&newcomer),
@@ -7957,7 +7957,7 @@ mod left_tests {
                 author: &us,
                 identity: &identity,
                 our_pubkey,
-                max_peers: 16,
+                max_connections: 16,
                 rendezvous_id: endpoint_id(9),
                 external_msg_tx: None,
                 sink: &sink,
@@ -8071,7 +8071,7 @@ mod left_tests {
                 author: &us,
                 identity: &identity,
                 our_pubkey,
-                max_peers: 16,
+                max_connections: 16,
                 rendezvous_id: endpoint_id(9),
                 external_msg_tx: None,
                 sink: &sink,
@@ -8590,7 +8590,7 @@ mod repeat_tests {
                 author: &reader_nick,
                 identity: &identity,
                 our_pubkey: identity.author_key(),
-                max_peers: 16,
+                max_connections: 16,
                 rendezvous_id: endpoint_id(9),
                 external_msg_tx: None,
                 sink: &sink,
@@ -8728,7 +8728,7 @@ mod dedup_counter_tests {
                 author: &reader_nick,
                 identity: &identity,
                 our_pubkey: identity.author_key(),
-                max_peers: 16,
+                max_connections: 16,
                 rendezvous_id: endpoint_id(9),
                 external_msg_tx: None,
                 sink,

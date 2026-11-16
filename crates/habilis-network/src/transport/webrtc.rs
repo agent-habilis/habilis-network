@@ -47,7 +47,7 @@ pub(crate) mod signal_deadlines;
 pub(crate) mod udp_transport;
 pub(crate) mod web_rtc_signal_acceptor;
 
-pub use consts::{MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN};
+pub use consts::{MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN};
 pub use dial_signal::dial_signal;
 pub use ice_profile::IceProfile;
 pub use nudge_acceptor::NudgeAcceptor;
@@ -85,14 +85,15 @@ mod tests {
     use super::nudge_acceptor;
     use super::signal_deadlines::SignalDeadlines;
     use super::{
-        IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN, NudgeAcceptor,
-        UdpTransport, WebRtcSignalAcceptor, dial_signal, lane_needs, negotiate_session, rendezvous,
-        retry, session_policy, web_rtc_signal_acceptor,
+        IceProfile, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN, NudgeAcceptor, UdpTransport,
+        WebRtcSignalAcceptor, dial_signal, lane_needs, negotiate_session, rendezvous, retry,
+        session_policy, web_rtc_signal_acceptor,
     };
     use crate::daemon::handler_ctx;
     use crate::lookup::EndpointError;
     use crate::transport::admission::SignalAdmission;
     use crate::transport::probe::PathKind;
+    use crate::util::tuning::MAX_CONNECTIONS;
     use habilis_network_iroh_webrtc_transport::{MAX_ENVELOPE_BYTES, WebRtcHandle};
     use iroh::address_lookup::memory::MemoryLookup;
     use iroh::endpoint::Connection;
@@ -478,7 +479,7 @@ mod tests {
             2,
             async {
                 let (server, server_hub) = endpoint().await;
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let router = serve(&server, &server_hub, &admission);
 
                 let (client, _client_hub) = endpoint().await;
@@ -522,7 +523,7 @@ mod tests {
             2,
             async {
                 let (server, server_hub) = endpoint().await;
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let router = serve(&server, &server_hub, &admission);
 
                 let (client, _client_hub) = endpoint().await;
@@ -702,7 +703,7 @@ mod tests {
             2,
             async {
                 let (server, server_hub) = endpoint_with_lookup().await;
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let router = serve(&server, &server_hub, &admission);
 
                 let (client, client_hub) = endpoint_with_lookup().await;
@@ -757,11 +758,11 @@ mod tests {
             2,
             async {
                 let (server, server_hub) = endpoint_with_lookup().await;
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let router = serve(&server, &server_hub, &admission);
 
                 let (client, client_hub) = endpoint_with_lookup().await;
-                let client_admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let client_admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let client_router = serve(&client, &client_hub, &client_admission);
                 dial_signal::dial_signal_with(
                     &client,
@@ -818,7 +819,7 @@ mod tests {
                 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 
                 let (server, server_hub) = endpoint_with_lookup().await;
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let server_gossip = Gossip::builder().spawn(server.clone());
                 // One Router for both ALPNs: `Router::spawn` overrides the endpoint's
                 // ALPN list, so a second Router silently unregisters the first's.
@@ -954,7 +955,7 @@ mod tests {
                 let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
                 let client = with_relay(client_key, &client_hub, true).await;
 
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let server_gossip = Gossip::builder().spawn(server.clone());
                 let book = lookup::address_book(&server.clone());
                 let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
@@ -1102,7 +1103,7 @@ mod tests {
                     .accept(NUDGE_ALPN, NudgeAcceptor)
                     .accept(HOLD_ALPN, Hold(held_tx))
                     .spawn();
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let book = lookup::address_book(&high.clone());
                 let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
                     high_hub.clone(),
@@ -1205,7 +1206,7 @@ mod tests {
                 let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
                 let client = relay_only(client_key, &client_hub).await;
 
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let book = lookup::address_book(&server.clone());
                 let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
                     server_hub.clone(),
@@ -1318,7 +1319,7 @@ mod tests {
                 let client =
                     bind_with_relay(relay_url.clone(), client_key, &client_hub, true).await;
 
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let server_gossip = Gossip::builder().spawn(server.clone());
                 let book = lookup::address_book(&server.clone());
                 let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
@@ -1427,7 +1428,7 @@ mod tests {
             2,
             async {
                 let (server, server_hub) = endpoint().await;
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let router = serve(&server, &server_hub, &admission);
 
                 let (client, _client_hub) = endpoint().await;
@@ -1789,11 +1790,11 @@ mod tests {
         use crate::util::clock::Instant;
 
         let (server, server_hub) = endpoint_with_lookup().await;
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let admission = SignalAdmission::new(MAX_CONNECTIONS);
         let router = serve(&server, &server_hub, &admission);
 
         let (client, client_hub) = endpoint_with_lookup().await;
-        let client_admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let client_admission = SignalAdmission::new(MAX_CONNECTIONS);
         // The round holds the slot as in production, and teaches the table its hub.
         let round = client_admission
             .try_admit(server.id(), &client_hub)
@@ -1920,7 +1921,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2032,7 +2033,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2153,7 +2154,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2240,7 +2241,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2325,7 +2326,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2413,7 +2414,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2523,7 +2524,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2611,7 +2612,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(99),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2687,7 +2688,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(99),
                     external_msg_tx: None,
                     sink: &sink,

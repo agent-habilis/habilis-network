@@ -1043,15 +1043,15 @@ pub const RIVAL_RECHECK_OFFSET_SPAN: Duration = Duration::from_secs(8);
 /// Past that the overlay is partial and keeps promoting and demoting peers.
 ///
 /// The default is **32**, chosen together with D, the `WebRTC` session cap
-/// (`MAX_DIRECT_PEERS`): the memory of a node follows both, see "Choosing G and
+/// (`MAX_CONNECTIONS`): the memory of a node follows both, see "Choosing G and
 /// D from a memory budget" in `docs/perf/direct-peer-memory.md`. It was 64,
 /// which kept meshes of up to 65 free of churn at 50 to 100 MB per node. G is a
 /// count bound only: `HyParView` still accepts a high-priority join at a full
 /// view and drops a random member. This is the default for the public
-/// `--max-peers` cap, and `0` asks for it. The passive (healing/shuffle) pool is
-/// derived as 2x the live view. Set `--max-peers` *small* to deliberately
+/// `--max-connections` cap, and `0` asks for it. The passive (healing/shuffle) pool is
+/// derived as 2x the live view. Set `--max-connections` *small* to deliberately
 /// reproduce the gossip-churn leak at any node count.
-pub const GOSSIP_ACTIVE_VIEW_CAPACITY: usize = 32;
+pub const MAX_CONNECTIONS: usize = 32;
 
 /// How often the direct-peer slot table drops the connections that are gone and
 /// the peers that nothing holds. One timer per admission table, not one task

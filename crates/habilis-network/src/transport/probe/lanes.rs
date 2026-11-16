@@ -78,7 +78,7 @@ pub(crate) async fn top_up_lane_offers(state: &mut EventLoopState, context: &Han
         return;
     }
     let lane: Vec<_> =
-        regraft::retry_candidates(state, context.rendezvous_id, context.max_peers, false)
+        regraft::retry_candidates(state, context.rendezvous_id, context.max_connections, false)
             .into_iter()
             .filter(|address| is_lane_offer(state, context, address))
             .collect();

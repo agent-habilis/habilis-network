@@ -63,7 +63,7 @@ impl Member {
         nick: &str,
         relay: &RelayUrl,
         transport: Vec<Transport>,
-        max_direct: usize,
+        max_connections: usize,
     ) -> Self {
         let options = membership::JoinOptions::default()
             .nick(Some(nick.to_owned()))
@@ -71,7 +71,7 @@ impl Member {
         let options = options
             .transport(transport)
             .relay_urls(vec![relay.to_string()]);
-        let options = options.max_direct(max_direct);
+        let options = options.max_connections(max_connections);
         Self::open(&options).await
     }
 

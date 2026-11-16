@@ -407,7 +407,7 @@ mod churn_red {
                 author: &self.us,
                 identity: &self.identity,
                 our_pubkey: self.identity.author_key(),
-                max_peers: 16,
+                max_connections: 16,
                 rendezvous_id: endpoint_id(9),
                 external_msg_tx: None,
                 sink: &self.sink,

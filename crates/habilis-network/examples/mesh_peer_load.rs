@@ -13,8 +13,8 @@
 //! - `MESH_TRAFFIC=off`: no directed messages, gossip only. With traffic on, every
 //!   node sends one directed message per second to every roster peer, which is one
 //!   unicast connection per peer, the worst case.
-//! - `MESH_MAX_PEERS` (G) and `MESH_MAX_DIRECT` (C): the bounds. `0`, or unset,
-//!   takes the engine default.
+//! - `MESH_MAX_CONNECTIONS`: the cap on the direct connections. `0`, or unset, takes the
+//!   engine default.
 //! - `MESH_TRAFFIC_UNTIL_SECS=180`: the directed messages stop after that many seconds.
 //!   With `MESH_BLOCK_UDP_AFTER_SECS` and `MESH_TRANSPORTS=udp,webrtc,multihop` this is
 //!   the run of the idle detach: sessions to members that are not neighbors must go.
@@ -269,13 +269,10 @@ async fn main() -> anyhow::Result<()> {
     let (kind, author) = resolve_kind(&options, None)?;
 
     let (inbound_tx, mut inbound) = mpsc::channel(INBOUND_CAP);
-    let max_peers = usize::try_from(env_number("MESH_MAX_PEERS")).unwrap_or(0);
-    let max_direct = usize::try_from(env_number("MESH_MAX_DIRECT")).unwrap_or(0);
+    let max_connections = usize::try_from(env_number("MESH_MAX_CONNECTIONS")).unwrap_or(0);
     let config: runtime::EventLoopConfig = setup_mesh(
         kind,
-        SetupParams::new(author.clone(), SilentSink::default())
-            .max_peers(max_peers)
-            .max_direct(max_direct),
+        SetupParams::new(author.clone(), SilentSink::default()).max_connections(max_connections),
     )
     .await?;
 
