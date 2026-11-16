@@ -313,7 +313,7 @@ async fn an_event_with_a_valid_id_and_a_bad_signature_is_delivered() {
         .expect("the clock is after the epoch")
         .as_secs();
     let mut event = Event::sign(&Keys::generate(), now, &TAG, "unsigned".to_owned());
-    event.sig = "00".repeat(64);
+    event.signature = "00".repeat(64);
     relays[0].inject(&event);
     let got = time::timeout(Duration::from_secs(2), bob_rx.recv())
         .await

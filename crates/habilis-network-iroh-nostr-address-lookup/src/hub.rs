@@ -197,9 +197,11 @@ enum Command {
 }
 
 /// A pool's hold on a relay. Dropping the last lease closes the socket.
+#[must_use]
 #[derive(Debug)]
 pub(crate) struct Lease {
-    conn: Arc<Conn>,
+    // Shared with the other leases of this relay, and with the table of connections.
+    connection: Arc<Conn>,
     sub_id: String,
 }
 
@@ -208,29 +210,29 @@ impl Lease {
         if self.is_dead() {
             return Health::Down;
         }
-        *self.conn.health.borrow()
+        *self.connection.health.borrow()
     }
 
     /// The connection task is gone, for instance because the runtime that
     /// spawned it shut down. A dead lease is replaced, never reused.
     pub(crate) fn is_dead(&self) -> bool {
-        self.conn.commands.is_closed()
+        self.connection.commands.is_closed()
     }
 
     pub(crate) fn publish(&self, frame: String) {
-        let _ = self.conn.commands.send(Command::Publish(frame));
+        let _ = self.connection.commands.send(Command::Publish(frame));
     }
 
     /// Drop the socket and dial again. It is shared, so every pool on it
     /// reconnects: fine, since the socket is the suspect.
     pub(crate) fn reconnect(&self) {
-        let _ = self.conn.commands.send(Command::Reconnect);
+        let _ = self.connection.commands.send(Command::Reconnect);
     }
 }
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        let _ = self.conn.commands.send(Command::Unsubscribe {
+        let _ = self.connection.commands.send(Command::Unsubscribe {
             sub_id: mem::take(&mut self.sub_id),
         });
     }
@@ -305,32 +307,32 @@ impl Hub {
         {
             return None;
         }
-        let conn = {
+        let connection = {
             let mut conns = self.conns.lock().expect("hub mutex poisoned");
-            let live = conns
-                .get(url.as_str())
-                .and_then(Weak::upgrade)
-                .filter(|conn| !conn.commands.is_closed());
-            if let Some(conn) = live {
-                conn
+            let tracked = conns.get(url.as_str()).and_then(Weak::upgrade);
+            let live = tracked.filter(|candidate| !candidate.commands.is_closed());
+            if let Some(connection) = live {
+                connection
             } else {
-                let conn = self.spawn(url.clone());
-                conns.insert(url.as_str().to_owned(), Arc::downgrade(&conn));
-                conn
+                let connection = self.spawn(url.clone());
+                conns.insert(url.as_str().to_owned(), Arc::downgrade(&connection));
+                connection
             }
         };
-        let _ = conn.commands.send(Command::Subscribe {
+        let _ = connection.commands.send(Command::Subscribe {
             sub_id: sub_id.clone(),
             filter,
             events,
         });
-        Some(Lease { conn, sub_id })
+        Some(Lease { connection, sub_id })
     }
 
+    // Shared by every lease of the relay, and by the table that finds it again.
     fn spawn(&'static self, url: Url) -> Arc<Conn> {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (health_tx, health) = watch::channel(Health::Connecting);
         task::spawn(run(self, url, receiver, health_tx));
+        // Shared by every lease of the relay, and by the table that finds it again.
         Arc::new(Conn { commands, health })
     }
 
@@ -688,8 +690,15 @@ fn refusal(url: &Url, reason: &str, stale_warned: &mut Option<Instant>) -> Refus
 
 #[cfg(all(test, feature = "test-relay"))]
 mod flow_tests {
-    use super::*;
+    use std::time::Duration;
+
+    use n0_future::time::{Instant, sleep};
+    use tokio::sync::mpsc;
+    use url::Url;
+
+    use super::{Hub, Lease};
     use crate::test_relay::TestRelay;
+    use crate::wire::Filter;
 
     /// The first retirement wait of the hubs below: short enough to see a whole
     /// retire, retry and refuse-again cycle in a second or two.
@@ -745,7 +754,7 @@ mod flow_tests {
         let url = relay.url();
         let (events, _events_rx) = mpsc::unbounded_channel();
 
-        let first = hub
+        let first: Lease = hub
             .lease(&url, "one".into(), filter(), events.clone())
             .expect("a first lease");
         until("the first refusal retires the relay", || blocked(hub, &url)).await;
@@ -778,7 +787,7 @@ mod flow_tests {
         let url = relay.url();
         let (events, _events_rx) = mpsc::unbounded_channel();
 
-        let first = hub
+        let first: Lease = hub
             .lease(&url, "one".into(), filter(), events.clone())
             .expect("a first lease");
         until("the first refusal retires the relay", || blocked(hub, &url)).await;
@@ -799,7 +808,14 @@ mod flow_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::Duration;
+
+    use n0_future::time::Instant;
+    use url::Url;
+
+    use super::{
+        Backoff, Health, RETIRE_FIRST, RETIRE_MAX, Refusal, Retirements, STALE_WARN_EVERY, refusal,
+    };
 
     /// A relay with a shorter window refuses every announce, so the warning
     /// goes out once per relay per ten minutes, not once per refusal.
@@ -809,15 +825,17 @@ mod tests {
         let reason = "invalid: event too old";
         let mut warned = None;
 
-        assert!(matches!(
-            refusal(&url, reason, &mut warned),
-            Refusal::Ignore
-        ));
+        let outcome = refusal(&url, reason, &mut warned);
+        assert!(
+            matches!(outcome, Refusal::Ignore),
+            "a stale refusal is not a retirement"
+        );
         let first = warned.expect("the first refusal warns");
-        assert!(matches!(
-            refusal(&url, reason, &mut warned),
-            Refusal::Ignore
-        ));
+        let again = refusal(&url, reason, &mut warned);
+        assert!(
+            matches!(again, Refusal::Ignore),
+            "the second one is not either"
+        );
         assert_eq!(warned, Some(first), "the second refusal stays quiet");
 
         if let Some(long_ago) = Instant::now().checked_sub(STALE_WARN_EVERY) {
@@ -836,7 +854,11 @@ mod tests {
         let steps: Vec<u64> = (0..7).map(|_| backoff.step().as_secs() / 60).collect();
         assert_eq!(steps, [1, 2, 4, 8, 15, 15, 15], "minutes");
         backoff.reset();
-        assert_eq!(backoff.step(), Duration::from_mins(1));
+        assert_eq!(
+            backoff.step(),
+            Duration::from_mins(1),
+            "a reset starts from the first step"
+        );
     }
 
     /// Clients that lost a relay together must not redial it at the same marks,
@@ -929,10 +951,10 @@ mod tests {
     #[test]
     fn a_limited_relay_is_not_usable_even_past_its_wait() {
         let past = Instant::now();
-        assert!(!Health::Limited(past).usable());
-        assert!(Health::Up.usable());
-        assert!(Health::Connecting.usable());
-        assert!(!Health::Down.usable());
-        assert!(!Health::Retired.usable());
+        assert!(!Health::Limited(past).usable(), "a limited relay waits");
+        assert!(Health::Up.usable(), "an up relay is usable");
+        assert!(Health::Connecting.usable(), "a dialing relay counts");
+        assert!(!Health::Down.usable(), "a down relay is not");
+        assert!(!Health::Retired.usable(), "a retired relay is not");
     }
 }

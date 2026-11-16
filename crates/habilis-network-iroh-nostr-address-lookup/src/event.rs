@@ -1,12 +1,14 @@
 //! NIP-01 events: the id, the BIP-340 signature, and the ephemeral kind a tag
 //! maps to.
 
-use anyhow::{Context as _, Result, bail};
+use std::fmt;
+
 use k256::schnorr::{Signature, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use std::fmt;
+use crate::event_error::EventError;
+
 /// The tag name every event and filter uses. Trystero uses the same one.
 pub const TAG: &str = "x";
 
@@ -40,11 +42,13 @@ impl fmt::Debug for Keys {
 }
 
 impl Keys {
+    /// The keys of the secret `bytes`.
+    ///
     /// # Errors
-    /// `bytes` is zero or not below the curve order.
-    pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self> {
+    /// [`EventError::InvalidSecretKey`] when `bytes` is zero or not below the curve order.
+    pub fn try_new(bytes: &[u8; 32]) -> Result<Self, EventError> {
         let signing =
-            SigningKey::from_bytes(&(*bytes).into()).context("invalid secp256k1 secret key")?;
+            SigningKey::from_bytes(&(*bytes).into()).map_err(|_| EventError::InvalidSecretKey)?;
         let pubkey = hex::encode(signing.verifying_key().to_bytes());
         Ok(Self { signing, pubkey })
     }
@@ -57,7 +61,7 @@ impl Keys {
         loop {
             // A random 32-byte string is a valid scalar with probability
             // 1 - 2^-128; the loop is for the proof, not for practice.
-            if let Ok(keys) = Self::from_bytes(&rand::random()) {
+            if let Ok(keys) = Self::try_new(&rand::random()) {
                 return keys;
             }
         }
@@ -86,8 +90,9 @@ pub struct Event {
     pub tags: Vec<Vec<String>>,
     /// The content of the event.
     pub content: String,
-    /// The Schnorr signature over the id, as lowercase hex.
-    pub sig: String,
+    /// The Schnorr signature over the id, as lowercase hex. `sig` on the wire.
+    #[serde(rename = "sig")]
+    pub signature: String,
 }
 
 impl Event {
@@ -101,7 +106,7 @@ impl Event {
         let kind = kind_for(tag);
         let tags = vec![vec![TAG.to_owned(), hex::encode(tag)]];
         let id = compute_id(keys.pubkey(), created_at, kind, &tags, &content);
-        let sig = keys
+        let signature = keys
             .signing
             .sign_raw(&id, &rand::random())
             .expect("BIP-340 signing of a 32-byte digest cannot fail");
@@ -112,7 +117,7 @@ impl Event {
             kind,
             tags,
             content,
-            sig: hex::encode(sig.to_bytes()),
+            signature: hex::encode(signature.to_bytes()),
         }
     }
 
@@ -136,7 +141,7 @@ impl Event {
             kind,
             tags,
             content,
-            sig: "00".repeat(64),
+            signature: "00".repeat(64),
         }
     }
 
@@ -146,13 +151,13 @@ impl Event {
     /// where [`verify`](Self::verify) also checks a Schnorr signature.
     ///
     /// # Errors
-    /// The id does not match the fields.
-    pub fn verify_id(&self) -> Result<()> {
+    /// [`EventError::IdMismatch`] when the id does not match the fields.
+    pub fn verify_id(&self) -> Result<(), EventError> {
         self.checked_id().map(|_| ())
     }
 
     /// The id the fields hash to, if it is the id the event names.
-    fn checked_id(&self) -> Result<[u8; 32]> {
+    fn checked_id(&self) -> Result<[u8; 32], EventError> {
         let id = compute_id(
             &self.pubkey,
             self.created_at,
@@ -161,7 +166,7 @@ impl Event {
             &self.content,
         );
         if hex::encode(id) != self.id {
-            bail!("event id does not match its fields");
+            return Err(EventError::IdMismatch);
         }
         Ok(id)
     }
@@ -169,26 +174,34 @@ impl Event {
     /// Check the id and the signature, as a relay does before it forwards.
     ///
     /// # Errors
-    /// The id does not match the fields, or the signature does not verify.
-    pub fn verify(&self) -> Result<()> {
+    /// The id does not match the fields, a field does not decode, or the
+    /// signature does not verify.
+    pub fn verify(&self) -> Result<(), EventError> {
         let id = self.checked_id()?;
-        let pubkey = hex::decode(&self.pubkey).context("pubkey is not hex")?;
-        let key =
-            VerifyingKey::try_from(pubkey.as_slice()).context("pubkey is not an x-only key")?;
-        let sig = hex::decode(&self.sig).context("sig is not hex")?;
-        let sig = Signature::try_from(sig.as_slice()).context("sig is not 64 bytes")?;
-        key.verify_raw(&id, &sig).context("bad signature")?;
+        let pubkey = hex::decode(&self.pubkey).map_err(|_| EventError::Malformed {
+            step: "pubkey is not hex",
+        })?;
+        let key = VerifyingKey::try_from(pubkey.as_slice()).map_err(|_| EventError::Malformed {
+            step: "pubkey is not an x-only key",
+        })?;
+        let signature_bytes = hex::decode(&self.signature).map_err(|_| EventError::Malformed {
+            step: "signature is not hex",
+        })?;
+        let signature =
+            Signature::try_from(signature_bytes.as_slice()).map_err(|_| EventError::Malformed {
+                step: "signature is not 64 bytes",
+            })?;
+        key.verify_raw(&id, &signature)
+            .map_err(|_| EventError::BadSignature)?;
         Ok(())
     }
 
     /// The value of the first `x` tag, if any.
     #[must_use]
     pub fn tag(&self) -> Option<&str> {
-        self.tags
-            .iter()
-            .find(|tag| tag.first().map(String::as_str) == Some(TAG))
-            .and_then(|tag| tag.get(1))
-            .map(String::as_str)
+        let named = |candidate: &&Vec<String>| candidate.first().map(String::as_str) == Some(TAG);
+        let found: &Vec<String> = self.tags.iter().find(named)?;
+        found.get(1).map(String::as_str)
     }
 }
 
@@ -216,26 +229,28 @@ fn serialize(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Event, Keys, kind_for, serialize};
 
     /// BIP-340 test vector 0 (github.com/bitcoin/bips, bip-0340/test-vectors.csv).
     #[test]
     fn bip340_vector_zero() {
         let mut secret = [0u8; 32];
         secret[31] = 3;
-        let keys = Keys::from_bytes(&secret).expect("a valid secret key");
+        let keys = Keys::try_new(&secret).expect("a valid secret key");
         assert_eq!(
             keys.pubkey(),
-            "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+            "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+            "the public key of secret 3"
         );
-        let sig = keys
+        let signature = keys
             .signing
             .sign_raw(&[0u8; 32], &[0u8; 32])
             .expect("a signature");
         assert_eq!(
-            hex::encode(sig.to_bytes()),
+            hex::encode(signature.to_bytes()),
             "e907831f80848d1069a5371b402410364bdf1c5f8307b0084c55f1ce2dca8215\
-             25f66a4a85ea8b71e482a74f382d2ce5ebeee8fdb2172f477df4900d310536c0"
+             25f66a4a85ea8b71e482a74f382d2ce5ebeee8fdb2172f477df4900d310536c0",
+            "the signature of test vector 0"
         );
     }
 
@@ -246,7 +261,8 @@ mod tests {
         let tags = vec![vec!["x".to_owned(), "ab".to_owned()]];
         assert_eq!(
             serialize("pk", 1_700_000_000, 20_001, &tags, "hi \"there\"\n"),
-            r#"[0,"pk",1700000000,20001,[["x","ab"]],"hi \"there\"\n"]"#
+            r#"[0,"pk",1700000000,20001,[["x","ab"]],"hi \"there\"\n"]"#,
+            "the compact NIP-01 array"
         );
     }
 
@@ -255,7 +271,11 @@ mod tests {
         let keys = Keys::generate();
         let event = Event::sign(&keys, 1_700_000_000, &[9u8; 32], "hello".to_owned());
         event.verify().expect("a valid event");
-        assert_eq!(event.tag(), Some(hex::encode([9u8; 32]).as_str()));
+        assert_eq!(
+            event.tag(),
+            Some(hex::encode([9u8; 32]).as_str()),
+            "the event carries its tag"
+        );
 
         let mut tampered = event.clone();
         tampered.content = "bye".to_owned();
@@ -278,7 +298,7 @@ mod tests {
         let event = Event::sign(&keys, 1_700_000_000, &[9u8; 32], "hello".to_owned());
 
         let mut bad_signature = event.clone();
-        bad_signature.sig = "00".repeat(64);
+        bad_signature.signature = "00".repeat(64);
         bad_signature
             .verify_id()
             .expect("the id still matches the fields");
@@ -307,10 +327,10 @@ mod tests {
         ] {
             let kind = kind_for(&tag);
             assert!((20_000..30_000).contains(&kind), "{kind}");
-            assert_eq!(kind, kind_for(&tag));
+            assert_eq!(kind, kind_for(&tag), "the same tag gives the same kind");
         }
-        assert_eq!(kind_for(&[0u8; 32]), 20_000);
+        assert_eq!(kind_for(&[0u8; 32]), 20_000, "tag zero is the base kind");
         // 0xffff = 65535 → 65535 % 10000 = 5535.
-        assert_eq!(kind_for(&[0xff; 32]), 25_535);
+        assert_eq!(kind_for(&[0xff; 32]), 25_535, "the largest prefix wraps");
     }
 }

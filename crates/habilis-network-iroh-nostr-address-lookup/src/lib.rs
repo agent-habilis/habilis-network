@@ -25,6 +25,7 @@
 
 use n0_future::time;
 mod event;
+mod event_error;
 mod hub;
 mod pool;
 mod wire;
@@ -39,6 +40,7 @@ mod ws;
 pub mod test_relay;
 
 pub use event::{Event, Keys, TAG, kind_for};
+pub use event_error::EventError;
 pub use pool::Pool;
 
 /// Seconds since the Unix epoch, on the portable clock (std on a host,
