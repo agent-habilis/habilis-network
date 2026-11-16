@@ -65,7 +65,8 @@ pub enum NostrError {
     /// The signal was already opened within the replay window.
     Replayed,
     /// The replay cache holds only signals the clock window still accepts, and
-    /// it is full, so a new one cannot be remembered and is refused.
+    /// it is full, for the sender of the new signal or for the whole cache, so
+    /// the new one cannot be remembered and is refused.
     ReplayCacheFull,
     /// A custom relay list is empty.
     EmptyRelayList,

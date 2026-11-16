@@ -20,6 +20,11 @@ pub const REPLAY_WINDOW_SECS: u64 = 120;
 /// 16 peers announcing every 5 s fills about 770 in a window.
 const MAX_SEEN: usize = 4096;
 
+/// The most records one sender holds in the replay cache, so one member that
+/// floods fresh nonces cannot fill the cache for the whole mesh. A real sender
+/// announcing every 5 s holds about 48 in a window.
+const MAX_SEEN_PER_SENDER: usize = 64;
+
 /// Opens signals addressed to one member and remembers what it has opened, so
 /// a signal replayed inside the window is refused.
 #[derive(Debug)]
@@ -126,8 +131,9 @@ impl Opener {
     }
 
     /// Note the signal as seen, and refuse it if it was seen before. The cache
-    /// is bounded: a member that floods fresh nonces cannot grow it. A record
-    /// leaves only when its signal is out of the clock window, so a replay it
+    /// is bounded: a member that floods fresh nonces cannot grow it. One sender
+    /// holds at most `MAX_SEEN_PER_SENDER` records, so a flood stops that sender
+    /// alone. A record leaves only when its signal is out of the clock window, so a replay it
     /// would catch is refused as stale anyway. If the cache is full of records
     /// still in the window, the new signal is refused: it fails closed.
     fn remember(&mut self, from: EndpointId, body: &Body, now: u64) -> Result<(), NostrError> {
@@ -137,7 +143,12 @@ impl Opener {
         if self.seen.contains_key(&key) {
             return Err(NostrError::Replayed);
         }
-        if self.seen.len() >= MAX_SEEN {
+        let held = self
+            .seen
+            .keys()
+            .filter(|(sender, _)| *sender == from)
+            .count();
+        if held >= MAX_SEEN_PER_SENDER || self.seen.len() >= MAX_SEEN {
             return Err(NostrError::ReplayCacheFull);
         }
         self.seen.insert(key, body.ts);
@@ -178,7 +189,7 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64;
     use iroh_base::SecretKey;
 
-    use super::{MAX_SEEN, Opener, REPLAY_WINDOW_SECS};
+    use super::{MAX_SEEN, MAX_SEEN_PER_SENDER, Opener, REPLAY_WINDOW_SECS};
     use crate::nostr::body::{Body, Envelope, signed_message};
     use crate::nostr::nostr_keys::NostrKeys;
     use crate::nostr::signal::{Signal, seal};
@@ -367,26 +378,51 @@ mod tests {
         assert!(error.contains("addresses"), "{error}");
     }
 
-    /// A member flooding fresh nonces must not grow the cache without bound:
-    /// past the cap, a new signal is refused.
+    /// Open `count` fresh hellos from `sender` into `opener` at `NOW`.
+    fn flood(opener: &mut Opener, sender: &SecretKey, count: usize) {
+        for _ in 0..count {
+            let hello = Signal::new(SignalKind::Hello, sender.public(), NOW);
+            opener
+                .open(&seal(&keys(), sender, &hello), NOW)
+                .expect("a fresh nonce opens");
+        }
+    }
+
+    /// Senders that each stay under their limit must not grow the cache
+    /// without bound: past the cap, a new signal is refused.
     #[test]
     fn the_replay_cache_is_bounded() {
-        let (alice, bob) = (member(), member());
+        let bob = member();
         let mut opener = Opener::new(keys(), bob.public());
-        for _ in 0..MAX_SEEN {
+        for _ in 0..MAX_SEEN / MAX_SEEN_PER_SENDER {
+            flood(&mut opener, &member(), MAX_SEEN_PER_SENDER);
+        }
+        let late = member();
+        let extra = Signal::new(SignalKind::Hello, late.public(), NOW);
+        let error = refusal(&mut opener, &seal(&keys(), &late, &extra), NOW);
+        assert!(error.contains("cache is full"), "{error}");
+        assert_eq!(opener.seen.len(), MAX_SEEN, "the cache holds the cap");
+    }
+
+    /// One member that floods fresh nonces is refused alone: another sender
+    /// still opens.
+    #[test]
+    fn one_sender_at_its_limit_does_not_block_another() {
+        let (alice, bob, carol) = (member(), member(), member());
+        let mut opener = Opener::new(keys(), carol.public());
+        for _ in 0..MAX_SEEN_PER_SENDER {
             let hello = Signal::new(SignalKind::Hello, alice.public(), NOW);
             opener
                 .open(&seal(&keys(), &alice, &hello), NOW)
-                .expect("a fresh nonce opens");
+                .expect("a sender under its limit opens");
         }
         let extra = Signal::new(SignalKind::Hello, alice.public(), NOW);
         let error = refusal(&mut opener, &seal(&keys(), &alice, &extra), NOW);
         assert!(error.contains("cache is full"), "{error}");
-        assert!(
-            opener.seen.len() <= MAX_SEEN,
-            "the cache holds {} pairs",
-            opener.seen.len()
-        );
+        let hello = Signal::new(SignalKind::Hello, bob.public(), NOW);
+        opener
+            .open(&seal(&keys(), &bob, &hello), NOW)
+            .expect("another sender still opens");
     }
 
     /// A full cache must not forget a record whose signal the clock window still
@@ -400,11 +436,9 @@ mod tests {
         opener
             .open(&sealed_oldest, NOW)
             .expect("the oldest signal opens once");
-        for _ in 1..MAX_SEEN {
-            let hello = Signal::new(SignalKind::Hello, alice.public(), NOW);
-            opener
-                .open(&seal(&keys(), &alice, &hello), NOW)
-                .expect("a fresh nonce opens");
+        flood(&mut opener, &alice, MAX_SEEN_PER_SENDER - 1);
+        for _ in 1..MAX_SEEN / MAX_SEEN_PER_SENDER {
+            flood(&mut opener, &member(), MAX_SEEN_PER_SENDER);
         }
         assert_eq!(opener.seen.len(), MAX_SEEN, "the cache is full");
         let error = refusal(&mut opener, &sealed_oldest, NOW);
