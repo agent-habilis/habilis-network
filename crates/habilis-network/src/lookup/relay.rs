@@ -394,7 +394,10 @@ impl Mover<'_> {
         match self {
             Self::InPlace => {
                 tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, kind, "peer endpoint moves to another relay rung");
-                move_home(endpoint, rung, &next).await;
+                // The relay actor of iroh shares the config of a relay.
+                let config = Arc::new(rung_config(&next));
+                endpoint.insert_relay(next.clone(), config).await;
+                endpoint.remove_relay(rung).await;
                 Some(next)
             }
             Self::Publish(rung_tx) => {
@@ -452,14 +455,6 @@ fn next_return_wait(current: Duration, found: bool, times: HomingTimes) -> Durat
     } else {
         current.saturating_mul(2).min(times.return_backoff_max)
     }
-}
-
-/// Move the home of `endpoint` from the rung `from` to the rung `to`.
-async fn move_home(endpoint: &Endpoint, from: &RelayUrl, to: &RelayUrl) {
-    // The relay actor of iroh shares the config of a relay.
-    let config = Arc::new(rung_config(to));
-    endpoint.insert_relay(to.clone(), config).await;
-    endpoint.remove_relay(from).await;
 }
 
 /// Resolves once `endpoint` closes, or once `stop`'s sender is dropped.
@@ -2443,10 +2438,10 @@ mod tests {
         rung.map(short_host)
     }
 
-    /// The fake answer of one rung: after `delay_ms`, up or down.
+    /// The fake answer of one rung: after `delay`, up or down.
     struct FakeRung {
         host: &'static str,
-        delay_ms: u64,
+        delay: std_Duration,
         up: bool,
     }
 
@@ -2477,7 +2472,7 @@ mod tests {
                 .iter()
                 .find(|fake| fake.host == host)
                 .expect("each rung has a fake");
-            let (delay, up) = (std_Duration::from_millis(fake.delay_ms), fake.up);
+            let (delay, up) = (fake.delay, fake.up);
             started.borrow_mut().push(host.clone());
             let stopped = &stopped;
             async move {
@@ -2505,17 +2500,17 @@ mod tests {
         walk_with(fakes, None, FAKE_STAGGER).await
     }
 
-    fn fake(host: &'static str, delay_ms: u64, up: bool) -> FakeRung {
-        FakeRung { host, delay_ms, up }
+    fn fake(host: &'static str, delay: std_Duration, up: bool) -> FakeRung {
+        FakeRung { host, delay, up }
     }
 
     #[test]
     fn ladder_picks_first_when_all_reachable() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let walked = walk(&[
-                fake("a", 400, true),
-                fake("b", 10, true),
-                fake("c", 10, true),
+                fake("a", std_Duration::from_millis(400), true),
+                fake("b", std_Duration::from_millis(10), true),
+                fake("c", std_Duration::from_millis(10), true),
             ])
             .await;
             assert_eq!(
@@ -2536,9 +2531,9 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             // rung 0 down → rung 1 wins once rung 0 said no; the slow rung 2 is stopped.
             let walked = walk(&[
-                fake("a", 300, false),
-                fake("b", 10, true),
-                fake("c", 5000, true),
+                fake("a", std_Duration::from_millis(300), false),
+                fake("b", std_Duration::from_millis(10), true),
+                fake("c", std_Duration::from_millis(5000), true),
             ])
             .await;
             assert_eq!(
@@ -2558,9 +2553,9 @@ mod tests {
     fn ladder_skips_multiple_dead_prefix_rungs() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let walked = walk(&[
-                fake("a", 30, false),
-                fake("b", 30, false),
-                fake("c", 10, true),
+                fake("a", std_Duration::from_millis(30), false),
+                fake("b", std_Duration::from_millis(30), false),
+                fake("c", std_Duration::from_millis(10), true),
             ])
             .await;
             assert_eq!(
@@ -2582,7 +2577,12 @@ mod tests {
             // "reset and start from the first": the walk always re-picks the
             // earliest reachable rung, so a recovered rung 0 wins over a
             // still-up rung 1.
-            let walked = walk(&[fake("a", 5, true), fake("b", 5, true), fake("c", 5, true)]).await;
+            let walked = walk(&[
+                fake("a", std_Duration::from_millis(5), true),
+                fake("b", std_Duration::from_millis(5), true),
+                fake("c", std_Duration::from_millis(5), true),
+            ])
+            .await;
             assert_eq!(
                 walked.selected.as_deref(),
                 Some("a"),
@@ -2600,9 +2600,9 @@ mod tests {
     fn ladder_all_down_is_none() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let walked = walk(&[
-                fake("a", 10, false),
-                fake("b", 10, false),
-                fake("c", 10, false),
+                fake("a", std_Duration::from_millis(10), false),
+                fake("b", std_Duration::from_millis(10), false),
+                fake("c", std_Duration::from_millis(10), false),
             ])
             .await;
             assert!(
@@ -2631,7 +2631,10 @@ mod tests {
     fn a_rung_that_says_no_starts_the_next_at_once() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let started = time::Instant::now();
-            let fakes = [fake("a", 10, false), fake("b", 10, true)];
+            let fakes = [
+                fake("a", std_Duration::from_millis(10), false),
+                fake("b", std_Duration::from_millis(10), true),
+            ];
             let walked = walk_with(&fakes, None, std_Duration::from_secs(10)).await;
             let took = started.elapsed();
             assert_eq!(walked.selected.as_deref(), Some("b"), "rung 1 answers");
@@ -2651,7 +2654,10 @@ mod tests {
                 time::sleep(std_Duration::from_millis(300)).await;
                 drop(stop);
             };
-            let fakes = [fake("a", 5000, true), fake("b", 5000, true)];
+            let fakes = [
+                fake("a", std_Duration::from_millis(5000), true),
+                fake("b", std_Duration::from_millis(5000), true),
+            ];
             let (walked, ()) =
                 tokio::join!(walk_with(&fakes, Some(&stopped), FAKE_STAGGER), stopping);
             assert!(walked.selected.is_none(), "a stopped walk selects nothing");
