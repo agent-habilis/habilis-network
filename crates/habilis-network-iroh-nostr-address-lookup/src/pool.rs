@@ -100,6 +100,7 @@ impl Pool {
             subscribed: tags.iter().copied().collect(),
             leases: Vec::new(),
             owed_echo: HashMap::new(),
+            redialed: HashMap::new(),
             sent: SentIds::default(),
         };
         let keys = Keys::generate();
@@ -159,6 +160,9 @@ struct Chooser {
     leases: Vec<(Url, Lease)>,
     /// When each relay was first sent an event it has not yet echoed.
     owed_echo: HashMap<Url, Instant>,
+    /// When each relay was last dialed again for swallowing. It times the next
+    /// redial and says nothing about forwarding: only an echo clears `owed_echo`.
+    redialed: HashMap<Url, Instant>,
     /// The ids of the events this pool sent lately.
     sent: SentIds,
 }
@@ -241,19 +245,20 @@ impl Chooser {
         }
         // `old` now holds the relays we no longer want; dropping it releases them.
         for (url, lease) in &self.leases {
-            if self
-                .owed_echo
-                .get(url)
-                .is_some_and(|since| since.elapsed() >= ECHO_DEADLINE + SWALLOW_RECONNECT)
-            {
+            let Some(&since) = self.owed_echo.get(url) else {
+                continue;
+            };
+            let last = self.redialed.get(url).copied().unwrap_or(since);
+            if last.elapsed() >= ECHO_DEADLINE + SWALLOW_RECONNECT {
                 lease.reconnect();
-                // Re-armed, so a relay that goes on swallowing is dialed again
-                // once a round, not on every choose.
-                self.owed_echo.insert(url.clone(), Instant::now());
+                // Timed from here, so a relay that goes on swallowing is dialed
+                // again once a round, not on every choose.
+                self.redialed.insert(url.clone(), Instant::now());
             }
         }
-        self.owed_echo
-            .retain(|url, _| self.leases.iter().any(|(held, _)| held == url));
+        let held = |url: &Url| self.leases.iter().any(|(held, _)| held == url);
+        self.owed_echo.retain(|url, _| held(url));
+        self.redialed.retain(|url, _| held(url));
     }
 
     fn swallows(&self, url: &Url) -> bool {
@@ -282,6 +287,7 @@ impl Chooser {
     fn echoed(&mut self, url: &Url) -> bool {
         let was_swallowing = self.swallows(url);
         self.owed_echo.remove(url);
+        self.redialed.remove(url);
         was_swallowing
     }
 
@@ -405,7 +411,15 @@ mod tests {
     use tokio::time;
     use url::Url;
 
-    use super::{Event, Keys, Pool, Receipt, SENT_CAPACITY, SentIds};
+    use std::collections::{HashMap, HashSet};
+
+    use n0_future::time::Instant;
+    use tokio::sync::mpsc;
+
+    use super::{
+        Chooser, ECHO_DEADLINE, Event, Filter, Hub, Keys, Pool, Receipt, SENT_CAPACITY,
+        SWALLOW_RECONNECT, SentIds,
+    };
     use crate::test_relay::TestRelay;
 
     const TAG: [u8; 32] = [3u8; 32];
@@ -514,6 +528,43 @@ mod tests {
             "the first relay is back"
         );
         assert_eq!(first.accepted(), dials, "on the same socket");
+    }
+
+    /// Dialing a swallowing relay again says nothing about whether it forwards:
+    /// only an echo does. The redial must not start the relay's count over.
+    #[tokio::test]
+    async fn a_redial_does_not_forgive_a_relay_that_swallows() {
+        let relay = TestRelay::spawn().await.expect("spawn test relay");
+        let url = relay.url();
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let mut chooser = Chooser {
+            hub: Hub::global(),
+            ranking: vec![url.clone()],
+            width: 1,
+            sub_id: "redial".to_owned(),
+            filter: Filter {
+                kinds: vec![20_001],
+                tags: vec!["ab".to_owned()],
+            },
+            subscribed: HashSet::new(),
+            leases: Vec::new(),
+            owed_echo: HashMap::new(),
+            redialed: HashMap::new(),
+            sent: SentIds::default(),
+        };
+        chooser.choose(&events);
+        let overdue = ECHO_DEADLINE + SWALLOW_RECONNECT;
+        let since = Instant::now()
+            .checked_sub(overdue)
+            .expect("a clock that has run for two seconds");
+        chooser.owed_echo.insert(url.clone(), since);
+        assert!(chooser.swallows(&url), "the relay owes an overdue echo");
+
+        chooser.choose(&events);
+        assert!(
+            chooser.swallows(&url),
+            "the redial it was sent is not an echo, so it still swallows"
+        );
     }
 
     /// A socket that stays up while nothing comes back (a half-open TCP
