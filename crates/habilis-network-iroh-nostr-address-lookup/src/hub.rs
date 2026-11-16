@@ -569,9 +569,9 @@ impl Task {
                 break outcome;
             }
         };
-        let dropped = sender.dropped();
-        if dropped > 0 {
-            tracing::debug!(target: "habilis_network::lookup", url = %self.url, dropped, "data frames dropped for want of room on this socket");
+        let (datagrams, frames) = (sender.dropped(), sender.writer_dropped());
+        if datagrams > 0 || frames > 0 {
+            tracing::debug!(target: "habilis_network::lookup", url = %self.url, datagrams, frames, "data dropped on this socket: datagrams by the queue, frames by a writer that was behind");
         }
         if !matches!(outcome, Outcome::Dropped) {
             sender.close().await;

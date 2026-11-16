@@ -61,13 +61,17 @@ impl Error for BatchError {}
 #[derive(Debug, Clone)]
 pub(crate) struct Batch {
     bytes: Vec<u8>,
+    datagrams: usize,
 }
 
 impl Batch {
     pub(crate) fn new(from: &[u8; ID_LEN], serial: u32) -> Self {
         let mut bytes = from.to_vec();
         bytes.extend_from_slice(&serial.to_be_bytes());
-        Self { bytes }
+        Self {
+            bytes,
+            datagrams: 0,
+        }
     }
 
     #[cfg(test)]
@@ -89,7 +93,13 @@ impl Batch {
         let length = u16::try_from(datagram.len()).unwrap_or(u16::MAX);
         self.bytes.extend_from_slice(&length.to_be_bytes());
         self.bytes.extend_from_slice(datagram);
+        self.datagrams += 1;
         true
+    }
+
+    /// How many datagrams the batch holds.
+    pub(crate) fn datagrams(&self) -> usize {
+        self.datagrams
     }
 
     /// The batch as the content of an event.

@@ -8,6 +8,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use n0_future::time::Instant;
@@ -55,6 +56,10 @@ pub(crate) const FRAME_OVERHEAD: usize = 512;
 /// A browser socket with more than this many bytes unsent is behind: a data frame is dropped
 /// rather than added to the browser's own queue, which has no bound.
 pub(crate) const WEB_BUFFERED_BOUND: usize = 256 * 1024;
+
+/// The serial of the next batch, for the whole process: two batches with the same datagrams still
+/// make two events, on one socket or on two, and a reconnect does not start it again.
+static NEXT_SERIAL: AtomicU32 = AtomicU32::new(0);
 
 /// A frame length as a count of bytes of budget. A frame is a few kilobytes: a length that does
 /// not fit 32 bits is clamped, and still more than any budget.
@@ -117,6 +122,7 @@ enum Queued {
         // Shared with the datagrams of the pool that queued them.
         keys: Arc<Keys>,
         destination: Destination,
+        datagrams: usize,
         content: String,
     },
     /// An event that the caller signed.
@@ -133,6 +139,14 @@ enum Place {
 }
 
 impl Queued {
+    /// How many datagrams are lost with this frame. An event that a caller signed counts as 1.
+    fn datagrams(&self) -> usize {
+        match self {
+            Self::Batch { datagrams, .. } => *datagrams,
+            Self::Signed(_) => 1,
+        }
+    }
+
     /// The sender and tag of a batch.
     fn destination(&self) -> Option<Destination> {
         match self {
@@ -161,8 +175,6 @@ pub(crate) struct DataQueue {
     frame_tokens: f64,
     refilled: Instant,
     last_flush: Option<Instant>,
-    /// The serial of the next batch: two batches with the same datagrams still make two events.
-    next_serial: u32,
     dropped: u64,
     #[cfg(test)]
     signed: u64,
@@ -180,14 +192,14 @@ impl DataQueue {
             frame_tokens: BURST_FRAMES,
             refilled: now,
             last_flush: None,
-            next_serial: 0,
             dropped: 0,
             #[cfg(test)]
             signed: 0,
         }
     }
 
-    /// The frames and datagrams dropped for want of room, or for a size no batch carries.
+    /// The datagrams dropped for want of room, or for a size no batch carries. An event that a
+    /// caller signed counts as 1.
     pub(crate) fn dropped(&self) -> u64 {
         self.dropped
     }
@@ -240,8 +252,7 @@ impl DataQueue {
         let pending = match self.pending.entry(destination) {
             Entry::Occupied(slot) => slot.into_mut(),
             Entry::Vacant(slot) => {
-                let serial = self.next_serial;
-                self.next_serial = serial.wrapping_add(1);
+                let serial = NEXT_SERIAL.fetch_add(1, Ordering::Relaxed);
                 slot.insert(Pending {
                     keys,
                     batch: Batch::new(&from, serial),
@@ -285,8 +296,9 @@ impl DataQueue {
             .map(|(destination, _)| *destination)
             .collect();
         for destination in old {
-            self.pending.remove(&destination);
-            self.dropped += 1;
+            if let Some(lost) = self.pending.remove(&destination) {
+                self.dropped += lost.batch.datagrams() as u64;
+            }
         }
         if self.pending.is_empty() {
             self.round_start = None;
@@ -404,6 +416,7 @@ impl DataQueue {
         let batch = Queued::Batch {
             keys: pending.keys,
             destination,
+            datagrams: pending.batch.datagrams(),
             content: pending.batch.encode(),
         };
         self.queue(now, batch, place);
@@ -423,25 +436,25 @@ impl DataQueue {
                 .ready
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, waiting)| waiting.since)
+                .min_by_key(|(_, item)| item.since)
                 .map(|(index, _)| index);
             let Some(lost) = oldest.and_then(|index| self.ready.remove(index)) else {
                 break;
             };
             self.ready_bytes -= lost.queued.cost();
-            self.dropped += 1;
+            self.dropped += lost.queued.datagrams() as u64;
         }
     }
 
     /// Drop the frames that waited past [`MAX_AGE`], wherever they stand in the queue.
     fn drop_aged(&mut self, now: Instant) {
         let waiting = mem::take(&mut self.ready);
-        for frame in waiting {
-            if now >= frame.since + MAX_AGE {
-                self.ready_bytes -= frame.queued.cost();
-                self.dropped += 1;
+        for item in waiting {
+            if now >= item.since + MAX_AGE {
+                self.ready_bytes -= item.queued.cost();
+                self.dropped += item.queued.datagrams() as u64;
             } else {
-                self.ready.push_back(frame);
+                self.ready.push_back(item);
             }
         }
     }
@@ -457,8 +470,9 @@ impl DataQueue {
             let Some(destination) = oldest else {
                 break;
             };
-            self.pending.remove(&destination);
-            self.dropped += 1;
+            if let Some(lost) = self.pending.remove(&destination) {
+                self.dropped += lost.batch.datagrams() as u64;
+            }
         }
     }
 }
@@ -471,6 +485,7 @@ fn sign(queued: Queued) -> String {
             keys,
             destination,
             content,
+            ..
         } => {
             let event = Event::sign(
                 Lane::Data,
@@ -669,6 +684,38 @@ mod tests {
             vec![b"quiet".to_vec()],
             "the quiet destination goes first"
         );
+    }
+
+    /// `dropped()` counts datagrams. A batch with 3 datagrams that is dropped is 3 lost datagrams,
+    /// not 1 lost frame.
+    #[test]
+    fn a_dropped_batch_counts_its_datagrams() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let mut queue = DataQueue::new(start);
+        queue.push_datagram(start, outgoing(&keys, 9, b"the writer holds this"));
+        let soon = start + Duration::from_millis(1);
+        for text in [&b"a"[..], b"b", b"c"] {
+            queue.push_datagram(soon, outgoing(&keys, 1, text));
+        }
+        queue.push_datagram(soon + MAX_AGE, outgoing(&keys, 2, b"new"));
+        assert_eq!(queue.dropped(), 3, "the 3 datagrams of the old batch");
+    }
+
+    /// Two sockets of one process, one second, the same datagram: two events. The serial is
+    /// unique for the process, not for the socket, so a reconnect does not restart it.
+    #[test]
+    fn two_sockets_of_one_process_make_two_event_ids_for_equal_batches() {
+        let keys = shared_keys();
+        let start = Instant::now();
+        let (mut first, mut second) = (DataQueue::new(start), DataQueue::new(start));
+        first.push_datagram(start, outgoing(&keys, 1, b"same"));
+        second.push_datagram(start, outgoing(&keys, 1, b"same"));
+        let (one, two) = (
+            first.pop_ready(start).expect("goes at once"),
+            second.pop_ready(start).expect("goes at once"),
+        );
+        assert_ne!(event_id(&one), event_id(&two), "two sockets, two events");
     }
 
     /// A frame over `from`, as the queue lets it out.

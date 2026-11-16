@@ -153,13 +153,20 @@ impl Outbound {
         true
     }
 
-    /// Frames dropped for want of room, as a socket with no queue counts them: none.
+    /// Datagrams the queue dropped for want of room, as a socket with no queue counts them: none.
     pub(crate) fn dropped(&self) -> u64 {
         match self {
             Self::Direct(_) => 0,
-            Self::Paced(paced) => {
-                paced.queue.dropped() + paced.writer_dropped.load(Ordering::Relaxed)
-            }
+            Self::Paced(paced) => paced.queue.dropped(),
+        }
+    }
+
+    /// Data frames the writer dropped because the socket was behind. A count of frames, not of
+    /// datagrams: the writer holds the text of an event.
+    pub(crate) fn writer_dropped(&self) -> u64 {
+        match self {
+            Self::Direct(_) => 0,
+            Self::Paced(paced) => paced.writer_dropped.load(Ordering::Relaxed),
         }
     }
 
