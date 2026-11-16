@@ -83,3 +83,62 @@ fn two_endpoints_with_only_nostr_echo_through_a_relay() {
         },
     );
 }
+
+/// The engine binds its endpoint before it knows its topic: the transport is registered inactive
+/// and activated when the keys exist. A second `activate` does nothing.
+#[test]
+fn a_transport_activated_after_the_bind_links_and_echoes() {
+    ::habilis_network_test_tracing::run_multi_thread(
+        ::habilis_network_test_tracing::init(),
+        2,
+        async {
+            let relay = TestRelay::spawn().await.expect("spawn a relay");
+            let keys = NostrKeys::derive(&TopicId::from_bytes([8u8; 32]));
+            let (alice_key, bob_key) = (
+                SecretKey::from_bytes(&[3; 32]),
+                SecretKey::from_bytes(&[4; 32]),
+            );
+            let alice_transport = NostrTransport::new(alice_key.public());
+            let bob_transport = NostrTransport::new(bob_key.public());
+            let alice = endpoint(alice_key, &alice_transport).await;
+            let bob = endpoint(bob_key, &bob_transport).await;
+            let router = Router::builder(bob.clone()).accept(ECHO_ALPN, Echo).spawn();
+            assert!(
+                alice_transport.activate(keys.clone(), vec![relay.url()]),
+                "the first activation opens the lane"
+            );
+            assert!(
+                !alice_transport.activate(keys.clone(), vec![relay.url()]),
+                "a second activation does nothing"
+            );
+            assert!(
+                bob_transport.activate(keys, vec![relay.url()]),
+                "bob opens too"
+            );
+
+            let target = EndpointAddr::from_parts(
+                bob.id(),
+                [TransportAddr::Custom(transport_addr(
+                    NOSTR_TRANSPORT_ID,
+                    bob.id(),
+                ))],
+            );
+            let connection =
+                time::timeout(Duration::from_secs(20), alice.connect(target, ECHO_ALPN))
+                    .await
+                    .expect("the connect timed out")
+                    .expect("connect over Nostr");
+            let (mut send, mut recv) = connection.open_bi().await.expect("open a stream");
+            send.write_all(b"late keys").await.expect("write");
+            send.finish().expect("finish");
+            let echoed = time::timeout(Duration::from_secs(20), recv.read_to_end(1024))
+                .await
+                .expect("the echo timed out")
+                .expect("read the echo");
+            assert_eq!(echoed, b"late keys", "the echo returns the message");
+            connection.close(0u32.into(), b"done");
+            router.shutdown().await.expect("shutdown");
+            alice.close().await;
+        },
+    );
+}

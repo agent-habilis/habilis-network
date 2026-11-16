@@ -34,5 +34,7 @@ url.workspace = true
 
 [dev-dependencies]
 habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
+# The block hooks: a test takes the IP rung away from one endpoint and gives it back.
+habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transport-util", features = ["test-hooks"] }
 habilis-network-iroh-nostr-address-lookup = { path = "../habilis-network-iroh-nostr-address-lookup", features = ["test-relay"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "io-util"] }
