@@ -77,10 +77,12 @@ pub(crate) async fn connect(url: &Url) -> Result<(Sender, Receiver)> {
         }
         other => bail!("relay URL scheme must be ws or wss, not {other}"),
     };
-    let (socket, _response) = ClientBuilder::new()
+    let builder = ClientBuilder::new()
         .uri(url.as_str())
-        .context("relay URL is not a valid URI")?
-        .limits(Limits::default().max_payload_len(Some(MAX_FRAME)))
+        .context("relay URL is not a valid URI")?;
+    let limits = Limits::default().max_payload_len(Some(MAX_FRAME));
+    let (socket, _response) = builder
+        .limits(limits)
         .connect_on(io)
         .await
         .context("websocket handshake")?;
@@ -88,18 +90,22 @@ pub(crate) async fn connect(url: &Url) -> Result<(Sender, Receiver)> {
     Ok((Sender(sink), Receiver(stream)))
 }
 
+// One config for the process, shared by every dial.
 fn tls_config() -> Arc<rustls::ClientConfig> {
+    // Built once for the whole process, then shared by each dial.
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    // Each caller gets a handle on the one config.
     Arc::clone(CONFIG.get_or_init(|| {
         let roots = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
-        let config =
-            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .expect("ring supports the default TLS versions")
-                .with_root_certificates(roots)
-                .with_no_client_auth();
+        // The builder takes the provider as a shared handle.
+        let provider = Arc::new(ring::default_provider());
+        let builder = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default TLS versions");
+        let config = builder.with_root_certificates(roots).with_no_client_auth();
+        // The connectors share the config, so it lives behind a handle.
         Arc::new(config)
     }))
 }

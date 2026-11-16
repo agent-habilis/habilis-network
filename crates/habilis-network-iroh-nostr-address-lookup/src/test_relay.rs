@@ -6,9 +6,9 @@
 //! swallow events, or to drop every connection.
 
 use std::collections::HashMap;
+use std::io;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context as _, Result};
 use futures_util::{SinkExt as _, StreamExt as _};
 use n0_future::task::AbortOnDropHandle;
 use serde_json::Value;
@@ -26,6 +26,7 @@ use tokio::net;
 #[derive(Debug)]
 pub struct TestRelay {
     url: Url,
+    // The accept loop and every connection task read the same state.
     shared: Arc<Mutex<State>>,
     _accept: AbortOnDropHandle<()>,
 }
@@ -38,13 +39,13 @@ struct State {
     tamper_events: bool,
     hang_up_on_accept: bool,
     reqs: usize,
-    next_conn: u64,
+    next_client: u64,
     accepted: usize,
-    conns: HashMap<u64, Conn>,
+    clients: HashMap<u64, Client>,
 }
 
 #[derive(Debug)]
-struct Conn {
+struct Client {
     outbound: mpsc::UnboundedSender<String>,
     subs: HashMap<String, Sub>,
     task: Option<AbortHandle>,
@@ -59,26 +60,26 @@ struct Sub {
 
 impl Sub {
     fn matches(&self, event: &Event) -> bool {
-        self.kinds.contains(&u64::from(event.kind))
-            && event
-                .tag()
-                .is_some_and(|tag| self.tags.iter().any(|want| want == tag))
-            && event.created_at >= self.since
+        let wanted = |tag: &str| self.tags.iter().any(|want| want == tag);
+        let tagged = event.tag().is_some_and(wanted);
+        self.kinds.contains(&u64::from(event.kind)) && tagged && event.created_at >= self.since
     }
 }
 
 impl TestRelay {
     /// # Errors
     /// The loopback listener cannot bind.
-    pub async fn spawn() -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .context("bind test relay")?;
-        let url: Url = format!("ws://{}", listener.local_addr()?)
-            .parse()
-            .context("a socket address makes a valid URL")?;
+    ///
+    /// # Panics
+    /// Never in practice: a socket address always makes a valid URL.
+    pub async fn spawn() -> Result<Self, io::Error> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = format!("ws://{}", listener.local_addr()?);
+        let url: Url = address.parse().expect("a socket address makes a valid URL");
+        // The accept loop and the handle read the same state.
         let shared = Arc::new(Mutex::new(State::default()));
-        let accept = tokio::spawn(accept_loop(listener, Arc::clone(&shared)));
+        let for_accept = Arc::clone(&shared);
+        let accept = tokio::spawn(accept_loop(listener, for_accept));
         Ok(Self {
             url,
             shared,
@@ -104,19 +105,31 @@ impl TestRelay {
 
     /// Accept events with `OK true` but forward none, as a relay that drops
     /// ephemeral kinds does.
-    pub fn swallow_events(&self, swallow: bool) {
+    pub fn swallow_events(
+        &self,
+        // true to swallow, false to forward again
+        swallow: bool,
+    ) {
         self.state().swallow_events = swallow;
     }
 
     /// Forward every event with its `content` changed and its id kept, as a
     /// buggy or hostile relay might.
-    pub fn tamper_events(&self, tamper: bool) {
+    pub fn tamper_events(
+        &self,
+        // true to change the content, false to forward it as sent
+        tamper: bool,
+    ) {
         self.state().tamper_events = tamper;
     }
 
     /// Finish each `WebSocket` handshake, then hang up at once, as an overloaded
     /// relay at its connection cap does.
-    pub fn hang_up_on_accept(&self, hang_up: bool) {
+    pub fn hang_up_on_accept(
+        &self,
+        // true to hang up on each new connection, false to serve it
+        hang_up: bool,
+    ) {
         self.state().hang_up_on_accept = hang_up;
     }
 
@@ -129,8 +142,8 @@ impl TestRelay {
 
     /// Send a raw text frame to every connection.
     pub fn send_raw(&self, text: &str) {
-        for conn in self.state().conns.values() {
-            let _ = conn.outbound.send(text.to_owned());
+        for client in self.state().clients.values() {
+            let _ = client.outbound.send(text.to_owned());
         }
     }
 
@@ -143,7 +156,7 @@ impl TestRelay {
     /// Connections open now.
     #[must_use]
     pub fn connections(&self) -> usize {
-        self.state().conns.len()
+        self.state().clients.len()
     }
 
     /// Connections accepted since the relay started.
@@ -155,9 +168,9 @@ impl TestRelay {
     /// Close every connection without a close frame, as a crash or a network
     /// drop does. The listener keeps accepting.
     pub fn drop_connections(&self) {
-        let conns = mem::take(&mut self.state().conns);
-        for conn in conns.into_values() {
-            if let Some(task) = conn.task {
+        let clients = mem::take(&mut self.state().clients);
+        for client in clients.into_values() {
+            if let Some(task) = client.task {
                 task.abort();
             }
         }
@@ -168,17 +181,18 @@ impl TestRelay {
     }
 }
 
+// Shared with the handle of the relay, which reads and sets the same state.
 async fn accept_loop(listener: TcpListener, shared: Arc<Mutex<State>>) {
     while let Ok((stream, _)) = listener.accept().await {
         let (outbound, outbound_rx) = mpsc::unbounded_channel();
         let id = {
             let mut state = shared.lock().expect("test relay mutex poisoned");
-            state.next_conn += 1;
+            state.next_client += 1;
             state.accepted += 1;
-            let id = state.next_conn;
-            state.conns.insert(
+            let id = state.next_client;
+            state.clients.insert(
                 id,
-                Conn {
+                Client {
                     outbound,
                     subs: HashMap::new(),
                     task: None,
@@ -186,14 +200,16 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Mutex<State>>) {
             );
             id
         };
-        let task = tokio::spawn(serve(stream, id, Arc::clone(&shared), outbound_rx));
-        if let Some(conn) = shared
+        // The task reads the same state as the accept loop.
+        let for_task = Arc::clone(&shared);
+        let task = tokio::spawn(serve(stream, id, for_task, outbound_rx));
+        if let Some(client) = shared
             .lock()
             .expect("test relay mutex poisoned")
-            .conns
+            .clients
             .get_mut(&id)
         {
-            conn.task = Some(task.abort_handle());
+            client.task = Some(task.abort_handle());
         }
     }
 }
@@ -201,6 +217,7 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Mutex<State>>) {
 async fn serve(
     stream: net::TcpStream,
     id: u64,
+    // The same state as the accept loop and the handle of the relay.
     shared: Arc<Mutex<State>>,
     mut outbound: mpsc::UnboundedReceiver<String>,
 ) {
@@ -208,7 +225,7 @@ async fn serve(
         shared
             .lock()
             .expect("test relay mutex poisoned")
-            .conns
+            .clients
             .remove(&id);
         return;
     };
@@ -238,26 +255,28 @@ async fn serve(
     shared
         .lock()
         .expect("test relay mutex poisoned")
-        .conns
+        .clients
         .remove(&id);
 }
 
 fn handle(text: &str, id: u64, shared: &Mutex<State>) {
-    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(text) else {
+    let parsed: Result<Value, _> = serde_json::from_str(text);
+    let Ok(Value::Array(items)) = parsed else {
         return;
     };
     let mut state = shared.lock().expect("test relay mutex poisoned");
     let reply = |current: &State, frame: Value| {
-        if let Some(conn) = current.conns.get(&id) {
-            let _ = conn.outbound.send(frame.to_string());
+        if let Some(client) = current.clients.get(&id) {
+            let _ = client.outbound.send(frame.to_string());
         }
     };
     match items.first().and_then(Value::as_str) {
         Some("EVENT") => {
-            let Some(Ok(event)) = items
-                .get(1)
-                .map(|raw| serde_json::from_value::<Event>(raw.clone()))
-            else {
+            let Some(raw) = items.get(1) else {
+                return;
+            };
+            let decoded: Result<Event, _> = serde_json::from_value(raw.clone());
+            let Ok(event) = decoded else {
                 return;
             };
             if let Err(error) = event.verify() {
@@ -293,39 +312,32 @@ fn handle(text: &str, id: u64, shared: &Mutex<State>) {
                 reply(&state, serde_json::json!(["CLOSED", sub_id, reason]));
                 return;
             }
-            let numbers = |key: &str| -> Vec<u64> {
-                filter
-                    .get(key)
-                    .and_then(Value::as_array)
-                    .map(|values| values.iter().filter_map(Value::as_u64).collect())
-                    .unwrap_or_default()
+            let listed = |key: &str| -> Vec<Value> {
+                let values = filter.get(key).and_then(Value::as_array);
+                values.cloned().unwrap_or_default()
             };
+            let kinds: Vec<u64> = listed("kinds").iter().filter_map(Value::as_u64).collect();
+            let tags: Vec<String> = listed(&format!("#{TAG}"))
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
             let sub = Sub {
-                kinds: numbers("kinds"),
-                tags: filter
-                    .get(format!("#{TAG}"))
-                    .and_then(Value::as_array)
-                    .map(|values| {
-                        values
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_owned)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                kinds,
+                tags,
                 since: filter.get("since").and_then(Value::as_u64).unwrap_or(0),
             };
-            if let Some(conn) = state.conns.get_mut(&id) {
-                conn.subs.insert(sub_id.to_owned(), sub);
+            if let Some(client) = state.clients.get_mut(&id) {
+                client.subs.insert(sub_id.to_owned(), sub);
             }
             reply(&state, serde_json::json!(["EOSE", sub_id]));
         }
         Some("CLOSE") => {
-            if let (Some(sub_id), Some(conn)) = (
+            if let (Some(sub_id), Some(client)) = (
                 items.get(1).and_then(Value::as_str),
-                state.conns.get_mut(&id),
+                state.clients.get_mut(&id),
             ) {
-                conn.subs.remove(sub_id);
+                client.subs.remove(sub_id);
             }
         }
         _ => {}
@@ -333,10 +345,10 @@ fn handle(text: &str, id: u64, shared: &Mutex<State>) {
 }
 
 fn fan_out(state: &State, event: &Event) {
-    for conn in state.conns.values() {
-        for (sub_id, sub) in &conn.subs {
+    for client in state.clients.values() {
+        for (sub_id, sub) in &client.subs {
             if sub.matches(event) {
-                let _ = conn
+                let _ = client
                     .outbound
                     .send(serde_json::json!(["EVENT", sub_id, event]).to_string());
             }
