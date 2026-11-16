@@ -25,7 +25,7 @@
 //! demoted relay path is what lets a connection survive a dead data channel —
 //! so the relay stays open and unused rather than being torn down.
 
-use habilis_network_iroh_transport_util::{blocked, climb, custom_rung, rung_of};
+use habilis_network_iroh_transport_util::{blocked, climb, custom_rung, relay_carries, rung_of};
 use iroh::endpoint::transports::{
     PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
 };
@@ -60,9 +60,12 @@ impl PathSelector for WebRtcPreferred {
     fn select(&self, context: &PathSelectionContext<'_>) -> PathSelection {
         let paths: Vec<PathSelectionData<'_>> = context.paths().collect();
         // The first rung with a usable path wins; within a rung, lowest RTT.
-        let chosen = climb(&paths, custom_rung, |rung, path| {
-            !blocked(self.local, rung, path)
-        });
+        let chosen = climb(
+            relay_carries(self.local),
+            &paths,
+            custom_rung,
+            |rung, path| !blocked(self.local, rung, path),
+        );
         // Trace level, off by default: every call, with what it saw and chose, so
         // that a path that stays unselected can be told from a selector that never
         // ran.

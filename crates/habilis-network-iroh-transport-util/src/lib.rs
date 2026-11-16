@@ -28,8 +28,8 @@ pub use protocol_set::ProtocolSet;
 
 pub use rung::{
     GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, NOSTR_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID,
-    best_of, blocked, climb, custom_rung, datagrams, expected_rung, ip_remote, remote_id,
-    remote_id_of, rung_of, split_segments,
+    best_of, blocked, climb, custom_rung, datagrams, expected_rung, expected_rung_for, ip_remote,
+    relay_carries, remote_id, remote_id_of, rung_of, set_relay_carries, split_segments,
 };
 #[cfg(feature = "test-hooks")]
 pub use rung::{block_ip_paths, block_ip_to, block_rung, block_rung_to, is_blocked, is_blocked_to};
@@ -40,7 +40,8 @@ pub use rung::{is_blocked, is_blocked_to};
 mod tests {
     use super::{
         GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, NOSTR_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID,
-        custom_rung, expected_rung, remote_id_of, split_segments,
+        custom_rung, expected_rung, expected_rung_for, relay_carries, remote_id_of,
+        set_relay_carries, split_segments,
     };
     #[cfg(feature = "test-hooks")]
     use super::{block_ip_to, block_rung, block_rung_to, is_blocked, is_blocked_to};
@@ -98,6 +99,68 @@ mod tests {
         }
 
         let _guard = ::habilis_network_test_tracing::init();
+    }
+
+    /// Where the relay carries no payload (a mesh that uses it for lookup alone), a pair with a
+    /// Nostr path takes it over the relay path: the relay path would be selected and refused.
+    /// Where the relay carries payload the ladder is the user's: the relay above Nostr.
+    #[test]
+    fn nostr_ranks_above_the_relay_only_where_the_relay_carries_no_payload() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let place = |ladder: [Rung; 7], rung: Rung| {
+            ladder
+                .iter()
+                .position(|&candidate| candidate == rung)
+                .expect("on the ladder")
+        };
+        assert_eq!(
+            Rung::ladder_for(true),
+            Rung::LADDER,
+            "the relay carries: the plain ladder"
+        );
+        let lookup_only = Rung::ladder_for(false);
+        assert!(
+            place(lookup_only, Rung::Nostr) < place(lookup_only, Rung::Relay),
+            "Nostr is above the relay"
+        );
+        assert!(
+            place(lookup_only, Rung::Gossip) < place(lookup_only, Rung::Nostr),
+            "every other rung keeps its place above Nostr"
+        );
+        assert_eq!(lookup_only.len(), Rung::LADDER.len(), "no rung is lost");
+        let both = |rung: Rung| matches!(rung, Rung::Relay | Rung::Nostr);
+        assert_eq!(
+            expected_rung_for(false, |_| true, both),
+            Some(Rung::Nostr),
+            "a lookup-only relay yields to Nostr"
+        );
+        assert_eq!(
+            expected_rung_for(true, |_| true, both),
+            Some(Rung::Relay),
+            "a relay that carries payload keeps its place"
+        );
+        assert_eq!(
+            expected_rung_for(false, |_| true, |rung| rung == Rung::Relay),
+            Some(Rung::Relay),
+            "with no Nostr path the relay is still the path"
+        );
+    }
+
+    /// The mesh policy reaches the selector of an endpoint through its id.
+    #[test]
+    fn the_relay_policy_of_an_endpoint_is_kept_by_its_id() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let local = iroh::SecretKey::from_bytes(&[61; 32]).public();
+        let other = iroh::SecretKey::from_bytes(&[62; 32]).public();
+        assert!(
+            relay_carries(local),
+            "an endpoint with no policy keeps the plain ladder"
+        );
+        set_relay_carries(local, false);
+        assert!(!relay_carries(local), "a lookup-only relay");
+        assert!(relay_carries(other), "another endpoint is not affected");
+        set_relay_carries(local, true);
+        assert!(relay_carries(local), "the policy can be lifted");
     }
 
     /// One function names the rung of a custom transport id, for every selector.

@@ -126,9 +126,8 @@ impl Member {
     }
 
     /// Lift every block of IP and of the relay rung to `peer`, as a repaired network does.
-    async fn lift_cut(&self, peer: &str, ports: Vec<u16>) {
+    async fn lift_cut(&self, peer: &str) {
         self.block_ip_to(Vec::new()).await;
-        let _ = ports;
         until_known::until_peer_known(&self.membership, peer, |reply| {
             Request::Blocking(Blocking::BlockRungTo {
                 rung: Rung::Relay,
@@ -227,6 +226,26 @@ impl Member {
             .expect("the loop answers")
     }
 
+    /// Send until the engine takes the message. A directed frame to a pair whose probe has not
+    /// found a direct path yet is held, and the refusal says to retry: the alive tick probes the
+    /// pair again and records the verdict, so the wait is on that verdict and not on a clock.
+    async fn send_when_proven(&self, to: &str, text: &str) {
+        let started = Instant::now();
+        loop {
+            match self.send(to, text).await {
+                Ok(()) => return,
+                Err(error) if error.contains("retry the send later") => {
+                    assert!(
+                        started.elapsed() < STEP_DEADLINE,
+                        "the pair was never proven for payload: {error}"
+                    );
+                    time::sleep(Duration::from_secs(2)).await;
+                }
+                Err(error) => panic!("the send over Nostr was refused: {error}"),
+            }
+        }
+    }
+
     fn saw_msg(&mut self, text: &str) -> bool {
         while let Ok(message) = self.membership.inbound.try_recv() {
             self.seen_msgs.push(message);
@@ -276,6 +295,80 @@ async fn cut_every_rung(alice: &Member, bob: &Member) {
     cut(alice, bob).await;
 }
 
+/// The same cut with the relay left alone: only IP, the data channel, multihop and gossip are
+/// cut between alice and bob. The iroh relay stays reachable and iroh keeps its path.
+async fn cut_every_direct_rung(alice: &Member, bob: &Member) {
+    for rung in [Rung::WebRtc, Rung::Multihop, Rung::Gossip] {
+        alice.block_rung(rung).await;
+        bob.block_rung(rung).await;
+    }
+    alice.block_ip_to(bob.ports()).await;
+    bob.block_ip_to(alice.ports()).await;
+    alice.close_link("bob").await;
+    bob.close_link("alice").await;
+    alice.forget_connection("bob").await;
+    bob.forget_connection("alice").await;
+}
+
+/// The usual production case: the relay is for lookup alone and it stays reachable. A pair with no
+/// direct path would select the relay path, which carries no payload on such a mesh, and the send
+/// would be held. The selector ranks Nostr above the relay there, so the pair selects Nostr.
+#[test]
+fn a_pair_selects_nostr_over_a_reachable_lookup_only_relay() {
+    let guard = habilis_network_test_tracing::init();
+    guard.allow_warn(
+        "iroh::socket::transports::relay::actor",
+        "Lost connection to relay server",
+    );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
+        let nostr = TestRelay::spawn().await.expect("local Nostr relay");
+        let list = vec![
+            Transport::Udp,
+            Transport::WebRtc,
+            Transport::Multihop,
+            Transport::Gossip,
+            Transport::Nostr,
+        ];
+        let alice = Member::create("alice", &relay, &nostr, list).await;
+        let mut bob = Member::join("bob", &alice).await;
+        let carol = Member::join("carol", &alice).await;
+        assert!(
+            all_know_each_other(&[&alice, &bob, &carol], Duration::from_mins(1)).await,
+            "the three members never formed a mesh"
+        );
+
+        cut_every_direct_rung(&alice, &bob).await;
+        alice
+            .expect_rung_redialing(
+                "bob",
+                "nostr",
+                "only the direct rungs cut between alice and bob",
+            )
+            .await;
+        let before = nostr.data_events();
+
+        let text = "over nostr, relay reachable";
+        alice.send_when_proven("bob", text).await;
+        let started = Instant::now();
+        while !bob.saw_msg(text) {
+            assert!(
+                started.elapsed() < PAYLOAD_DEADLINE,
+                "the message never reached bob over Nostr"
+            );
+            time::sleep(Duration::from_millis(250)).await;
+        }
+        assert!(
+            nostr.data_events() > before,
+            "the datagrams of the message went through the Nostr relay as data events"
+        );
+
+        for member in [alice, bob, carol] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
+}
+
 /// The default option-A mesh: the default list plus Nostr, no relay transport, the relay for
 /// lookup alone. A pair that has only Nostr must still carry a directed message, which the
 /// direct-path gates of a lookup-only relay refuse unless they count a Nostr path.
@@ -287,6 +380,12 @@ fn a_pair_on_the_default_list_plus_nostr_exchanges_a_message_over_nostr() {
     guard.allow_warn(
         "iroh::socket::transports::relay::actor",
         "Lost connection to relay server",
+    );
+    // Every address of the pair is taken from iroh for a moment, until the Nostr address opens a
+    // path.
+    guard.allow_warn(
+        "iroh::socket::remote_map::remote_state",
+        "No paths to remote endpoint known",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
@@ -314,17 +413,10 @@ fn a_pair_on_the_default_list_plus_nostr_exchanges_a_message_over_nostr() {
                 "every rung but Nostr cut between alice and bob",
             )
             .await;
-        // Long enough for the alive tick to probe the pair again, over Nostr only, and to record
-        // its verdict: a lookup-only relay holds a directed frame for a pair whose probe found no
-        // direct path.
-        time::sleep(Duration::from_secs(45)).await;
         let before = nostr.data_events();
 
         let text = "default list over nostr";
-        alice
-            .send("bob", text)
-            .await
-            .unwrap_or_else(|error| panic!("the send over Nostr was refused: {error}"));
+        alice.send_when_proven("bob", text).await;
         let started = Instant::now();
         while !bob.saw_msg(text) {
             assert!(
@@ -366,10 +458,7 @@ fn two_members_with_no_other_path_exchange_a_message_over_nostr() {
         let before = nostr.data_events();
 
         let text = "over nostr";
-        alice
-            .send("bob", text)
-            .await
-            .unwrap_or_else(|error| panic!("the send over Nostr was refused: {error}"));
+        alice.send_when_proven("bob", text).await;
         let started = Instant::now();
         while !bob.saw_msg(text) {
             assert!(
@@ -384,8 +473,8 @@ fn two_members_with_no_other_path_exchange_a_message_over_nostr() {
         );
 
         // The network is repaired: IP and the relay return, and the pair climbs back to IP.
-        alice.lift_cut("bob", bob.ports()).await;
-        bob.lift_cut("alice", alice.ports()).await;
+        alice.lift_cut("bob").await;
+        bob.lift_cut("alice").await;
         alice.forget_connection("bob").await;
         alice
             .expect_rung_redialing("bob", "ip", "IP and the relay returned")

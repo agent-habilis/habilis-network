@@ -485,6 +485,11 @@ fn wire_transports(
     state
         .webrtc_admission
         .set_relay_carries(transports.relay_transport.relay_allowed());
+    // The selectors of the endpoint rank Nostr above a relay that carries no payload.
+    habilis_network_iroh_transport_util::set_relay_carries(
+        endpoint.id(),
+        transports.relay_transport.relay_allowed(),
+    );
     state
         .unicast_pool
         .set_admission(state.webrtc_admission.clone());

@@ -8,7 +8,7 @@
 //! other transports.
 
 use habilis_network_iroh_transport_util::{
-    climb, custom_rung, ip_remote, is_blocked_to, remote_id,
+    climb, custom_rung, ip_remote, is_blocked_to, relay_carries, remote_id,
 };
 use iroh::endpoint::transports::{
     PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
@@ -30,9 +30,12 @@ impl GossipLadder {
 impl PathSelector for GossipLadder {
     fn select(&self, context: &PathSelectionContext<'_>) -> PathSelection {
         let paths: Vec<PathSelectionData<'_>> = context.paths().collect();
-        let chosen = climb(&paths, custom_rung, |rung, path| {
-            !is_blocked_to(self.local, rung, ip_remote(path), remote_id(path))
-        });
+        let chosen = climb(
+            relay_carries(self.local),
+            &paths,
+            custom_rung,
+            |rung, path| !is_blocked_to(self.local, rung, ip_remote(path), remote_id(path)),
+        );
         let mut selection = PathSelection::none();
         if let Some(path) = chosen {
             selection.set(path);

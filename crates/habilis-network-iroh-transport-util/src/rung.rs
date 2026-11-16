@@ -1,16 +1,15 @@
 #[cfg(feature = "test-hooks")]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use iroh::endpoint::transports::{Addr, PathSelectionData, Transmit};
 
 #[cfg(feature = "test-hooks")]
-use std::sync;
-#[cfg(feature = "test-hooks")]
 use std::sync::atomic;
 #[cfg(feature = "test-hooks")]
 use std::sync::atomic::Ordering;
-use std::{iter, net};
+use std::{iter, net, sync};
 /// The lowest-RTT path in `iter`.
 ///
 /// A path whose stats are not readable yet — freshly added, not yet validated —
@@ -90,6 +89,29 @@ pub enum Rung {
 }
 
 impl Rung {
+    /// The ladder for an endpoint whose mesh lets the relay carry payload (`relay_carries`), or
+    /// uses it for lookup alone. Where the relay carries no payload, a path on it would be
+    /// selected and then refused, so Nostr takes the place above it: a pair with a Nostr path
+    /// carries its payload there. Every other rung keeps its place.
+    #[must_use]
+    pub fn ladder_for(
+        // false when the mesh uses the relay for lookup alone
+        relay_carries: bool,
+    ) -> [Self; 7] {
+        if relay_carries {
+            return Self::LADDER;
+        }
+        [
+            Self::Ip,
+            Self::WebRtc,
+            Self::Multihop,
+            Self::Gossip,
+            Self::Nostr,
+            Self::Relay,
+            Self::Other,
+        ]
+    }
+
     /// Every rung, best first.
     pub const LADDER: [Self; 7] = [
         Self::Ip,
@@ -189,6 +211,80 @@ pub fn expected_rung(
         .find(|&rung| allowed(rung) && available(rung))
 }
 
+/// [`expected_rung`] on the ladder of an endpoint (see [`Rung::ladder_for`]).
+#[must_use]
+pub fn expected_rung_for(
+    // false when the mesh uses the relay for lookup alone
+    relay_carries: bool,
+    allowed: impl Fn(Rung) -> bool,
+    available: impl Fn(Rung) -> bool,
+) -> Option<Rung> {
+    Rung::ladder_for(relay_carries)
+        .into_iter()
+        .find(|&rung| allowed(rung) && available(rung))
+}
+
+/// The endpoints whose mesh uses the relay for lookup alone. The selector of an endpoint reads its
+/// ladder from here, because it holds the id of its endpoint and not its mesh policy.
+static LOOKUP_ONLY_RELAY: sync::Mutex<Option<HashSet<iroh::EndpointId>>> = sync::Mutex::new(None);
+
+/// Tell the selectors of the endpoint `local` whether its mesh lets the relay carry payload.
+/// Every endpoint carries by default. A selector reads it at each selection, so the call may come
+/// after the endpoint is bound.
+///
+/// # Panics
+///
+/// Panics if another thread panicked while it held the table.
+///
+/// # Examples
+///
+/// A lookup-only relay ranks below Nostr for that endpoint.
+///
+/// ```
+/// use habilis_network_iroh_transport_util::{relay_carries, set_relay_carries};
+///
+/// let local = iroh::SecretKey::from_bytes(&[1u8; 32]).public();
+/// set_relay_carries(local, false);
+/// assert!(!relay_carries(local));
+/// # set_relay_carries(local, true);
+/// ```
+pub fn set_relay_carries(
+    local: iroh::EndpointId,
+    // false when the mesh uses the relay for lookup alone
+    carries: bool,
+) {
+    let mut table = LOOKUP_ONLY_RELAY.lock().expect("relay policy table");
+    let table = table.get_or_insert_with(HashSet::new);
+    if carries {
+        table.remove(&local);
+    } else {
+        table.insert(local);
+    }
+}
+
+/// Whether the mesh of the endpoint `local` lets the relay carry payload: see
+/// [`set_relay_carries`].
+///
+/// # Panics
+///
+/// Panics if another thread panicked while it held the table.
+///
+/// # Examples
+///
+/// An endpoint with no policy carries on the relay.
+///
+/// ```
+/// use habilis_network_iroh_transport_util::relay_carries;
+///
+/// let local = iroh::SecretKey::from_bytes(&[2u8; 32]).public();
+/// assert!(relay_carries(local));
+/// ```
+#[must_use]
+pub fn relay_carries(local: iroh::EndpointId) -> bool {
+    let table = LOOKUP_ONLY_RELAY.lock().expect("relay policy table");
+    !table.as_ref().is_some_and(|table| table.contains(&local))
+}
+
 /// The best path of the rung that [`expected_rung`] picks among the rungs that
 /// have a usable path: the lowest RTT inside the rung (see [`best_of`]).
 /// `usable` lets a caller drop a path, as a test does to take one rung away
@@ -203,11 +299,13 @@ pub fn expected_rung(
 /// use iroh::endpoint::transports::PathSelectionData;
 ///
 /// # fn demo<'a>(paths: &'a [PathSelectionData<'a>]) -> Option<&'a PathSelectionData<'a>> {
-/// climb(paths, custom_rung, |rung, _path| matches!(rung, Rung::Ip))
+/// climb(true, paths, custom_rung, |rung, _path| matches!(rung, Rung::Ip))
 /// # }
 /// ```
 #[must_use]
 pub fn climb<'a>(
+    // false when the mesh uses the relay for lookup alone, see [`Rung::ladder_for`]
+    relay_carries: bool,
     paths: &'a [PathSelectionData<'a>],
     custom: impl Fn(u64) -> Rung,
     usable: impl Fn(Rung, &PathSelectionData<'_>) -> bool,
@@ -215,7 +313,8 @@ pub fn climb<'a>(
     let usable_on = |rung: Rung, path: &PathSelectionData<'_>| {
         rung_of(path, &custom) == rung && usable(rung, path)
     };
-    let rung = expected_rung(
+    let rung = expected_rung_for(
+        relay_carries,
         |_| true,
         |rung| paths.iter().any(|path| usable_on(rung, path)),
     )?;
