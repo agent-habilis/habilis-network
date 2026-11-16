@@ -158,6 +158,7 @@ jobs:
           # engine's row below reaches it today as a path dependency; this row
           # names it so it stays checked if the engine stops pulling it in.
           cargo check --target wasm32-unknown-unknown -p habilis-network-iroh-nostr-address-lookup
+          cargo check --target wasm32-unknown-unknown -p habilis-network-iroh-nostr-transport
           # The engine itself must reach the browser, not merely be avoidable
           # from it. `--no-default-features` is the portable half: no `host`,
           # so no IPC listener, no state file, no process helpers. Without this
@@ -200,6 +201,7 @@ jobs:
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-util --no-default-features -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-transport-util -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-gossip-transport -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-nostr-transport -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-doc --no-default-features -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-logging --no-default-features -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-test-tracing -- -D warnings -D clippy::disallowed_methods

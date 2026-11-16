@@ -111,6 +111,11 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("habilis-network-iroh-nostr-address-lookup"),
         args: &[],
     },
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("habilis-network-iroh-nostr-transport"),
+        args: &[],
+    },
     // The multihop transport forwards through a browser too, so its crate must
     // build for the browser by itself: the engine's own rows do not reach it
     // while `host` is the only thing that turns it on.
@@ -233,6 +238,11 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::WasmClippy,
         scope: Scope::Crate("habilis-network-iroh-gossip-transport"),
+        args: &[],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-iroh-nostr-transport"),
         args: &[],
     },
     Step {
