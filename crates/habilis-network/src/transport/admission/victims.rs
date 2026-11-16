@@ -18,6 +18,9 @@ pub(crate) struct Victims {
     pub(crate) sessions: Vec<(EndpointId, Arc<dyn Sessions>)>,
     /// What made the ceiling evict: a connection, a session or a gossip neighbor took the unit.
     pub(crate) cause: &'static str,
+    /// The peers that took the units: the connection, the session or the gossip neighbors. A
+    /// victim is never one of them.
+    pub(crate) newcomers: String,
 }
 
 impl fmt::Debug for Victims {
@@ -31,7 +34,8 @@ impl Victims {
         for victim in self.conns {
             tracing::info!(
                 target: transport::LOG_TARGET,
-                peer = %victim.remote_id().fmt_short(),
+                victim = %victim.remote_id().fmt_short(),
+                newcomers = %self.newcomers,
                 cause = self.cause,
                 "evicting a direct connection at the ceiling"
             );
@@ -40,7 +44,8 @@ impl Victims {
         for (peer, hub) in self.sessions {
             tracing::info!(
                 target: transport::LOG_TARGET,
-                peer = %peer.fmt_short(),
+                victim = %peer.fmt_short(),
+                newcomers = %self.newcomers,
                 cause = self.cause,
                 "evicting a session at the ceiling"
             );

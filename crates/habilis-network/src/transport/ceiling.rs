@@ -163,6 +163,9 @@ pub(crate) struct Admission {
     /// How many units the count is over the ceiling after the evictions, because every other
     /// candidate is busy.
     pub(crate) over_ceiling: usize,
+    /// The peers whose admission this is: the connection, the session or the gossip neighbors that
+    /// took the units. A victim is never among them.
+    pub(crate) newcomers: Vec<EndpointId>,
 }
 
 /// The ledger of the direct connections of a node, and the ceiling `C`.
@@ -568,6 +571,7 @@ impl Ceiling {
             Some(first) => self.admit(*first, now),
             None => Admission::default(),
         };
+        admission.newcomers.clone_from(&newly_counted);
         self.demote_over_ceiling(&admission.evict);
         admission.over_ceiling = self
             .units()
@@ -686,18 +690,21 @@ impl Ceiling {
             .iter()
             .filter(|candidate| candidate.class == 2 && evict.contains(&candidate.peer));
         if let Some(young) = young_candidates.map(|candidate| candidate.peer).next() {
-            tracing::info!(target: super::LOG_TARGET, peer = %young.fmt_short(), "evicting a peer younger than the minimum age: the ceiling holds");
+            tracing::info!(target: super::LOG_TARGET, victim = %young.fmt_short(), newcomer = %peer.fmt_short(), "evicting a peer younger than the minimum age: the ceiling holds");
         }
         Admission {
             over_ceiling: units.saturating_sub(evict.len()).saturating_sub(self.cap),
             evict,
+            newcomers: vec![peer],
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Admission, Ceiling, DialPlan, Duration, EvictionBackoff, HashSet, Instant};
+    use super::{
+        Admission, Ceiling, DialPlan, Duration, EndpointId, EvictionBackoff, HashSet, Instant,
+    };
     use crate::testing;
 
     #[test]
@@ -1246,6 +1253,44 @@ mod tests {
             !ceiling.is_extra(extra) && ceiling.units() == 1,
             "the unit of the neighbor that left goes to the extra"
         );
+    }
+
+    #[test]
+    fn an_admission_names_the_newcomers_that_took_the_units() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        let (first, second) = (testing::endpoint_id(1), testing::endpoint_id(2));
+        ceiling.register_quic(first, start);
+        ceiling.register_quic(second, start);
+        let newcomer = testing::endpoint_id(3);
+        let admission = ceiling.register_quic(newcomer, at(start, 100));
+        assert_eq!(
+            admission.newcomers,
+            vec![newcomer],
+            "a connection that evicts names itself as the newcomer"
+        );
+        assert!(
+            !admission
+                .newcomers
+                .iter()
+                .any(|peer| admission.evict.contains(peer)),
+            "the newcomer is never its own victim"
+        );
+        let neighbors = HashSet::from([testing::endpoint_id(10), testing::endpoint_id(11)]);
+        let joined = ceiling.set_neighbors(&neighbors, at(start, 200));
+        assert!(
+            joined
+                .newcomers
+                .iter()
+                .all(|peer| !joined.evict.contains(peer)),
+            "a gossip neighbor is never the victim of its own admission"
+        );
+        let mut named = joined.newcomers;
+        named.sort_unstable();
+        let mut expected: Vec<EndpointId> = neighbors.into_iter().collect();
+        expected.sort_unstable();
+        assert_eq!(named, expected, "the new neighbors are the newcomers");
     }
 
     #[test]

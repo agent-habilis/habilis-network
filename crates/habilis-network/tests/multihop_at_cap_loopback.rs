@@ -492,6 +492,14 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
         // A new gossip neighbor takes the unit of a cached peer: that is the design. An eviction
         // that a connection or a session caused is a dial that took a unit at the cap.
         let evictions = logs.lines().filter(|line| line.contains(EVICTION_LINE));
+        // Each eviction line names the victim and the newcomers that took the units.
+        let eviction_lines = logs.lines().filter(|line| line.contains(EVICTION_LINE));
+        for line in eviction_lines {
+            assert!(
+                line.contains("victim=") && line.contains("newcomers="),
+                "an eviction line names the victim and the newcomers: {line}"
+            );
+        }
         let by_dial: Vec<&str> = evictions
             .filter(|line| !line.contains(NEIGHBOR_CAUSE))
             .collect();
