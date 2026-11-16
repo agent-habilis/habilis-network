@@ -139,8 +139,8 @@ iroh-dns = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", 
 # (rkuhn/swarm-discovery#28). Neither change has an upstream path — n0 will
 # not point their crates at ours — so delete the fork the moment the iroh pins
 # become unnecessary and swarm-discovery 0.6.4+ ships.
-iroh-mdns-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "75ff49c230e84a46267fe508adac5234fd5ee106" }
-iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "75ff49c230e84a46267fe508adac5234fd5ee106" }
+iroh-mdns-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "c71f47b9637d5fcec0a53ad4e63986de1b6fc88e" }
+iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "c71f47b9637d5fcec0a53ad4e63986de1b6fc88e" }
 # `default-features = false` for the same reason as `iroh`: the browser leg
 # cannot carry the host-only defaults.
 #
