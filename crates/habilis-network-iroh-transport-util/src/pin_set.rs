@@ -5,8 +5,9 @@
 //! remote, so the rule lives in the path selector, which reads the pins of its own endpoint here.
 //!
 //! A selector does not know its remote: `PathSelectionContext` of iroh carries no endpoint id. A
-//! multihop path does name it, because its address is a source route that ends at the remote, so a
-//! selector finds the remote of a set of paths from the multihop path in it ([`multihop_remote_of`]).
+//! multihop path names it, because its address is a source route that ends at the remote
+//! ([`multihop_remote_of`]), and so does a relay or a `WebRTC` path, so a selector finds the remote
+//! of a set of paths from any of them. A set with an IP path alone names nobody.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -14,7 +15,7 @@ use std::sync::Mutex;
 use iroh::EndpointId;
 use iroh::endpoint::transports::{Addr, PathSelectionData};
 
-use crate::rung::{MULTIHOP_TRANSPORT_ID, Rung, climb};
+use crate::rung::{MULTIHOP_TRANSPORT_ID, Rung, climb, remote_id_of};
 
 type Pins = Mutex<Option<HashMap<EndpointId, HashSet<EndpointId>>>>;
 
@@ -137,8 +138,9 @@ pub fn multihop_remote_of(address: &Addr) -> Option<EndpointId> {
     EndpointId::from_bytes(&bytes).ok()
 }
 
-/// Whether the paths of one remote belong to a pinned peer of `local`: a multihop path in the set
-/// ends at a pinned remote.
+/// Whether the paths of one remote belong to a pinned peer of `local`: a path in the set names a
+/// pinned remote. A multihop path ends at its remote, and a relay or a `WebRTC` path names it, so
+/// the pin holds when the multihop path of the set is gone and a direct path is left.
 ///
 /// # Panics
 ///
@@ -159,8 +161,9 @@ pub fn multihop_remote_of(address: &Addr) -> Option<EndpointId> {
 #[must_use]
 pub fn pinned_in(local: EndpointId, paths: &[PathSelectionData<'_>]) -> bool {
     paths.iter().any(|path| {
-        multihop_remote_of(&path.network_path().remote())
-            .is_some_and(|remote| is_pinned(local, remote))
+        let address = path.network_path().remote();
+        let remote = multihop_remote_of(&address).or_else(|| remote_id_of(&address));
+        remote.is_some_and(|remote| is_pinned(local, remote))
     })
 }
 
