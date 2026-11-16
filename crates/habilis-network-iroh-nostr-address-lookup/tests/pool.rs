@@ -82,12 +82,16 @@ async fn an_event_carried_by_two_relays_arrives_once() {
     })
     .await;
 
-    deliver(&alice, &mut bob_rx, "once").await;
+    let delivered = deliver(&alice, &mut bob_rx, "once").await;
     time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        bob_rx.try_recv().is_err(),
-        "the second relay's copy was dropped"
-    );
+    // `deliver` can publish more than once, and each publish is a new event with
+    // its own id: only a second copy of the returned one is a duplicate.
+    while let Ok(extra) = bob_rx.try_recv() {
+        assert_ne!(
+            extra.id, delivered.id,
+            "the second relay's copy of the same event was dropped"
+        );
+    }
 }
 
 #[tokio::test]
@@ -203,7 +207,7 @@ async fn two_pools_in_one_process_share_one_socket_per_relay() {
     assert_eq!(relays[0].accepted(), 1, "dialed once");
 
     drop(alice);
-    time::sleep(Duration::from_millis(200)).await;
+    eventually("bob's subscription arrived", || relays[0].reqs() >= 1).await;
     assert_eq!(relays[0].connections(), 1, "bob still holds the socket");
     drop(bob);
     eventually("the last pool closes the socket", || {
@@ -318,7 +322,7 @@ async fn an_event_with_a_valid_id_and_a_bad_signature_is_delivered() {
     let relays = relays(1).await;
     let (bob, mut bob_rx) = Pool::open(urls(&relays), 1, &[TAG]);
     eventually("bob connected", || connected_set(&bob).len() == 1).await;
-    time::sleep(Duration::from_millis(200)).await;
+    eventually("bob's subscription arrived", || relays[0].reqs() >= 1).await;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("the clock is after the epoch")
@@ -343,6 +347,7 @@ async fn a_relay_that_hangs_up_is_not_hammered() {
     time::sleep(Duration::from_secs(8)).await;
     // Delays of 1, 2 and 4 s put dials at about 0, 1, 3 and 7 s.
     let dials = relays[0].accepted();
+    assert!(dials >= 2, "{dials} dials in 8 s: the pool did not retry");
     assert!(dials <= 4, "{dials} dials in 8 s");
 }
 
@@ -353,7 +358,7 @@ async fn a_peer_whose_clock_is_behind_still_reaches_us() {
     let relays = relays(1).await;
     let (bob, mut bob_rx) = Pool::open(urls(&relays), 1, &[TAG]);
     eventually("bob connected", || connected_set(&bob).len() == 1).await;
-    time::sleep(Duration::from_millis(200)).await;
+    eventually("bob's subscription arrived", || relays[0].reqs() >= 1).await;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("the clock is after the epoch")
@@ -392,6 +397,7 @@ async fn an_unexplained_closed_backs_off() {
     time::sleep(Duration::from_secs(17)).await;
     // The first REQ, then retries 5 and 10 s apart (at 5 and 15 s).
     let reqs = relays[0].reqs();
+    assert!(reqs >= 2, "{reqs} REQs in 17 s: the pool did not ask again");
     assert!(reqs <= 3, "{reqs} REQs in 17 s");
 }
 
