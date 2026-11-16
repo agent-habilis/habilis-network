@@ -54,17 +54,16 @@ use n0_future::{task as n0future_task, time as n0future_time};
 /// dial: a creator-independent bootstrap that needs no address lookup to
 /// reach the rendezvous.
 ///
-/// Rungs 0..4 are our relays, one URL for each relay process. Rungs 1 and 2
-/// share a host, and each name reaches a relay process of its own, by the
-/// direct path and by the tunnel. That must stay so: iroh opens one relay
-/// session per URL, a dial to a peer homed on another rung opens a session on
-/// that rung too, and a relay drops the older session of an endpoint id, so 2
-/// URLs of one process make an endpoint drop its own session. Rungs 0..2 are
-/// direct: each relay answers QUIC address discovery, so a member
-/// homed on it learns its public address. Rungs 2..4 are tunnels: the tunnel
-/// carries no UDP, so they answer no QUIC address discovery, and an endpoint
-/// that asked them for it would wait 3 s for its first net report. Rungs 4..8
-/// are iroh `defaults::prod`, which are direct.
+/// Rungs 0..3 are our relays, 1 URL for each relay host and path. That must
+/// stay so: iroh opens one relay session per URL, a dial to a peer homed on
+/// another rung opens a session on that rung too, and a relay drops the older
+/// session of an endpoint id, so 2 URLs of one relay process make an endpoint
+/// drop its own session. Rung 0 is direct: it answers QUIC address discovery,
+/// so a member homed on it learns its public address. Rungs 1 and 2 are
+/// tunnels, and a tunnel host has no direct name: the tunnel carries no UDP,
+/// so they answer no QUIC address discovery, and an endpoint that asked them
+/// for it would wait 3 s for its first net report. Rungs 3..7 are iroh
+/// `defaults::prod`, which are direct.
 ///
 /// Hardcoded, **not** `defaults::prod::default_relay_map()`, so members on
 /// different iroh versions still agree on the *same* ladder. Relay infra is
@@ -79,10 +78,6 @@ pub const RENDEZVOUS_RELAY_LADDER: &[DefaultRung] = &[
     // 404s the dotted form (including the /relay websocket upgrade).
     DefaultRung {
         url: "https://nyc-relay1.agent-habilis.com/",
-        path: DIRECT,
-    },
-    DefaultRung {
-        url: "https://nyc-relay2.agent-habilis.com/",
         path: DIRECT,
     },
     DefaultRung {
@@ -1013,7 +1008,6 @@ mod tests {
         let direct = Some(DEFAULT_RELAY_QUIC_PORT);
         let expected = [
             ("https://nyc-relay1.agent-habilis.com/", direct),
-            ("https://nyc-relay2.agent-habilis.com/", direct),
             ("https://nyc-relay2.habilis.network/", None),
             ("https://slz-relay1.habilis.network/", None),
             ("https://use1-1.relay.n0.iroh.link/", direct),
@@ -1166,7 +1160,7 @@ mod tests {
             vec![RENDEZVOUS_RELAY_LADDER_URLS[0].clone()],
             "the relay map of a default peer holds rung 0 alone"
         );
-        let homing = homing.expect("a ladder of 8 rungs has a choice to make");
+        let homing = homing.expect("a ladder of 7 rungs has a choice to make");
         assert_eq!(
             homing.ladder, *RENDEZVOUS_RELAY_LADDER_URLS,
             "the endpoint follows the whole default ladder"

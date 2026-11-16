@@ -261,7 +261,8 @@ Each rung has a `RungPath`: direct or tunnel.
 A direct rung faces the internet and answers QUIC address discovery (QAD) on a UDP port.
 A member homed on a direct rung learns its public address.
 A tunnel rung is behind an HTTP tunnel, which carries no UDP, so it answers no QAD.
-Rungs 0 and 1 are direct, rungs 2 and 3 are tunnels, and the n0 rungs are direct.
+Rung 0 is direct, rungs 1 and 2 are tunnels, and the n0 rungs are direct.
+A tunnel host has no direct name: each relay host and path has 1 URL on the ladder.
 The relay config of a rung asks for QAD only on a direct rung.
 An endpoint that asks a tunnel rung for QAD waits 3 s for its first net report, and has no home relay until then.
 The QAD setting follows the URL.
