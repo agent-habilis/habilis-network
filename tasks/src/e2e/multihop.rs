@@ -12,11 +12,14 @@
 //!
 //! A second cell puts the tab at its cap and lets a native join late. Natives A and C and a tab with a
 //! cap of 2 (`maxConnections=2`) form a mesh: the tab holds sessions with A and C, and its ceiling is
-//! full. A native D joins then. The tab must dial D for nothing (the gates of the ceiling keep a probe
-//! and a courtesy dial away), and a send of the tab to D must take a route of a connected native and
-//! pin D (the debug line `dialing through multihop and pinning the peer` in the tab console). D
-//! answers. Between the join of D and the answer, no dial may evict a connection of the tab: an
-//! eviction that a gossip neighbor causes is the design, and the others are counted.
+//! full. A native D joins then. The tab takes no unit for D: the gates of the ceiling keep a probe and
+//! a courtesy dial away, and a connection or a session of D that no unit can take is an extra, which
+//! counts toward the total cap and not toward the units. A send of the tab to D arrives, and D
+//! answers. The cell reads the mesh census of the tab (`direct_units`, `over_ceiling`): no census
+//! since the join of D may show a unit over the cap. Between the join of D and the answer, no dial
+//! may evict a connection of the tab: an eviction that a gossip neighbor causes is the design, and
+//! the others are counted. The topology snapshot is not readable in the tab, so the cell does not
+//! assert the extra flag of D.
 //!
 //! The deny is on B alone. A tab has no test hook, so T cannot be told to refuse B; it does not
 //! need to be: a session needs both ends, and B answers every offer of T, and makes none, with a
@@ -48,7 +51,6 @@ use tokio::{runtime, time};
 /// on the next tick after that, so a message may wait a few ticks for its route.
 const ROUTE_TIMEOUT: Duration = Duration::from_mins(3);
 
-/// What the tab logs when a dial at its cap takes the route of a connected peer and pins the peer.
 /// What a member logs when it evicts a direct connection at its ceiling, and the cause that a gossip
 /// neighbor leaves on that line.
 const EVICTION_LINE: &str = "evicting a direct connection at the ceiling";
@@ -368,7 +370,7 @@ async fn run_late_member_cell(
     }
     time::sleep(SETTLE).await;
 
-    // The tab sends to D, which it holds no connection to: the dial pins D on a route.
+    // The tab sends to D, which it holds no connection to and takes no unit for.
     let before = forwarded_cells(&alpha).await?;
     let deadline = tokio_Instant::now() + ROUTE_TIMEOUT;
     loop {
