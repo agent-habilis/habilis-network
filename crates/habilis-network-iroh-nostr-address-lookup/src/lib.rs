@@ -24,6 +24,7 @@
 //! ```
 
 use n0_future::time;
+mod admission;
 mod batch;
 mod data_pool;
 mod data_queue;

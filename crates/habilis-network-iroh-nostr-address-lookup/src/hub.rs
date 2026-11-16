@@ -15,6 +15,7 @@ use n0_future::time::{Instant, sleep, timeout};
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
+use crate::admission::{ADMISSION_BYTES, Admission};
 use crate::data_queue::Outgoing;
 use crate::event::Event;
 use crate::lane::Lane;
@@ -250,6 +251,13 @@ impl Lease {
     /// Queue a datagram on the data socket of this relay. It never blocks: a datagram that does
     /// not fit is dropped.
     pub(crate) fn datagram(&self, outgoing: Outgoing) {
+        if !self
+            .connection
+            .datagrams
+            .admit(outgoing.bytes.len(), ADMISSION_BYTES)
+        {
+            return;
+        }
         let _ = self.connection.commands.send(Command::Datagram(outgoing));
     }
 
@@ -272,6 +280,8 @@ impl Drop for Lease {
 struct Conn {
     commands: mpsc::UnboundedSender<Command>,
     health: watch::Receiver<Health>,
+    // Counted by the leases that send, and by the connection task that receives.
+    datagrams: Arc<Admission>,
 }
 
 /// The process-wide table of relay connections of one lane.
@@ -392,9 +402,15 @@ impl Hub {
     fn spawn(&'static self, url: Url) -> Arc<Conn> {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (health_tx, health) = watch::channel(Health::Connecting);
-        task::spawn(run(self, url, receiver, health_tx));
+        // Shared by the leases that send and by the task that receives.
+        let datagrams = Arc::new(Admission::default());
+        task::spawn(run(self, url, receiver, health_tx, Arc::clone(&datagrams)));
         // Shared by every lease of the relay, and by the table that finds it again.
-        Arc::new(Conn { commands, health })
+        Arc::new(Conn {
+            commands,
+            health,
+            datagrams,
+        })
     }
 
     fn set_health(&self, url: &Url, health_tx: &watch::Sender<Health>, health: Health) {
@@ -422,6 +438,8 @@ struct Task {
     url: Url,
     commands: mpsc::UnboundedReceiver<Command>,
     health: watch::Sender<Health>,
+    // The count the leases add to.
+    datagrams: Arc<Admission>,
     subs: HashMap<String, Subscription>,
     rate_limit: Backoff,
     last_limited: Option<Instant>,
@@ -460,8 +478,11 @@ async fn run(
     url: Url,
     commands: mpsc::UnboundedReceiver<Command>,
     health: watch::Sender<Health>,
+    // The count the leases add to.
+    datagrams: Arc<Admission>,
 ) {
     let mut task = Task {
+        datagrams,
         rate_limit: rate_limit(hub.lane()),
         hub,
         url,
@@ -653,6 +674,7 @@ impl Task {
                 return Ok(());
             }
             Command::Datagram(outgoing) => {
+                self.datagrams.release(outgoing.bytes.len());
                 // Data is dropped while the socket dials, and while it is down or limited.
                 let held_back = queued || !self.health.borrow().sendable(Lane::Data);
                 if !held_back {
@@ -814,7 +836,10 @@ impl Task {
                         self.subs.remove(&sub_id);
                     }
                     // Nowhere to send it, or already reconnecting.
-                    Some(Command::Publish(_) | Command::Datagram(_) | Command::Reconnect) => {}
+                    Some(Command::Datagram(outgoing)) => {
+                        self.datagrams.release(outgoing.bytes.len());
+                    }
+                    Some(Command::Publish(_) | Command::Reconnect) => {}
                 },
             }
         }
@@ -877,6 +902,7 @@ mod flow_tests {
     use url::Url;
 
     use super::{Health, Hub, Lease, PROBE_REPLY, RESUBSCRIBE, Task, rate_limit};
+    use crate::admission::Admission;
     use crate::data_queue::Outgoing;
     use crate::event::{Event, Keys};
     use crate::lane::Lane;
@@ -1111,6 +1137,8 @@ mod flow_tests {
         let (health, _health_rx) = watch::channel(Health::Up);
         Task {
             hub,
+            // The count of a task that no lease feeds.
+            datagrams: Arc::new(Admission::default()),
             url: "ws://127.0.0.1:1".parse().expect("a URL"),
             commands,
             health,
@@ -1208,6 +1236,32 @@ mod flow_tests {
         );
         task.health.send_replace(Health::Down);
         assert_eq!(task.pace(), Pace::Held, "down: nothing");
+    }
+
+    /// The same bound at the second stage: a pool that hands datagrams to a lease faster than the
+    /// socket task takes them keeps no more than the bound in the channel of the lease.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_burst_over_the_bound_is_refused_at_the_door_of_the_lease_and_counted() {
+        let relay = TestRelay::spawn().await.expect("spawn test relay");
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let lease: Lease = data_hub()
+            .lease(&relay.url(), "one".into(), filter(), events)
+            .expect("a lease");
+        // The key of a test pool, shared by the datagrams it queues.
+        let keys = Arc::new(Keys::generate());
+        for _ in 0..2_000 {
+            lease.datagram(Outgoing {
+                keys: Arc::clone(&keys),
+                tag: [1u8; 32],
+                from: [2u8; 32],
+                bytes: vec![0u8; 3_840],
+            });
+        }
+        assert!(
+            lease.connection.datagrams.rejected() >= 2_000 - (256 * 1024 / 3_840 + 1),
+            "{} refused of 2000",
+            lease.connection.datagrams.rejected()
+        );
     }
 
     /// After the wait the socket sends one frame, the probe, and no more until the relay

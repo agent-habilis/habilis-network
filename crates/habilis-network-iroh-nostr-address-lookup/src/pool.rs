@@ -18,6 +18,7 @@ use n0_future::time::Instant;
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
+use crate::admission::{ADMISSION_BYTES, Admission};
 use crate::data_queue::Outgoing;
 use crate::event::{Event, Keys, kind_for};
 use crate::hub::{Hub, Lease};
@@ -73,6 +74,8 @@ pub struct Pool {
     // Shared with every datagram the pool queues on a socket task: one key signs them all.
     keys: Arc<Keys>,
     commands: mpsc::UnboundedSender<Command>,
+    // Counted by the pool and by its task, which release a datagram when it leaves the channel.
+    admission: Arc<Admission>,
     connected: watch::Receiver<Vec<Url>>,
     sendable: watch::Receiver<bool>,
     _task: task::AbortOnDropHandle<()>,
@@ -104,7 +107,10 @@ impl Pool {
         if ranking.is_empty() {
             tracing::warn!(target: "habilis_network::lookup", "a pool with no relays reaches no one");
         }
+        // Shared with the chooser in the task, which releases what leaves the channel.
+        let admission = Arc::new(Admission::default());
         let chooser = Chooser {
+            admission: Arc::clone(&admission),
             hub: Hub::of(lane),
             ranking,
             width,
@@ -134,6 +140,7 @@ impl Pool {
             lane,
             keys,
             commands,
+            admission,
             connected,
             sendable,
             _task: task::AbortOnDropHandle::new(task),
@@ -155,12 +162,22 @@ impl Pool {
     /// `from` is written in the header of the batch, for the receiver. Nothing blocks: a datagram
     /// the socket cannot take is dropped. Meant for a pool of [`Lane::Data`].
     pub fn send_datagram(&self, tag: &[u8; 32], from: &[u8; 32], datagram: Vec<u8>) {
+        if !self.admission.admit(datagram.len(), ADMISSION_BYTES) {
+            return;
+        }
         let _ = self.commands.send(Command::Datagram(Outgoing {
             keys: Arc::clone(&self.keys),
             tag: *tag,
             from: *from,
             bytes: datagram,
         }));
+    }
+
+    /// The datagrams refused at the door of the pool: the channel to its task held as many bytes
+    /// as it may, and the datagram was dropped before anything kept its payload.
+    #[must_use]
+    pub fn rejected(&self) -> u64 {
+        self.admission.rejected()
     }
 
     /// The key this pool signs with. Events from it never reach its own
@@ -212,6 +229,8 @@ struct Chooser {
     sent: SentIds,
     /// When each limited relay was last sent a probe copy of a datagram.
     probed: HashMap<Url, Instant>,
+    // The same count as the pool holds.
+    admission: Arc<Admission>,
 }
 
 /// The ids of the last [`SENT_CAPACITY`] events a pool sent. An echo is an
@@ -461,7 +480,10 @@ async fn run(
                     chooser.sent.insert(id);
                     chooser.publish(&tag, &frame);
                 }
-                Some(Command::Datagram(outgoing)) => chooser.datagram(outgoing),
+                Some(Command::Datagram(outgoing)) => {
+                    chooser.admission.release(outgoing.bytes.len());
+                    chooser.datagram(outgoing);
+                }
             },
             delivery = events.recv() => {
                 let Some((relay, event)) = delivery else { return };
@@ -549,6 +571,7 @@ mod tests {
     use url::Url;
 
     use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
 
     use n0_future::time::Instant;
     use tokio::sync::mpsc;
@@ -557,6 +580,7 @@ mod tests {
         Chooser, ECHO_DEADLINE, Event, Filter, Hub, Keys, Lane, Pool, Receipt, SENT_CAPACITY,
         SWALLOW_RECONNECT, SentIds,
     };
+    use crate::admission::Admission;
     use crate::test_relay::TestRelay;
 
     const TAG: [u8; 32] = [3u8; 32];
@@ -701,6 +725,8 @@ mod tests {
             redialed: HashMap::new(),
             sent: SentIds::default(),
             probed: HashMap::new(),
+            // The count of a test chooser, which no pool shares.
+            admission: Arc::new(Admission::default()),
         };
         chooser.choose(&events);
         let overdue = ECHO_DEADLINE + SWALLOW_RECONNECT;

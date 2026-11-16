@@ -110,6 +110,13 @@ async fn both_ends_use_the_first_relay_of_the_ranking() {
     let relays = relays(3).await;
     let alice = node(urls(&relays), ALICE, ALICE_TAG);
     let mut bob = node(urls(&relays), BOB, BOB_TAG);
+    // Each pool dials its relays at once and in no set order. Send only when both hold the first
+    // relay, or a datagram can go out while a pool still has another relay as its first.
+    eventually("both pools hold the first relay first", || {
+        alice.pool.connected().next() == Some(relays[0].url())
+            && bob.pool.connected().next() == Some(relays[0].url())
+    })
+    .await;
     warm_up(&alice, &BOB_TAG, &mut bob).await;
     warm_up(&bob, &ALICE_TAG, &mut { alice }).await;
     assert!(relays[0].events() > 0, "the first relay carried the data");
@@ -252,6 +259,25 @@ async fn every_limited_relay_gets_a_probe_when_none_is_up() {
         relays[1].events() > before_second
     })
     .await;
+}
+
+/// A caller can queue datagrams faster than the sockets take them. On a runtime that does not
+/// run the pool while the caller loops, 2000 datagrams of 3840 bytes would sit in the channel of
+/// the pool: 7.5 MB, and 100000 of them 384 MB. The door of the pool refuses what passes its bound
+/// and counts it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_burst_over_the_bound_is_refused_at_the_door_of_the_pool_and_counted() {
+    let relays = relays(1).await;
+    let alice = node(urls(&relays), ALICE, ALICE_TAG);
+    for _ in 0..2_000 {
+        alice.pool.send(&BOB_TAG, vec![7u8; 3_840]);
+    }
+    let held_at_most = 256 * 1024 / 3_840 + 1;
+    assert!(
+        alice.pool.rejected() >= 2_000 - u64::try_from(held_at_most).unwrap_or(0),
+        "{} refused of 2000",
+        alice.pool.rejected()
+    );
 }
 
 #[tokio::test]

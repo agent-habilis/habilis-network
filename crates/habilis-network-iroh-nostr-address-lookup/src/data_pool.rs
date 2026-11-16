@@ -111,6 +111,14 @@ impl DataPool {
         self.pool.sendable()
     }
 
+    /// The datagrams refused because the sender was ahead of the sockets: dropped at the door of
+    /// the pool, and QUIC sends them again. A burst never holds more than a bounded number of
+    /// bytes in the channels before the queue of the socket.
+    #[must_use]
+    pub fn rejected(&self) -> u64 {
+        self.pool.rejected()
+    }
+
     /// The relays held and connected now, in rank order.
     pub fn connected(&self) -> impl Iterator<Item = Url> + use<> {
         self.pool.connected()
