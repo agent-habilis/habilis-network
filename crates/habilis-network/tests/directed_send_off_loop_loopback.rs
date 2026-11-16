@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{
-    self, Blocking, Inspect, InspectTest, Linking, Membership, Messaging, MessagingTest, Request,
+    self, Blocking, DialHold, Inspect, InspectTest, Linking, Membership, Messaging, MessagingTest,
+    Request,
 };
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -31,11 +32,11 @@ const PREMISE: Duration = Duration::from_secs(1);
 /// How long alice may take to have no pooled connection to bob and no send to bob in flight. A send
 /// in flight ends within the path budget (5 s) after its dial.
 const COLD_TAKES: Duration = Duration::from_secs(15);
-/// The cold send of the dial test joins a send in flight this long after that send started: before
-/// the path budget (5 s) of that send ends.
-const JOIN_AFTER: Duration = Duration::from_secs(4);
-/// A cold send that dials on its own waits at least the path budget (5 s). A send that joins a dial
-/// in flight ends when that dial ends, about 1 s after it joined.
+/// How long the first send may take to reach the hold of its outcome: its dial and its path budget
+/// (5 s), and a margin.
+const HOLD_REACHED: Duration = Duration::from_secs(15);
+/// A cold send that dials on its own waits at least the path budget (5 s). A send that joins the held
+/// dial ends at once when the hold is released.
 const OWN_DIAL: Duration = Duration::from_secs(3);
 /// How long iroh may take to re-run path selection after the block. It reads the path list on its
 /// path-stat updates, which come within a few seconds.
@@ -211,6 +212,20 @@ impl Member {
             .expect("alice knows bob");
     }
 
+    /// Hold the outcome of the next dial to `peer`: see [`Linking::HoldDialOutcome`].
+    async fn hold_dial_outcome(&self, peer: &str) -> DialHold {
+        self.membership
+            .request(|reply| {
+                Request::Linking(Linking::HoldDialOutcome {
+                    peer: peer.to_owned(),
+                    reply,
+                })
+            })
+            .await
+            .expect("the loop answers")
+            .expect("alice knows bob")
+    }
+
     /// Whether a send to `peer` has a dial or a path wait in flight: see [`InspectTest::DialInFlight`].
     async fn dial_in_flight(&self, peer: &str) -> bool {
         self.membership
@@ -314,8 +329,10 @@ fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
 /// A cold send that registers while another send to bob waits on its path takes the outcome of
 /// that send when it ends, and waits only for the rest of its path budget. The dial test above
 /// must not meet that case, or it proves nothing: it waits until alice has no send to bob in
-/// flight. Here a first send is in flight when the second one starts, and the wait makes the
-/// second one dial on its own.
+/// flight. Here the first send holds its outcome after its path wait, so it is in flight when the
+/// second send starts, for as long as the test wants and with no clock window. The hold is
+/// released after the second send reached the loop, and the wait makes the second send dial on
+/// its own.
 #[test]
 fn a_cold_send_after_a_send_in_flight_dials_on_its_own() {
     let guard = habilis_network_test_tracing::init();
@@ -328,14 +345,28 @@ fn a_cold_send_after_a_send_in_flight_dials_on_its_own() {
         alice.cut_ip_to("bob", &bob).await;
         alice.until_send_is_cold("bob").await;
 
+        let (reached, release) = alice.hold_dial_outcome("bob").await;
         let first = alice.send_cold("bob", "first");
         let second = async {
-            time::sleep(JOIN_AFTER).await;
+            time::timeout(HOLD_REACHED, reached)
+                .await
+                .expect("the first send reaches the hold of its outcome")
+                .expect("the hold stays set until the first send reaches it");
             let joined = alice.dial_in_flight("bob").await;
-            alice.until_send_is_cold("bob").await;
-            let started = Instant::now();
-            let verdict = alice.send_cold("bob", "second").await;
-            (joined, verdict, started.elapsed())
+            let send = async {
+                alice.until_send_is_cold("bob").await;
+                let started = Instant::now();
+                let verdict = alice.send_cold("bob", "second").await;
+                (verdict, started.elapsed())
+            };
+            // The release asks the loop once before it lets the first send go on. The join is
+            // biased, so the first request of the second send reaches the loop before that one.
+            let release_after_send = async {
+                let _ = alice.dial_in_flight("bob").await;
+                let _ = release.send(());
+            };
+            let ((verdict, took), ()) = tokio::join!(biased; send, release_after_send);
+            (joined, verdict, took)
         };
         let (first_verdict, (joined, second_verdict, second_took)) = tokio::join!(first, second);
 

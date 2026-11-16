@@ -36,6 +36,8 @@ use std::sync::{Mutex as std_Mutex, OnceLock, OnceLock as std_OnceLock};
 use std::{fmt, result};
 #[cfg(test)]
 use tokio::sync::Notify;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use tokio::sync::oneshot;
 #[derive(Clone)]
 pub(crate) struct UnicastPool {
     // the pool and its clones share the inner state
@@ -51,6 +53,11 @@ impl fmt::Debug for UnicastPool {
 /// The dial locks of the peers that are being dialed.
 // shared: the map and the turn of each dial hold the lock of a peer
 type DialLocks = HashMap<EndpointId, Arc<Mutex<()>>>;
+
+/// A held outcome of a dial: the peer, the sender that says the dialer holds, and the receiver
+/// that lets it go on.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+type OutcomeHold = (EndpointId, oneshot::Sender<()>, oneshot::Receiver<()>);
 
 /// Why a pooled connection is held, which decides when it closes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +130,10 @@ pub(in crate::transport::pool) struct PoolInner {
     #[cfg(test)]
     // the gate is shared by the dial and the test that holds it
     pub(in crate::transport::pool) dial_gate: std_Mutex<Option<Arc<Notify>>>,
+    /// Tests only: the dialer of this peer holds its outcome here, after its dial and its path
+    /// wait and before it publishes, so a test can line up a second send with a dial in flight.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(in crate::transport::pool) outcome_hold: std_Mutex<Option<OutcomeHold>>,
     /// Each peer's full address, from its `PeerInfo`. Dialed instead of the
     /// bare id so the relay is in the address book before the handshake:
     /// iroh opens a connection's relay path only then, and with it a UDP loss
@@ -183,6 +194,8 @@ impl UnicastPool {
                 addrs: std_Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 dial_gate: std_Mutex::new(None),
+                #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+                outcome_hold: std_Mutex::new(None),
                 relay_transport,
                 admission: std_OnceLock::new(),
                 tally: std_OnceLock::new(),
@@ -252,6 +265,8 @@ impl UnicastPool {
                 addrs: std_Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 dial_gate: std_Mutex::new(None),
+                #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+                outcome_hold: std_Mutex::new(None),
                 relay_transport: false,
                 admission: OnceLock::new(),
                 tally: std_OnceLock::new(),
@@ -619,6 +634,8 @@ impl UnicastPool {
             match registration {
                 Registration::Dialer(in_flight) => {
                     let outcome = self.dial_and_send(eid, bytes).await;
+                    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+                    self.wait_outcome_hold(eid).await;
                     in_flight.publish(match &outcome {
                         Ok(()) => Ok(()),
                         Err(error) => Err(error.to_string()),
@@ -634,6 +651,38 @@ impl UnicastPool {
                     }
                 }
             }
+        }
+    }
+
+    /// Tests only: hold the outcome of the next dial of `eid`, after its dial and its path wait and
+    /// before it is published. The first receiver resolves once the dialer holds; the dialer goes
+    /// on once the second sender sends or is dropped.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) fn hold_next_outcome(
+        &self,
+        eid: EndpointId,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached_tx, reached) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        if let Ok(mut slot) = self.inner.outcome_hold.lock() {
+            *slot = Some((eid, reached_tx, release_rx));
+        }
+        (reached, release)
+    }
+
+    /// Wait on the hold of [`Self::hold_next_outcome`], if one is set for `eid`.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    async fn wait_outcome_hold(&self, eid: EndpointId) {
+        let held: Option<OutcomeHold> = self.inner.outcome_hold.lock().ok().and_then(|mut slot| {
+            if slot.as_ref().is_some_and(|(peer, _, _)| *peer == eid) {
+                slot.take()
+            } else {
+                None
+            }
+        });
+        if let Some((_, reached, release)) = held {
+            let _ = reached.send(());
+            let _ = release.await;
         }
     }
 
