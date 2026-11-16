@@ -234,6 +234,12 @@ fn is_pinned_at_the_ceiling(snapshot: &TopologySnapshot, nick: &str) -> bool {
 /// How long the ledger may take to settle after the first frame of a send.
 const LABEL_DEADLINE: Duration = Duration::from_secs(30);
 
+/// How long the ledger of alice is watched once her view and her route are in place. A dial for the
+/// new member (a `PeerInfo` dial, a probe, a courtesy dial) starts within seconds of the roster
+/// entry, and no state shows that none will come, so the absence of a dial needs a window. The
+/// ledger is read every 500 ms in it, and a connection beyond the units fails the run at once.
+const WATCH: Duration = Duration::from_secs(10);
+
 /// Why the ledger of a node at its cap of 2 holds a connection beyond its units, or `None` when it
 /// holds none: no unit over the cap, no peer with a connection or a session that took no unit, and
 /// no peer connected besides the units. A dial for the new member (a `PeerInfo` dial, a probe, a
@@ -325,6 +331,14 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
             );
             time::sleep(Duration::from_millis(500)).await;
         };
+        let watching_since = Instant::now();
+        while watching_since.elapsed() < WATCH {
+            let snapshot = alice.snapshot().await;
+            if let Some(why) = beyond_the_units(&snapshot) {
+                panic!("alice holds a connection for the new member: {why}");
+            }
+            time::sleep(Duration::from_millis(500)).await;
+        }
         let logs = habilis_network_test_tracing::captured_logs();
         // A new gossip neighbor takes the unit of a cached peer: that eviction is the design. An
         // eviction that a connection or a session caused is a dial that took a unit at the cap.
