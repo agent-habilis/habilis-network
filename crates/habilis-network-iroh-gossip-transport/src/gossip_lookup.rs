@@ -34,7 +34,10 @@ impl AddressLookup for GossipLookup {
         }
         let info = EndpointInfo::from_parts(
             endpoint_id,
-            EndpointData::from_iter([TransportAddr::Custom(crate::gossip_addr(endpoint_id))]),
+            EndpointData::from_iter([TransportAddr::Custom(crate::transport_addr(
+                self.shared.transport_id,
+                endpoint_id,
+            ))]),
         );
         Some(Box::pin(stream::once(Ok(Item::new(
             info, PROVENANCE, None,

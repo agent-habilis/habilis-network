@@ -33,6 +33,8 @@ pub(crate) struct Packet {
 #[derive(Debug)]
 pub(crate) struct Shared {
     pub(crate) app_id: EndpointId,
+    /// The id of the custom transport this core serves: it names every address.
+    pub(crate) transport_id: u64,
     pub(crate) local_addr: CustomAddr,
     // trait object: the sink is installed at run time
     pub(crate) sink: Mutex<Option<Arc<dyn FrameSink>>>,

@@ -25,7 +25,7 @@ use crate::counters::{Counters, Stats};
 use crate::delivery::Delivery;
 use crate::frame_sink::FrameSink;
 use crate::shared::{INBOUND_CAP, Packet, Shared, locked};
-use crate::{frame, gossip_addr, parse_gossip_addr};
+use crate::{GOSSIP_TRANSPORT_ID, frame, parse_transport_addr, transport_addr};
 
 use iroh::endpoint::transports;
 
@@ -59,10 +59,20 @@ impl GossipHandle {
     /// A handle with no sink. The path is not valid until `attach` is called.
     #[must_use]
     pub fn new(app_id: EndpointId) -> Self {
+        Self::with_transport_id(app_id, GOSSIP_TRANSPORT_ID)
+    }
+
+    /// A handle with no sink for the custom transport `transport_id`: the core that
+    /// frames, budgets, counts and delivers is the same for every frame transport,
+    /// and the id is the one thing that names which transport it serves. The sink
+    /// that `attach` takes is the other.
+    #[must_use]
+    pub fn with_transport_id(app_id: EndpointId, transport_id: u64) -> Self {
         // shared by the handle, the transport and the receive task
         let shared = Arc::new(Shared {
             app_id,
-            local_addr: gossip_addr(app_id),
+            transport_id,
+            local_addr: transport_addr(transport_id, app_id),
             sink: Mutex::new(None),
             attached: AtomicBool::new(false),
             blocked: Mutex::new(HashSet::new()),
@@ -225,7 +235,7 @@ impl GossipHandle {
             return Delivery::NotForUs;
         }
         let packet = Packet {
-            remote: gossip_addr(frame.src),
+            remote: transport_addr(self.shared.transport_id, frame.src),
             bytes: frame.datagram.to_vec(),
         };
         if self.inbound.try_send(packet).is_err() {
@@ -337,7 +347,8 @@ impl CustomSender for GossipSender {
     /// Valid only for a gossip address, and only while a sink is attached: a path
     /// that cannot carry a packet must not be selected.
     fn is_valid_send_addr(&self, address: &CustomAddr) -> bool {
-        parse_gossip_addr(address).is_some() && self.shared.path_is_valid()
+        parse_transport_addr(self.shared.transport_id, address).is_some()
+            && self.shared.path_is_valid()
     }
 
     fn poll_send(
@@ -347,8 +358,8 @@ impl CustomSender for GossipSender {
         _src: Option<&CustomAddr>,
         transmit: &Transmit<'_>,
     ) -> Poll<io::Result<()>> {
-        let Some(dst) = parse_gossip_addr(dst) else {
-            return Poll::Ready(Err(io::Error::other("not a gossip address")));
+        let Some(dst) = parse_transport_addr(self.shared.transport_id, dst) else {
+            return Poll::Ready(Err(io::Error::other("not an address of this transport")));
         };
         // A GSO batch is several datagrams; each is one QUIC packet and one frame.
         for datagram in habilis_network_iroh_transport_util::datagrams(transmit) {
@@ -372,12 +383,12 @@ mod tests {
 
     use super::{
         Arc, Context, CustomTransport, Delivery, EndpointId, FrameSink, GossipHandle, Mutex,
-        Ordering, Poll, RecvInfo, gossip_addr, io,
+        Ordering, Poll, RecvInfo, io,
     };
     use crate::frame::Frame;
     use crate::hub::Hub;
     use crate::shared::{INBOUND_CAP, locked};
-    use crate::{GOSSIP_TRANSPORT_ID, frame};
+    use crate::{GOSSIP_TRANSPORT_ID, NOSTR_TRANSPORT_ID, frame, gossip_addr, transport_addr};
 
     use iroh::endpoint::{Connection, Connection as iroh_Connection};
     use std::{panic, task};
@@ -513,6 +524,57 @@ mod tests {
         assert!(sender.is_valid_send_addr(&to_bob), "after attach");
         handle.detach();
         assert!(!sender.is_valid_send_addr(&to_bob), "after detach");
+    }
+
+    /// The core takes its transport id as a parameter: a handle made for the Nostr id
+    /// names and reads Nostr addresses, and refuses a gossip address.
+    #[test]
+    fn a_handle_for_another_transport_id_speaks_that_id_only() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = secret(1).public();
+        let handle = GossipHandle::with_transport_id(me, NOSTR_TRANSPORT_ID);
+        let mut endpoint = handle.transport.bind().expect("bind");
+        let sender = endpoint.create_sender();
+        let to_bob = secret(2).public();
+        // the test reads the recorder after the handle takes a clone
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(Arc::clone(&recorder));
+
+        assert!(
+            sender.is_valid_send_addr(&transport_addr(NOSTR_TRANSPORT_ID, to_bob)),
+            "a Nostr address is valid for a Nostr handle"
+        );
+        assert!(
+            !sender.is_valid_send_addr(&gossip_addr(to_bob)),
+            "a gossip address is not valid for a Nostr handle"
+        );
+        handle.shared.send_datagram(to_bob, &[1u8; 10]);
+        assert_eq!(locked(&recorder.0).len(), 1, "the datagram is framed");
+
+        let from_bob = (Frame {
+            dst: me,
+            src: to_bob,
+            datagram: &[5u8; 100],
+        })
+        .encode()
+        .expect("a frame");
+        assert_eq!(handle.deliver(&from_bob), Delivery::Queued, "accepted");
+        // the Wake contract hands the waker out as an Arc
+        let waker = Arc::new(CountingWaker::default());
+        let std_waker = task::Waker::from(Arc::clone(&waker));
+        let mut cx = Context::from_waker(&std_waker);
+        let mut storage = [0u8; 2048];
+        let mut bufs = [io::IoSliceMut::new(&mut storage)];
+        let mut metas = [noq_udp::RecvMeta::default()];
+        let mut infos = [RecvInfo::new(transport_addr(NOSTR_TRANSPORT_ID, me), None)];
+        let read = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);
+        assert!(matches!(read, Poll::Ready(Ok(1))), "{read:?}");
+        let expected = format!("{:?}", transport_addr(NOSTR_TRANSPORT_ID, to_bob));
+        assert!(
+            format!("{:?}", infos[0]).contains(&expected),
+            "the packet comes from a Nostr address: {:?}",
+            infos[0]
+        );
     }
 
     #[test]
