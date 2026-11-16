@@ -3,13 +3,15 @@
 //! wasm phase.
 
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use futures_util::{SinkExt as _, StreamExt as _, stream};
+use n0_future::time;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_websockets::{ClientBuilder, Limits, Message, WebSocketStream};
-use url::Url;
+use url::{Host, Url};
 
 use rustls::crypto::ring;
 /// A plain or TLS stream behind one type, so the socket type does not depend on
@@ -24,14 +26,24 @@ type Socket = WebSocketStream<Box<dyn Io>>;
 /// socket is dropped, rather than the frame buffered.
 const MAX_FRAME: usize = 128 * 1024;
 
+/// A write that takes longer than this means the relay has stopped reading. The
+/// task that awaits it takes no command meanwhile, so it must give up and let
+/// the caller reconnect.
+const WRITE_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(1)
+} else {
+    Duration::from_secs(10)
+};
+
 pub(crate) struct Sender(stream::SplitSink<Socket, Message>);
 pub(crate) struct Receiver(stream::SplitStream<Socket>);
 
 impl Sender {
     pub(crate) async fn send(&mut self, text: String) -> Result<()> {
-        self.0
-            .send(Message::text(text))
+        let write = self.0.send(Message::text(text));
+        time::timeout(WRITE_TIMEOUT, write)
             .await
+            .context("websocket send timed out")?
             .context("websocket send")
     }
 
@@ -57,7 +69,14 @@ impl Receiver {
 }
 
 pub(crate) async fn connect(url: &Url) -> Result<(Sender, Receiver)> {
-    let host = url.host_str().context("relay URL has no host")?.to_owned();
+    // `host_str` keeps the brackets of an IPv6 literal, which no socket address
+    // and no TLS name takes.
+    let parsed_host = url.host().context("relay URL has no host")?;
+    let host = match parsed_host {
+        Host::Domain(name) => name.to_owned(),
+        Host::Ipv4(address) => address.to_string(),
+        Host::Ipv6(address) => address.to_string(),
+    };
     let port = url
         .port_or_known_default()
         .context("relay URL has no port")?;
@@ -108,4 +127,70 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
         // The connectors share the config, so it lives behind a handle.
         Arc::new(config)
     }))
+}
+
+#[cfg(all(test, feature = "test-relay"))]
+mod tests {
+    use std::future;
+    use std::time::Duration;
+
+    use tokio::net::TcpListener;
+    use tokio::time;
+    use tokio_websockets::ServerBuilder;
+    use url::Url;
+
+    /// A server that finishes the handshake, then never reads again.
+    async fn accept_and_stall(listener: TcpListener) {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let Ok((_request, _socket)) = ServerBuilder::new().accept(stream).await else {
+            return;
+        };
+        let () = future::pending().await;
+    }
+
+    /// A relay that stops reading leaves the write pending for good, and the
+    /// task that awaits it cannot take a `Reconnect`. The write gives up.
+    #[tokio::test]
+    async fn a_write_to_a_relay_that_stops_reading_gives_up() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("a local address");
+        let stalled = tokio::spawn(accept_and_stall(listener));
+        let url: Url = format!("ws://{address}").parse().expect("a valid URL");
+        let (mut sender, _receiver) = super::connect(&url).await.expect("the handshake works");
+
+        let fill = async {
+            loop {
+                if sender.send("x".repeat(60_000)).await.is_err() {
+                    return;
+                }
+            }
+        };
+        let outcome = time::timeout(Duration::from_secs(15), fill).await;
+        stalled.abort();
+        assert!(
+            outcome.is_ok(),
+            "the write waited 15 s on a relay that reads nothing"
+        );
+    }
+
+    /// `host_str` keeps the brackets of an `IPv6` literal, which no socket
+    /// address takes: the dial uses the address inside them.
+    #[tokio::test]
+    async fn a_bracketed_ipv6_relay_dials() {
+        let Ok(listener) = TcpListener::bind("[::1]:0").await else {
+            return;
+        };
+        let address = listener.local_addr().expect("a local address");
+        let stalled = tokio::spawn(accept_and_stall(listener));
+        let url: Url = format!("ws://{address}").parse().expect("a valid URL");
+        let dialed = super::connect(&url).await;
+        stalled.abort();
+        assert!(
+            dialed.is_ok(),
+            "an IPv6 literal URL dials: {:?}",
+            dialed.err()
+        );
+    }
 }
