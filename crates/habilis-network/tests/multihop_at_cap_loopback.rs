@@ -343,7 +343,7 @@ fn assert_far_is_pinned_through_hub(snapshot: &TopologySnapshot, far: &str, hub:
         "alice is at its cap and not over it: {snapshot:?}"
     );
     assert_eq!(
-        (snapshot.quic_connections, snapshot.quic_cap),
+        (snapshot.connected_peers, snapshot.connected_cap),
         (3, 4),
         "the pinned connection counts toward 2N: {snapshot:?}"
     );

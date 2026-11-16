@@ -26,8 +26,8 @@ use crate::transport::probe::PathKind;
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct TopologySnapshot {
-    /// The endpoint id of this node, in hex.
-    pub self_id: String,
+    /// The endpoint id of this node, in hex, or `None` while the admission table does not know it.
+    pub self_id: Option<String>,
     /// The cap on the direct connections of the node.
     pub max_connections: usize,
     /// The units of the ceiling now: a gossip neighbor, a session and a connection to one peer
@@ -35,10 +35,11 @@ pub struct TopologySnapshot {
     pub direct_units: usize,
     /// How many units the count is over the ceiling by.
     pub over_ceiling: usize,
-    /// The QUIC connections that the node holds in all.
-    pub quic_connections: usize,
-    /// The cap on the QUIC connections in all.
-    pub quic_cap: usize,
+    /// The peers that the node holds a connection, a session or a gossip link to, units and extras
+    /// together.
+    pub connected_peers: usize,
+    /// The cap on the connected peers in all.
+    pub connected_cap: usize,
     /// Every peer that the node holds a connection, a session or a gossip link to.
     pub peers: Vec<PeerLink>,
     /// The multihop link-state graph, or `None` when multihop is off.
@@ -58,14 +59,14 @@ impl EventLoopState {
             .into_iter()
             .map(|id| self.peer_link(id, &ledger))
             .collect();
-        let self_id: String = ledger.local.map(|id| id.to_string()).unwrap_or_default();
+        let self_id: Option<String> = ledger.local.map(|id| id.to_string());
         TopologySnapshot {
             self_id,
             max_connections: ledger.cap,
             direct_units: ledger.units,
             over_ceiling: ledger.over_ceiling,
-            quic_connections: ledger.connections,
-            quic_cap: ledger.total_cap,
+            connected_peers: ledger.connections,
+            connected_cap: ledger.total_cap,
             peers,
             graph: self.graph(),
         }
@@ -95,6 +96,7 @@ impl EventLoopState {
             via,
             neighbor: self.linked_endpoints.contains(&peer),
             pinned: ledger.pinned.contains(&peer),
+            extra: ledger.extras.contains(&peer),
         }
     }
 
@@ -108,8 +110,9 @@ impl EventLoopState {
         None
     }
 
-    /// The first hop of the multihop route to `peer`, in hex. Without multihop no path is a
-    /// multihop path, so there is none.
+    /// The first hop of the multihop route that the topology gives for `peer` now, in hex. It is
+    /// the route a send would take, not a reading of the path in use. Without multihop there is
+    /// none.
     fn first_hop(&self, peer: EndpointId) -> Option<String> {
         #[cfg(feature = "multihop")]
         {
@@ -181,7 +184,7 @@ mod tests {
             "the cap is the default"
         );
         assert_eq!(
-            snapshot.quic_cap,
+            snapshot.connected_cap,
             2 * MAX_CONNECTIONS,
             "the total cap is twice the cap"
         );
@@ -204,6 +207,43 @@ mod tests {
         assert!(carol_link.nickname.is_none(), "carol has no nickname yet");
         assert!(carol_link.via.is_none(), "an ip path has no first hop");
         assert!(!carol_link.pinned, "carol is not pinned");
+        assert!(!carol_link.extra, "carol holds a unit");
+    }
+
+    /// A session that no unit could take is an extra: it counts toward the total cap and not
+    /// toward the units, and the snapshot flags that peer alone.
+    #[test]
+    fn a_session_above_a_full_ceiling_is_flagged_as_an_extra() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        for seed in 1..=u8::try_from(MAX_CONNECTIONS).expect("a small cap") {
+            state.link(endpoint_id(seed));
+        }
+        let extra = endpoint_id(200);
+        state.webrtc_admission.note_success(extra);
+
+        let snapshot = state.topology_snapshot();
+
+        assert_eq!(
+            snapshot.direct_units, MAX_CONNECTIONS,
+            "the neighbors fill the ceiling: {snapshot:?}"
+        );
+        assert_eq!(
+            snapshot.connected_peers,
+            MAX_CONNECTIONS + 1,
+            "the extra counts toward the total cap: {snapshot:?}"
+        );
+        let flagged: Vec<&str> = snapshot
+            .peers
+            .iter()
+            .filter(|peer| peer.extra)
+            .map(|peer| peer.endpoint.as_str())
+            .collect();
+        assert_eq!(
+            flagged,
+            [extra.to_string().as_str()],
+            "only the session that took no unit is an extra"
+        );
     }
 
     #[test]

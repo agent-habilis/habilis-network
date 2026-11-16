@@ -21,4 +21,6 @@ pub(crate) struct LedgerView {
     pub(crate) session_peers: Vec<EndpointId>,
     /// The pinned peers that hold their connection.
     pub(crate) pinned: Vec<EndpointId>,
+    /// The peers whose connection or session took no unit: they count toward `2C` only.
+    pub(crate) extras: Vec<EndpointId>,
 }

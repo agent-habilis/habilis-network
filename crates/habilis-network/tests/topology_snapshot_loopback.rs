@@ -119,7 +119,7 @@ fn the_snapshot_of_a_member_names_its_peers_units_cap_and_graph() {
         };
 
         assert!(
-            !snapshot.self_id.is_empty(),
+            snapshot.self_id.is_some(),
             "the snapshot names the endpoint of alice"
         );
         assert_eq!(
@@ -127,9 +127,9 @@ fn the_snapshot_of_a_member_names_its_peers_units_cap_and_graph() {
             "the snapshot reports the cap that alice was made with"
         );
         assert_eq!(
-            snapshot.quic_cap,
+            snapshot.connected_cap,
             2 * MAX_CONNECTIONS,
-            "the total cap of QUIC connections is twice the cap"
+            "the total cap of connected peers is twice the cap"
         );
         assert_eq!(
             snapshot.peers.len(),

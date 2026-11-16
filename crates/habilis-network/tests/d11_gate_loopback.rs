@@ -224,13 +224,13 @@ fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
         let started = Instant::now();
         loop {
             let snapshot = alice.snapshot().await;
-            if snapshot.quic_connections <= 2 && snapshot.direct_units <= 2 {
+            if snapshot.connected_peers <= 2 && snapshot.direct_units <= 2 {
                 break;
             }
             assert!(
                 started.elapsed() < EXTRA_DEADLINE,
                 "alice still holds {} connections and {} units {EXTRA_DEADLINE:?} after the last send",
-                snapshot.quic_connections,
+                snapshot.connected_peers,
                 snapshot.direct_units
             );
             time::sleep(Duration::from_millis(500)).await;
