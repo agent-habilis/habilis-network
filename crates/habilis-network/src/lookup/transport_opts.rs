@@ -259,6 +259,6 @@ impl TransportOpts {
     /// browser: only a data channel or relay payload can.
     #[must_use]
     pub fn carry_without_udp(self, policy: &TransportPolicy) -> bool {
-        self.webrtc || policy.allows(Transport::Relay)
+        self.webrtc || self.nostr.is_on() || policy.allows(Transport::Relay)
     }
 }

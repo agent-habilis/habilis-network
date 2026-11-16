@@ -120,6 +120,43 @@ async fn a_relayless_webrtc_endpoint_binds() {
     endpoint.close().await;
 }
 
+/// A browser endpoint whose only transport is Nostr: no relay, no IP, no data channel. It must
+/// bind, and a mesh that lists Nostr must count it as a way to carry payload without UDP.
+#[wasm_bindgen_test]
+async fn a_nostr_only_browser_endpoint_binds_and_carries() {
+    use habilis_network::iroh::SecretKey;
+    use habilis_network::net::{TransportHandles, TransportOpts, build_endpoint};
+    use habilis_network::protocol::meshes::NostrChoice;
+    use habilis_network::protocol::{LookupOpts, TransportPolicy};
+    use habilis_network_iroh_nostr_transport::NostrTransport;
+
+    let key = SecretKey::generate();
+    let custom = "wss://relay.example".parse().expect("a relay URL");
+    let lookups = LookupOpts::loopback().nostr(NostrChoice::Custom(vec![custom]));
+    let mut transports = TransportHandles::default();
+    transports.nostr = Some(NostrTransport::new(key.public()));
+    transports.options = TransportOpts::default()
+        .udp(false)
+        .relay(false)
+        .webrtc(false)
+        .gossip(false)
+        .nostr(true);
+    let endpoint = build_endpoint(&lookups, Some(key), None, Vec::new(), transports)
+        .await
+        .expect("a Nostr-only endpoint binds");
+    endpoint.close().await;
+
+    let policy = TransportPolicy::default().nostr_transport(true);
+    let opts = TransportOpts::default()
+        .udp(false)
+        .webrtc(false)
+        .within(&policy);
+    assert!(
+        opts.carry_without_udp(&policy),
+        "a browser carries payload over Nostr when the mesh lists it"
+    );
+}
+
 /// A tab has no UDP socket, whatever the mesh's list allows. The paths a node
 /// runs come from `within`, so it must say so there: code that reads
 /// `TransportOpts::udp` then needs no browser special case.

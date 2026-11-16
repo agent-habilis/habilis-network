@@ -484,13 +484,15 @@ fn reaches_relay(lookups: &LookupOpts, transports: lookup::TransportOpts) -> boo
     lookups.relay_lookup != RelayChoice::Disabled && transports.relay
 }
 
-/// Whether a node without UDP can reach a peer at all: over the relay, or over a data channel that
-/// Nostr opens with no relay. Nostr alone is not enough: it only signals, so a node with no data
+/// Whether a node without UDP can reach a peer at all: over the relay, over a data channel that
+/// Nostr opens with no relay, or over the Nostr transport itself (the mesh lists it, so it has a
+/// custom list). Nostr alone is not enough: it only signals, so a node with no data
 /// channel gets nothing from it. Whether the mesh lets payload ride the path is the accept gate's
 /// call at runtime, as for the relay.
 fn reaches_without_udp(lookups: &LookupOpts, transports: lookup::TransportOpts) -> bool {
     reaches_relay(lookups, transports)
         || (lookups.nostr != NostrChoice::Disabled && transports.webrtc)
+        || transports.nostr.is_on()
 }
 
 /// Whether a node without UDP has a path for the JSEP that opens its data
@@ -3411,6 +3413,40 @@ mod tests {
         assert!(
             super::member_transports(&relay_lookup, relay_only, &policy).is_ok(),
             "the relay reaches a peer for a node with no data channel"
+        );
+    }
+
+    // The Nostr transport carries a node with no UDP, no relay and no data channel: a mesh that
+    // lists it with a custom list is reachable that way. The same node on a mesh that does not
+    // list it reaches nobody, and a node that turned the transport off does too.
+    #[test]
+    fn a_node_without_udp_relay_or_webrtc_is_accepted_when_the_mesh_lists_nostr() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let custom: url::Url = "wss://relay.example".parse().expect("a relay URL");
+        let lookups = LookupOpts::loopback().nostr(NostrChoice::Custom(vec![custom]));
+        let with_nostr = TransportPolicy::default().nostr_transport(true);
+        let without = TransportPolicy::default();
+        let bare = lookup::TransportOpts {
+            webrtc: false,
+            relay: false,
+            ..lookup::TransportOpts::webrtc_only()
+        };
+        assert!(
+            super::member_transports(&lookups, bare, &with_nostr).is_ok(),
+            "Nostr carries the node: no UDP, no relay and no data channel is enough"
+        );
+        assert!(
+            super::member_transports(&lookups, bare, &without).is_err(),
+            "a mesh that does not list Nostr gives such a node no path"
+        );
+        let carries = |policy: &TransportPolicy| {
+            let options = lookup::TransportOpts::default().udp(false).webrtc(false);
+            options.within(policy).carry_without_udp(policy)
+        };
+        assert!(carries(&with_nostr), "a browser carries payload over Nostr");
+        assert!(
+            !carries(&without),
+            "and carries none when the mesh does not list it"
         );
     }
 
