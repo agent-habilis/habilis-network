@@ -234,9 +234,30 @@ fn is_pinned_at_the_ceiling(snapshot: &TopologySnapshot, nick: &str) -> bool {
 /// How long the ledger may take to settle after the first frame of a send.
 const LABEL_DEADLINE: Duration = Duration::from_secs(30);
 
-/// How long alice has to dial the new member, if the engine dials it. The `PeerInfo` dial, the
-/// probes and the courtesy dials all start within seconds of the roster entry.
-const SETTLE: Duration = Duration::from_secs(30);
+/// Why the ledger of a node at its cap of 2 holds a connection beyond its units, or `None` when it
+/// holds none: no unit over the cap, no peer with a connection or a session that took no unit, and
+/// no peer connected besides the units. A dial for the new member (a `PeerInfo` dial, a probe, a
+/// courtesy dial) would take a third unit, or it would leave an extra.
+fn beyond_the_units(snapshot: &TopologySnapshot) -> Option<String> {
+    let extras: Vec<&str> = snapshot
+        .peers
+        .iter()
+        .filter(|link| link.extra)
+        .map(|link| link.endpoint.as_str())
+        .collect();
+    let held = (
+        snapshot.direct_units,
+        snapshot.over_ceiling,
+        snapshot.connected_peers,
+    );
+    if held == (2, 0, 2) && extras.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "units, over the cap and connected peers are {held:?}, extras {extras:?}: {snapshot:?}"
+        ))
+    }
+}
 
 #[test]
 fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
@@ -276,14 +297,34 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
         );
         habilis_network_test_tracing::allow_warn(STUCK_TARGET, STUCK_TEXT);
         habilis_network_test_tracing::allow_warn(STUCK_TARGET, RELAY_CELL_TEXT);
-        time::sleep(SETTLE).await;
 
-        let settled = alice.snapshot().await;
-        assert_eq!(
-            (settled.direct_units, settled.over_ceiling),
-            (2, 0),
-            "alice took a third unit for the new member: {settled:?}"
-        );
+        // The state to wait for is the one in which alice has done all that she does for the new
+        // member: her gossip view holds 2 of the 3 others, and her topology holds a route to the
+        // third. The ledger is read at each step of the wait, so a dial that takes a unit, or leaves
+        // an extra, fails the run when it happens and not only at the end.
+        let waiting_since = Instant::now();
+        let target: String = loop {
+            let snapshot = alice.snapshot().await;
+            if let Some(why) = beyond_the_units(&snapshot) {
+                panic!("alice holds a connection for the new member: {why}");
+            }
+            let neighbors = neighbor_nicks(&snapshot);
+            let others = ["bob", "carol", "dave"]
+                .into_iter()
+                .filter(|nick| !neighbors.contains(nick));
+            let others: Vec<&str> = others.collect();
+            if let [only] = others[..]
+                && alice.has_route(only).await
+            {
+                break only.to_owned();
+            }
+            assert!(
+                waiting_since.elapsed() < STEP_DEADLINE,
+                "alice never held a view of 2 neighbors and a route to the third: {}",
+                counters_of(&[("alice", &alice)]).await
+            );
+            time::sleep(Duration::from_millis(500)).await;
+        };
         let logs = habilis_network_test_tracing::captured_logs();
         // A new gossip neighbor takes the unit of a cached peer: that eviction is the design. An
         // eviction that a connection or a session caused is a dial that took a unit at the cap.
@@ -297,16 +338,8 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
             );
         }
 
-        // The peer of the test is one that alice holds no connection to: a member that is no
+        // The peer of the test is the one that alice holds no connection to: the member that is no
         // neighbor of hers.
-        let neighbors = neighbor_nicks(&settled);
-        let not_neighbor = ["bob", "carol", "dave"]
-            .into_iter()
-            .find(|nick| !neighbors.contains(nick));
-        let target: String = not_neighbor.map_or_else(
-            || panic!("every member is a neighbor of alice: {settled:?}"),
-            str::to_owned,
-        );
         let mut members = [("bob", bob), ("carol", carol), ("dave", dave)];
         let (_, member) = members
             .iter_mut()
