@@ -493,7 +493,7 @@ impl Task {
     async fn subscribe_all(&self, sender: &mut ws::Sender) -> Result<(), ()> {
         for (sub_id, sub) in &self.subs {
             sender
-                .send(wire::req(sub_id, &sub.filter, unix_now()))
+                .send(wire::request(sub_id, &sub.filter, unix_now()))
                 .await
                 .map_err(|_| ())?;
         }
@@ -505,7 +505,7 @@ impl Task {
         for sub_id in mem::take(&mut self.closed_subs) {
             if let Some(sub) = self.subs.get(&sub_id) {
                 sender
-                    .send(wire::req(&sub_id, &sub.filter, unix_now()))
+                    .send(wire::request(&sub_id, &sub.filter, unix_now()))
                     .await
                     .map_err(|_| Outcome::Dropped)?;
             }
@@ -526,7 +526,7 @@ impl Task {
                 filter,
                 events,
             } => {
-                let frame = wire::req(&sub_id, &filter, unix_now());
+                let frame = wire::request(&sub_id, &filter, unix_now());
                 self.subs.insert(sub_id, Subscription { filter, events });
                 frame
             }

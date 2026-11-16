@@ -3,16 +3,36 @@
 //!
 //! The crate knows nothing about meshes. A caller picks the tags, ranks the
 //! relays, and seals its own payload into each event's `content`.
+//!
+//! # Examples
+//!
+//! A pool opens one relay, publishes an event under a tag, and reads what
+//! members of that tag publish. The doc test compiles it but does not run it.
+//!
+//! ```no_run
+//! use habilis_network_iroh_nostr_address_lookup::Pool;
+//!
+//! # async fn demo() {
+//! let relays = vec!["wss://relay.example".parse().expect("a relay URL")];
+//! let tag = [7u8; 32];
+//! let (pool, mut events) = Pool::open(relays, 1, &[tag]);
+//! pool.publish(&tag, "hello".to_owned());
+//! if let Some(event) = events.recv().await {
+//!     println!("{}", event.content);
+//! }
+//! # }
+//! ```
 
 use n0_future::time;
-mod conn;
 mod event;
+mod hub;
 mod pool;
 mod wire;
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "native/sender.rs"]
 mod ws;
 #[cfg(target_arch = "wasm32")]
-#[path = "ws_web.rs"]
+#[path = "web/sender.rs"]
 mod ws;
 
 #[cfg(all(feature = "test-relay", not(target_arch = "wasm32")))]

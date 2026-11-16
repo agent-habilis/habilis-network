@@ -17,19 +17,19 @@ use n0_future::time::Instant;
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
-use crate::conn::{Hub, Lease};
 use crate::event::{Event, Keys, kind_for};
+use crate::hub::{Hub, Lease};
 use crate::unix_now;
 use crate::wire::{self, Filter};
 
-use crate::conn::Health;
+use crate::hub::Health;
 use n0_future::{task, time};
 use std::mem;
 /// Choosing again on a timer is what notices an echo that is overdue.
 const RECHOOSE_EVERY: Duration = Duration::from_secs(5);
 /// A relay that has not echoed our event this long after we sent it is taken
 /// to swallow events. Public relays echo in about a second. It must stay above
-/// the connect timeout (10 s in `conn`), or a relay still dialing when we
+/// the connect timeout (10 s in `hub`), or a relay still dialing when we
 /// first publish could be flagged before it had a chance to echo.
 const ECHO_DEADLINE: Duration = if cfg!(test) {
     Duration::from_secs(1)
