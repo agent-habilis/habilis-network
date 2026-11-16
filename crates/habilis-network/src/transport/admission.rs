@@ -1421,12 +1421,12 @@ mod tests {
         );
     }
 
-    /// When every candidate is busy the newcomer is still admitted: the count is over the
-    /// ceiling by the busy connections, the gauge says so, and nothing is evicted. When the
-    /// sends end, the next admission evicts again.
+    /// When every candidate is busy the newcomer is still admitted, as an extra: it takes no unit,
+    /// so the count stays at the ceiling, and nothing is evicted. When the sends end, the next
+    /// admission evicts again, and the extra is not its victim.
     #[cfg(feature = "iroh-test-utils")]
     #[test]
-    fn when_every_connection_is_busy_the_newcomer_is_admitted_over_the_ceiling() {
+    fn when_every_connection_is_busy_the_newcomer_is_admitted_as_an_extra() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,
@@ -1435,7 +1435,7 @@ mod tests {
                 let (first, _first_conn) = fixture.dial().await;
                 let busy = fixture.admission.busy(first);
 
-                let (_second, _second_conn) = fixture.dial().await;
+                let (second, _second_conn) = fixture.dial().await;
 
                 assert!(
                     fixture
@@ -1444,10 +1444,17 @@ mod tests {
                         .is_none(),
                     "nobody is evicted while the only candidate is busy"
                 );
+                assert!(
+                    fixture.admission.is_extra(second),
+                    "the newcomer took no unit: it is an extra"
+                );
                 assert_eq!(
-                    fixture.admission.over_ceiling(),
-                    1,
-                    "the newcomer is over the ceiling by one"
+                    (
+                        fixture.admission.direct_units(),
+                        fixture.admission.over_ceiling()
+                    ),
+                    (1, 0),
+                    "the count stays at the ceiling, and nothing is over it"
                 );
 
                 drop(busy);
