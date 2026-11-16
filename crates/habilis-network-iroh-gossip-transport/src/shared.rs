@@ -41,6 +41,11 @@ pub(crate) struct Shared {
     pub(crate) attached: AtomicBool,
     /// Destinations that the engine stopped, because a higher rung carries them.
     pub(crate) blocked: Mutex<HashSet<EndpointId>>,
+    /// Whether a destination that was never named is allowed. A transport that carries a pair
+    /// only when nothing else does starts closed.
+    pub(crate) default_allowed: AtomicBool,
+    /// The destinations the engine allowed by name: they pass on a closed handle.
+    pub(crate) permitted: Mutex<HashSet<EndpointId>>,
     /// The byte budget of this node, if one is set.
     pub(crate) budget: Mutex<Option<Budget>>,
     /// Destinations that have an established connection. A frame to any other
@@ -59,11 +64,20 @@ impl Shared {
         sink.is_some_and(|sink| sink.is_alive())
     }
 
+    /// Whether frames to `dst` may go: not stopped by name, and either allowed by name or the
+    /// handle starts open.
+    pub(crate) fn is_allowed(&self, dst: EndpointId) -> bool {
+        if locked(&self.blocked).contains(&dst) {
+            return false;
+        }
+        self.default_allowed.load(Ordering::SeqCst) || locked(&self.permitted).contains(&dst)
+    }
+
     /// One QUIC datagram to `dst`: framed and handed to the sink. A datagram that
     /// does not fit a frame, or that has no sink to go to, is dropped and the call
     /// still succeeds, as a NIC drops what it cannot carry. QUIC recovers.
     pub(crate) fn send_datagram(&self, dst: EndpointId, datagram: &[u8]) {
-        if locked(&self.blocked).contains(&dst) {
+        if !self.is_allowed(dst) {
             return self.counters.dropped_not_allowed();
         }
         let frame = match (Frame {

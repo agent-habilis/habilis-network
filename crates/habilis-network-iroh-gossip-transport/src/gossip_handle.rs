@@ -76,6 +76,8 @@ impl GossipHandle {
             sink: Mutex::new(None),
             attached: AtomicBool::new(false),
             blocked: Mutex::new(HashSet::new()),
+            default_allowed: AtomicBool::new(true),
+            permitted: Mutex::new(HashSet::new()),
             budget: Mutex::new(None),
             established: Mutex::new(HashSet::new()),
             counters: Counters::default(),
@@ -139,18 +141,32 @@ impl GossipHandle {
         allowed: bool,
     ) {
         let mut blocked = locked(&self.shared.blocked);
+        let mut permitted = locked(&self.shared.permitted);
         if allowed {
             blocked.remove(&dst);
+            permitted.insert(dst);
         } else {
             blocked.insert(dst);
+            permitted.remove(&dst);
         }
     }
 
+    /// Whether a destination that was never named is allowed. It is by default: a handshake to a
+    /// new peer must not be dropped. A transport that carries a pair only when nothing else does
+    /// sets it to `false`, and the engine allows the pairs that need it by name.
+    pub fn set_default_allow(
+        &self,
+        // true allows a destination that was never named, false refuses it
+        allowed: bool,
+    ) {
+        self.shared.default_allowed.store(allowed, Ordering::SeqCst);
+    }
+
     /// Whether frames to `dst` are allowed: the last call of [`Self::allow`], and true for a
-    /// destination that was never named.
+    /// destination that was never named, unless [`Self::set_default_allow`] closed the handle.
     #[must_use]
     pub fn is_allowed(&self, dst: EndpointId) -> bool {
-        !locked(&self.shared.blocked).contains(&dst)
+        self.shared.is_allowed(dst)
     }
 
     /// Whether `dst` was last told to be established, by [`Self::set_established`].
@@ -907,6 +923,41 @@ mod tests {
         handle.allow(bob, true);
         handle.shared.send_datagram(bob, &[1u8; 100]);
         assert_eq!(locked(&recorder.0).len(), 2, "allowed again");
+    }
+
+    /// A transport that carries a pair only when nothing else does starts closed: a destination
+    /// that was never named is refused until the engine allows it, and a frame that arrives from
+    /// a peer lets the replies go back (the peer chose this path).
+    #[test]
+    fn a_handle_that_starts_closed_refuses_a_destination_until_it_is_allowed() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        handle.set_default_allow(false);
+        // the test reads the recorder after the handle takes a clone
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(Arc::clone(&recorder));
+        let (bob, carol) = (secret(2).public(), secret(3).public());
+
+        handle.shared.send_datagram(bob, &[1u8; 10]);
+        assert!(
+            locked(&recorder.0).is_empty(),
+            "a closed handle sends nothing to a stranger"
+        );
+        assert!(!handle.is_allowed(bob), "bob is not allowed");
+        assert_eq!(
+            handle.stats().dropped_not_allowed,
+            1,
+            "the refusal is counted"
+        );
+
+        handle.allow(bob, true);
+        handle.shared.send_datagram(bob, &[1u8; 10]);
+        handle.shared.send_datagram(carol, &[1u8; 10]);
+        assert_eq!(locked(&recorder.0).len(), 1, "only the frame to bob");
+
+        handle.allow(bob, false);
+        handle.shared.send_datagram(bob, &[1u8; 10]);
+        assert_eq!(locked(&recorder.0).len(), 1, "bob is refused again");
     }
 
     /// A destination that was never named is allowed: its handshake must pass.

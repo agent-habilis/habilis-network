@@ -29,7 +29,10 @@ impl AddressLookup for GossipLookup {
     fn publish(&self, _data: &EndpointData) {}
 
     fn resolve(&self, endpoint_id: EndpointId) -> Option<BoxStream<Result<Item, Error>>> {
-        if endpoint_id == self.shared.app_id || !self.shared.attached.load(Ordering::SeqCst) {
+        if endpoint_id == self.shared.app_id
+            || !self.shared.attached.load(Ordering::SeqCst)
+            || !self.shared.is_allowed(endpoint_id)
+        {
             return None;
         }
         let info = EndpointInfo::from_parts(
@@ -62,6 +65,28 @@ mod tests {
         let mut stream = handle.address_lookup().resolve(peer)?;
         let item = stream.next().await?.expect("an item");
         Some(item.endpoint_info().data.addrs().cloned().collect())
+    }
+
+    /// A closed handle offers no address of a peer it may not send to: iroh would learn a path
+    /// that carries nothing.
+    #[test]
+    fn a_closed_handle_answers_only_for_a_peer_it_allows() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let handle = GossipHandle::new(id(1));
+            Hub::new().join(&handle);
+            handle.set_default_allow(false);
+            assert_eq!(
+                answer(&handle, id(2)).await,
+                None,
+                "a stranger gets no address"
+            );
+            handle.allow(id(2), true);
+            assert_eq!(
+                answer(&handle, id(2)).await,
+                Some(vec![TransportAddr::Custom(crate::gossip_addr(id(2)))]),
+                "an allowed peer gets its address"
+            );
+        });
     }
 
     /// The first dial of a peer gets the gossip address, once a sink is attached.
