@@ -128,16 +128,13 @@ mod tests {
                     SecretKey::from_bytes(&[1; 32]),
                     SecretKey::from_bytes(&[2; 32]),
                 );
-                let (alice_pool, _alice_datagrams) = DataPool::open(
-                    vec![relay.url()],
-                    *alice.public().as_bytes(),
-                    keys.self_tag(&alice.public()),
-                );
-                let (_bob_pool, mut bob_datagrams) = DataPool::open(
-                    vec![relay.url()],
-                    *bob.public().as_bytes(),
-                    keys.self_tag(&bob.public()),
-                );
+                let (alice_id, bob_id) = (alice.public(), bob.public());
+                let alice_tag = keys.self_tag(&alice_id);
+                let bob_tag = keys.self_tag(&bob_id);
+                let (alice_pool, _alice_datagrams) =
+                    DataPool::open(vec![relay.url()], *alice_id.as_bytes(), alice_tag);
+                let (_bob_pool, mut bob_datagrams) =
+                    DataPool::open(vec![relay.url()], *bob_id.as_bytes(), bob_tag);
                 let sink = DataSink::new(alice_pool, keys);
                 for _ in 0..100 {
                     if sink.is_alive() {
