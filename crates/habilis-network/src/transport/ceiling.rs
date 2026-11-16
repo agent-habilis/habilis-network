@@ -298,6 +298,20 @@ impl Ceiling {
         self.register_quic_as(peer, now, extra)
     }
 
+    /// The pinned peers that hold their connection now, in no order.
+    pub(crate) fn pinned_connected(&self) -> Vec<EndpointId> {
+        self.entries
+            .iter()
+            .filter(|(peer, entry)| entry.quic == Quic::Extra && self.pinned.contains(*peer))
+            .map(|(peer, _)| *peer)
+            .collect()
+    }
+
+    /// The limit `2C` on all the connections of the node: direct, pinned, and inbound above `C`.
+    pub(crate) fn total_cap(&self) -> usize {
+        self.cap * 2
+    }
+
     /// Every peer that holds a connection of any kind.
     pub(crate) fn connections(&self) -> usize {
         self.entries.values().filter(|entry| entry.held()).count()
@@ -316,7 +330,7 @@ impl Ceiling {
             return Vec::new();
         }
         let held = self.connections().saturating_sub(evicted.len());
-        let need = held.saturating_sub(self.cap * 2);
+        let need = held.saturating_sub(self.total_cap());
         let mut candidates = self.candidates(now, newcomer, |entry| entry.quic == Quic::Extra);
         candidates.retain(|candidate| !evicted.contains(&candidate.peer));
         candidates
@@ -1084,5 +1098,35 @@ mod tests {
         );
         let admission = ceiling.register_inbound(testing::endpoint_id(5), at(start, 200));
         assert_eq!(admission.evict.len(), 1, "above 2N one connection goes");
+    }
+
+    #[test]
+    fn the_pinned_peers_that_hold_a_connection_are_listed() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(1);
+        ceiling.register_quic(testing::endpoint_id(1), start);
+        let pinned = testing::endpoint_id(2);
+        let planned_only = testing::endpoint_id(3);
+        assert_eq!(
+            ceiling.plan_dial(pinned, true),
+            DialPlan::Multihop,
+            "planned"
+        );
+        assert_eq!(
+            ceiling.plan_dial(planned_only, true),
+            DialPlan::Multihop,
+            "planned"
+        );
+        assert!(
+            ceiling.pinned_connected().is_empty(),
+            "a plan without a connection lists nobody"
+        );
+        ceiling.register_quic(pinned, start);
+        assert_eq!(
+            ceiling.pinned_connected(),
+            vec![pinned],
+            "a pinned peer with its connection is listed, a direct unit is not"
+        );
     }
 }

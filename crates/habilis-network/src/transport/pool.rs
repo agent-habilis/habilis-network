@@ -223,6 +223,38 @@ mod tests {
         });
     }
 
+    /// The route of a pinned connection is gone: the connection closes, and a direct connection
+    /// of the same pool is left alone.
+    #[test]
+    fn a_pinned_connection_closes_when_its_route_is_gone_and_a_direct_one_stays() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            assert!(
+                !pool.close_pinned(server).await && connection.close_reason().is_none(),
+                "a direct connection stays"
+            );
+            pool.inner
+                .conns
+                .lock()
+                .await
+                .get_mut(&server)
+                .expect("the connection is pooled")
+                .pinned = true;
+            assert!(
+                pool.close_pinned(server).await,
+                "a pinned connection closes"
+            );
+            assert!(
+                closed_as_idle(&connection) && pool.inner.conns.lock().await.is_empty(),
+                "and leaves the pool, so that the next send is cold"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
     #[test]
     fn a_pooled_connection_nothing_sends_on_is_closed_after_the_idle_timeout() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {

@@ -567,6 +567,21 @@ impl UnicastPool {
         was_pooled
     }
 
+    /// Close the pooled connection of `eid` if it is pinned: the route that it rides is gone, and a
+    /// pinned connection has no other reason to stay. A direct connection of the peer is left
+    /// alone. Returns whether a connection was closed.
+    pub(crate) async fn close_pinned(&self, eid: EndpointId) -> bool {
+        let mut conns = self.inner.conns.lock().await;
+        if !conns.get(&eid).is_some_and(|pooled| pooled.pinned) {
+            return false;
+        }
+        if let Some(pooled) = conns.remove(&eid) {
+            tracing::debug!(target: LOG_TARGET, %eid, "closing a pinned connection: its route is gone");
+            pooled.connection.close(IDLE.into(), b"route lost");
+        }
+        true
+    }
+
     /// Whether `eid` is on the dial-failure cooldown.
     pub(crate) async fn is_cooling(&self, eid: EndpointId) -> bool {
         self.inner

@@ -502,6 +502,11 @@ impl SignalAdmission {
         victims.end();
     }
 
+    /// The pinned peers that hold their connection now.
+    pub(crate) fn pinned_peers(&self) -> Vec<EndpointId> {
+        self.lock().ceiling.pinned_connected()
+    }
+
     /// The endpoint that this table serves. The pin of a peer reaches its path selector.
     pub(crate) fn set_local(&self, local: EndpointId) {
         self.lock().local = Some(local);
