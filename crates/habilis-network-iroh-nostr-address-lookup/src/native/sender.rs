@@ -80,9 +80,7 @@ pub(crate) async fn connect(url: &Url) -> Result<(Sender, Receiver)> {
     let port = url
         .port_or_known_default()
         .context("relay URL has no port")?;
-    let tcp = TcpStream::connect((host.as_str(), port))
-        .await
-        .with_context(|| format!("connect to {host}:{port}"))?;
+    let tcp = connect_tcp(&host, port).await?;
     let io: Box<dyn Io> = match url.scheme() {
         "ws" => Box::new(tcp),
         "wss" => {
@@ -107,6 +105,16 @@ pub(crate) async fn connect(url: &Url) -> Result<(Sender, Receiver)> {
         .context("websocket handshake")?;
     let (sink, stream) = socket.split();
     Ok((Sender(sink), Receiver(stream)))
+}
+
+/// A TCP connection to the relay, with Nagle's algorithm off: a frame is written in parts, and
+/// Nagle holds the second part until the peer acks the first.
+async fn connect_tcp(host: &str, port: u16) -> Result<TcpStream> {
+    let tcp = TcpStream::connect((host, port))
+        .await
+        .with_context(|| format!("connect to {host}:{port}"))?;
+    tcp.set_nodelay(true).context("set TCP_NODELAY")?;
+    Ok(tcp)
 }
 
 // One config for the process, shared by every dial.
@@ -173,6 +181,24 @@ mod tests {
             outcome.is_ok(),
             "the write waited 15 s on a relay that reads nothing"
         );
+    }
+
+    /// A `WebSocket` frame is written in parts. With Nagle on, the second part waits for the ACK of
+    /// the first, which the peer delays by about 40 ms on Linux: one connection then sends about
+    /// 25 small frames a second, and the data lane asks for 200.
+    #[tokio::test]
+    async fn the_relay_connection_sends_small_writes_at_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("a local address");
+        let accepted = tokio::spawn(async move { listener.accept().await });
+        let tcp = super::connect_tcp("127.0.0.1", address.port())
+            .await
+            .expect("the dial works");
+        assert!(
+            tcp.nodelay().expect("the option reads"),
+            "TCP_NODELAY is on"
+        );
+        accepted.abort();
     }
 
     /// `host_str` keeps the brackets of an `IPv6` literal, which no socket

@@ -219,6 +219,8 @@ impl TestRelay {
 // Shared with the handle of the relay, which reads and sets the same state.
 async fn accept_loop(listener: TcpListener, shared: Arc<Mutex<State>>) {
     while let Ok((stream, _)) = listener.accept().await {
+        // The real relay turns Nagle off, and so does this one: its replies are small frames.
+        let _ = stream.set_nodelay(true);
         let (outbound, outbound_rx) = mpsc::unbounded_channel();
         let id = {
             let mut state = shared.lock().expect("test relay mutex poisoned");
