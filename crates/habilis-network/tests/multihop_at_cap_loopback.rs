@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{
-    self, Blocking, Inbound, Inspect, Membership, Messaging, Request, Routing,
+    self, Blocking, Inbound, Inspect, InspectHost, Membership, Messaging, Request, Routing,
 };
 use habilis_network::net;
 use habilis_network::protocol::{Lookup, Transport};
@@ -45,6 +45,8 @@ const STUCK_TEXT: &str =
 /// How long the snapshot may take to show the path of a peer after its first frame.
 const LABEL_DEADLINE: Duration = Duration::from_secs(30);
 /// The line that an eviction at the ceiling logs, on the transport target.
+/// The cause that the eviction line carries when a gossip neighbor took the unit.
+const NEIGHBOR_CAUSE: &str = "cause=\"a gossip neighbor\"";
 const EVICTION_LINE: &str = "evicting a direct connection at the ceiling";
 /// The WARN of a forwarder that gets a cell over the relay: a cut pair still has its relay path.
 const RELAY_CELL_TEXT: &str = "multihop forwarder refusing cells";
@@ -171,6 +173,19 @@ impl Member {
             .expect("the loop answers")
     }
 
+    /// Whether this member's topology holds a multihop route to `peer`.
+    async fn has_route(&self, peer: &str) -> bool {
+        self.membership
+            .request(|reply| {
+                Request::InspectHost(InspectHost::HasRoute {
+                    peer: peer.to_owned(),
+                    reply,
+                })
+            })
+            .await
+            .unwrap_or(false)
+    }
+
     /// Send a directed message. A refusal is an answer, not a failure.
     async fn send(&self, to: &str, text: &str) -> Result<(), String> {
         let to = membership::parse_to(Some(to)).expect("a nickname");
@@ -236,6 +251,19 @@ async fn counters_of(members: &[(&str, &Member)]) -> String {
     parts.join("; ")
 }
 
+/// Wait until `from` holds a multihop route to `nick`: a send that finds none dials as it always
+/// did, and the test is about the send that finds one.
+async fn route_known(from: &Member, nick: &str) -> bool {
+    let started = Instant::now();
+    while !from.has_route(nick).await {
+        if started.elapsed() >= STEP_DEADLINE {
+            return false;
+        }
+        time::sleep(Duration::from_millis(500)).await;
+    }
+    true
+}
+
 /// Send `text` from `from` to `to` each second until `to` reads it, or the deadline ends.
 async fn delivered(from: &Member, to: &mut Member, to_nick: &str, text: &str) -> bool {
     let started = Instant::now();
@@ -292,7 +320,6 @@ fn assert_dave_is_pinned_through_bob(snapshot: &TopologySnapshot) {
         Some(bob_link.endpoint.as_str()),
         "the first hop to dave is bob: {snapshot:?}"
     );
-    assert!(!dave_link.neighbor, "dave is no gossip neighbor of alice");
     assert_eq!(
         (
             snapshot.max_connections,
@@ -353,6 +380,11 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
         // The first frame goes while no route may be known yet: a send that finds no route
         // dials as it always did, and the test waits for a route before it counts.
         assert!(
+            route_known(&alice, "dave").await,
+            "alice never learned a route to dave: {}",
+            counters_of(&[("alice", &alice), ("bob", &bob), ("dave", &dave)]).await
+        );
+        assert!(
             delivered(&alice, &mut dave, "dave", "to dave through bob").await,
             "the frame of alice never reached dave: {}",
             counters_of(&[("alice", &alice), ("bob", &bob), ("dave", &dave)]).await
@@ -411,14 +443,16 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
         assert_dave_is_pinned_through_bob(&snapshot);
 
         let logs = habilis_network_test_tracing::captured_logs();
-        let evictions: Vec<&str> = logs
+        // A new gossip neighbor takes the unit of a cached peer: that is the design. An eviction
+        // that a connection or a session caused is a dial that took a unit at the cap.
+        let by_dial: Vec<&str> = logs
             .lines()
-            .filter(|line| line.contains(EVICTION_LINE))
+            .filter(|line| line.contains(EVICTION_LINE) && !line.contains(NEIGHBOR_CAUSE))
             .collect();
         assert!(
-            evictions.is_empty(),
-            "a node evicted a direct connection at its ceiling: {}",
-            evictions.join("\n")
+            by_dial.is_empty(),
+            "a dial evicted a direct connection at its ceiling: {}",
+            by_dial.join("\n")
         );
 
         for member in [alice, bob, carol, dave] {

@@ -72,11 +72,17 @@ impl EventLoopState {
     }
 
     fn peer_link(&self, peer: EndpointId, ledger: &LedgerView) -> PeerLink {
-        let kind: PathKind = self
+        // A pinned peer takes multihop paths only, and a pair may have no path watcher to report one.
+        let reported: PathKind = self
             .path_kinds
             .get(&peer)
             .copied()
             .unwrap_or(PathKind::None);
+        let kind: PathKind = if ledger.pinned.contains(&peer) {
+            PathKind::Multihop
+        } else {
+            reported
+        };
         let via: Option<String> = if kind == PathKind::Multihop {
             self.first_hop(peer)
         } else {

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{
-    self, Inbound, Inspect, Membership, Messaging, Request, Routing,
+    self, Inbound, Inspect, InspectHost, Membership, Messaging, Request, Routing,
 };
 use habilis_network::net;
 use habilis_network::protocol::{Lookup, Transport};
@@ -119,6 +119,19 @@ impl Member {
             .expect("the loop answers")
     }
 
+    /// Whether this member's topology holds a multihop route to `peer`.
+    async fn has_route(&self, peer: &str) -> bool {
+        self.membership
+            .request(|reply| {
+                Request::InspectHost(InspectHost::HasRoute {
+                    peer: peer.to_owned(),
+                    reply,
+                })
+            })
+            .await
+            .unwrap_or(false)
+    }
+
     /// Send a directed message. A refusal is an answer, not a failure.
     async fn send(&self, to: &str, text: &str) -> Result<(), String> {
         let to = membership::parse_to(Some(to)).expect("a nickname");
@@ -166,6 +179,19 @@ async fn counters_of(members: &[(&str, &Member)]) -> String {
         parts.push(format!("{nick} units {units:?} {counters:?}"));
     }
     parts.join("; ")
+}
+
+/// Wait until `from` holds a multihop route to `nick`: a send that finds none dials as it always
+/// did, and the test is about the send that finds one.
+async fn route_known(from: &Member, nick: &str) -> bool {
+    let started = Instant::now();
+    while !from.has_route(nick).await {
+        if started.elapsed() >= STEP_DEADLINE {
+            return false;
+        }
+        time::sleep(Duration::from_millis(500)).await;
+    }
+    true
 }
 
 /// Send `text` from `from` to `to` each second until `to` reads it, or the deadline ends.
@@ -286,6 +312,11 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
             .iter_mut()
             .find(|(nick, _)| *nick == target)
             .unwrap_or_else(|| panic!("no member {target}"));
+        assert!(
+            route_known(&alice, &target).await,
+            "alice never learned a route to {target}: {}",
+            counters_of(&[("alice", &alice)]).await
+        );
         assert!(
             delivered(&alice, member, &target, "to the third member").await,
             "the frame of alice never reached {target}: {}",
