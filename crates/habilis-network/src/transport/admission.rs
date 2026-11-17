@@ -1720,6 +1720,61 @@ mod tests {
         );
     }
 
+    /// Two setups that race to activate one injected transport with two plans: exactly one wins, and
+    /// the other gets the error of the active transport. The check and the activation are one step,
+    /// so no round ends with both setups sure that their plan is the one that runs.
+    #[test]
+    fn two_setups_racing_on_one_nostr_transport_leave_one_winner_and_one_error() {
+        use crate::lookup::NostrPlan;
+        use crate::protocol::TopicId;
+        use crate::protocol::meshes::NostrChoice;
+        use crate::protocol::nostr::NostrKeys;
+        use habilis_network_iroh_nostr_transport::NostrTransport;
+        use std::sync::Barrier;
+
+        let _guard = ::habilis_network_test_tracing::init();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let me = iroh::SecretKey::from_bytes(&[77; 32]).public();
+        let relay: url::Url = "ws://127.0.0.1:9".parse().expect("a relay URL");
+        let plan = |seed: u8| {
+            let keys = NostrKeys::derive(&TopicId::from_bytes([seed; 32]));
+            NostrPlan::for_mesh(&keys, &NostrChoice::Custom(vec![relay.clone()]))
+                .expect("a custom list has a plan")
+        };
+        for round in 0..300 {
+            let table = SignalAdmission::new(8);
+            table.set_nostr(NostrTransport::new(me));
+            let barrier = Barrier::new(2);
+            let results = std::thread::scope(|scope| {
+                let racers: Vec<_> = [1u8, 2u8]
+                    .into_iter()
+                    .map(|seed| {
+                        let (table, barrier, runtime) = (&table, &barrier, &runtime);
+                        let plan = plan(seed);
+                        scope.spawn(move || {
+                            let _entered = runtime.enter();
+                            barrier.wait();
+                            table.activate_nostr(plan)
+                        })
+                    })
+                    .collect();
+                racers
+                    .into_iter()
+                    .map(|racer| racer.join().expect("a racer"))
+                    .collect::<Vec<_>>()
+            });
+            let wins = results.iter().filter(|result| result.is_ok()).count();
+            assert_eq!(
+                wins, 1,
+                "round {round}: two plans on one transport leave one winner and one error"
+            );
+        }
+    }
+
     /// A failed dial records the want, and the next dial names the Nostr address at once: the
     /// closed handle must already allow the destination, with no connection noted and no sweep.
     #[test]

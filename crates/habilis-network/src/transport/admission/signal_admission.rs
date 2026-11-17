@@ -624,11 +624,15 @@ impl SignalAdmission {
         let Some(transport) = transport else {
             return Ok(false);
         };
+        // One step: the transport opens once, and the plan of the first activation stays. The
+        // activation that did not open it learns from `serves` whether the plan that runs is its
+        // own, with no window between a check and the activation.
+        let opened = transport.activate(keys.clone(), ranking.clone());
         anyhow::ensure!(
-            transport.serves(&keys, &ranking) != Some(false),
+            transport.serves(&keys, &ranking) == Some(true),
             "the Nostr transport is active for another mesh: it serves one mesh for its life"
         );
-        Ok(transport.activate(keys, ranking))
+        Ok(opened)
     }
 
     /// Whether the mesh lets the relay carry payload: a relay path serves a pair only then, and
