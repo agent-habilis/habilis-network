@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
-use std::{fs, io::ErrorKind};
+use std::{fs, io::ErrorKind, path::PathBuf};
 
 use habilis_network_chunks::{ChunkError, ChunkHash, ChunkMap, ChunkStore, InMemoryStore, Root};
 use habilis_network_doc::ChunkPointer;
