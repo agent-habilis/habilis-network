@@ -12,7 +12,7 @@ use n0_future::time as n0future_time;
 use super::answer_check::{decode_chunk, decode_map};
 use super::{ChunkRequest, FetchError};
 use crate::transport::CHUNKS_ALPN;
-use crate::util::tuning::CHUNK_STREAM_TIMEOUT;
+use crate::util::tuning::{CHUNK_BUSY_WAITS, CHUNK_SERVE_WINDOW, CHUNK_STREAM_TIMEOUT};
 
 /// The bytes that open a map answer and a chunk answer: the tag, and for a map the size.
 const MAP_HEADER_BYTES: usize = 1 + 8;
@@ -32,6 +32,8 @@ pub(crate) struct ChunkClient {
     endpoint: Endpoint,
     /// How long one request can take, from the dial to the end of the answer.
     deadline: Duration,
+    /// How long the fetch waits before it asks again for a chunk that every holder gave the absent answer for.
+    busy_wait: Duration,
 }
 
 impl ChunkClient {
@@ -39,6 +41,7 @@ impl ChunkClient {
         Self {
             endpoint,
             deadline: CHUNK_STREAM_TIMEOUT,
+            busy_wait: CHUNK_SERVE_WINDOW,
         }
     }
 
@@ -46,6 +49,13 @@ impl ChunkClient {
     #[cfg(test)]
     pub(crate) fn deadline(mut self, deadline: Duration) -> Self {
         self.deadline = deadline;
+        self
+    }
+
+    /// Sets how long the fetch waits before it asks again for a chunk that every holder gave the absent answer for.
+    #[cfg(test)]
+    pub(crate) fn busy_wait(mut self, wait: Duration) -> Self {
+        self.busy_wait = wait;
         self
     }
 
@@ -125,14 +135,24 @@ impl ChunkClient {
             index: wire_index,
         };
         let mut last = FetchError::NoSource;
-        for holder in holders.iter_mut().filter(|holder| !holder.failed) {
-            let answer: Result<Vec<u8>, FetchError> = self
-                .exchange(holder, request, limit, index)
-                .await
-                .and_then(|answer| decode_chunk(&answer, map, index));
-            match answer {
-                Ok(chunk) => return Ok(chunk),
-                Err(error) => last = refuse(holder, error),
+        for wait in 0..=CHUNK_BUSY_WAITS {
+            if wait > 0 {
+                n0future_time::sleep(self.busy_wait).await;
+            }
+            last = FetchError::NoSource;
+            for holder in holders.iter_mut().filter(|holder| !holder.failed) {
+                let answer: Result<Vec<u8>, FetchError> = self
+                    .exchange(holder, request, limit, index)
+                    .await
+                    .and_then(|answer| decode_chunk(&answer, map, index));
+                match answer {
+                    Ok(chunk) => return Ok(chunk),
+                    Err(error) => last = refuse(holder, error),
+                }
+            }
+            // A holder gave the map, so an absent chunk is its serve budget, which comes back with the next window.
+            if last != FetchError::Absent {
+                break;
             }
         }
         Err(last)
@@ -351,6 +371,64 @@ mod tests {
         );
         client.close().await;
         author.close().await;
+    }
+
+    /// A script that serves `value` honestly, but gives the absent answer for the first `busy` chunk requests, as a
+    /// holder past its serve budget does.
+    fn busy(value: &[u8], busy: usize) -> impl FnMut(&[u8]) -> Option<Vec<u8>> + Send + 'static {
+        let mut refused = 0;
+        honest(value, move |answer| {
+            if refused < busy {
+                refused += 1;
+                ABSENT.to_vec()
+            } else {
+                answer
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn a_holder_past_its_budget_is_asked_again_after_a_wait_and_the_fetch_keeps_its_chunks() {
+        let value = value();
+        let (chunks, pointer, client) = asker_side(&value).await;
+        let holder = serve_with(busy(&value, 2)).await;
+        let fetched: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
+            .busy_wait(Duration::from_millis(20))
+            .fetch(
+                slice::from_ref(&holder.address),
+                pointer,
+                chunks.stored_size(pointer),
+            )
+            .await;
+        assert_eq!(
+            fetched,
+            Ok(value),
+            "a holder that gave the map and then the absent answer is busy, so the fetch must wait and ask again"
+        );
+        client.close().await;
+        holder.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_holder_that_stays_busy_ends_the_fetch_after_the_last_wait() {
+        let value = value();
+        let (chunks, pointer, client) = asker_side(&value).await;
+        let holder = serve_with(busy(&value, usize::MAX)).await;
+        let fetched: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
+            .busy_wait(Duration::from_millis(20))
+            .fetch(
+                slice::from_ref(&holder.address),
+                pointer,
+                chunks.stored_size(pointer),
+            )
+            .await;
+        assert_eq!(
+            fetched,
+            Err(FetchError::Absent),
+            "the waits are bounded, so a holder that never answers ends the fetch"
+        );
+        client.close().await;
+        holder.close().await;
     }
 
     #[tokio::test]

@@ -1207,6 +1207,11 @@ pub const CHUNK_SERVE_WINDOW: Duration = Duration::from_secs(5);
 /// the cap has 16 chunks and a map, so one asker takes about 2 such values in a window.
 pub const CHUNK_SERVES_PER_WINDOW: usize = 40;
 
+/// How many times a fetch waits one window of the chunk serve budget and asks again for a chunk, when every holder
+/// gives the absent answer after a holder gave the map. The holder has the value, so the absent answer is its
+/// budget. 4 fetches of a value at the cap take 2 windows of one holder.
+pub const CHUNK_BUSY_WAITS: usize = 3;
+
 /// How many chunk answers this node gives in all, in one window, whoever asks.
 pub const CHUNK_SERVES_GLOBAL: usize = 160;
 
