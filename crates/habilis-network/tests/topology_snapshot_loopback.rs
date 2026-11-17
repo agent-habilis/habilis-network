@@ -105,17 +105,20 @@ fn the_snapshot_of_a_member_names_its_peers_units_cap_and_graph() {
             "the three members never formed a mesh"
         );
 
-        // The two links of a full mesh of three come up a moment after the roster.
+        // The two links of a full mesh of three come up a moment after the roster, and a link can
+        // show before the roster has named its peer, so the state to wait for is two neighbors,
+        // each with its nickname.
         let started = Instant::now();
         let snapshot: TopologySnapshot = loop {
             let snapshot: TopologySnapshot = alice.snapshot().await;
-            let neighbors: usize = snapshot.peers.iter().filter(|peer| peer.neighbor).count();
-            if neighbors == 2 {
+            let links = snapshot.peers.iter().filter(|peer| peer.neighbor);
+            let named: Vec<&str> = links.filter_map(|peer| peer.nickname.as_deref()).collect();
+            if named.len() == 2 {
                 break snapshot;
             }
             assert!(
                 started.elapsed() < DEADLINE,
-                "alice never linked both peers: {snapshot:?}"
+                "alice never linked both peers by name: {snapshot:?}"
             );
             time::sleep(Duration::from_millis(500)).await;
         };
