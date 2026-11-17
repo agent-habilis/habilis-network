@@ -1720,6 +1720,30 @@ mod tests {
         );
     }
 
+    /// A failed dial records the want, and the next dial names the Nostr address at once: the
+    /// closed handle must already allow the destination, with no connection noted and no sweep.
+    #[test]
+    fn a_want_allows_its_destination_at_once() {
+        use habilis_network_iroh_nostr_transport::NostrTransport;
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = iroh::SecretKey::from_bytes(&[75; 32]).public();
+        let peer = iroh::SecretKey::from_bytes(&[76; 32]).public();
+        let table = SignalAdmission::new(8);
+        let transport = NostrTransport::new(me);
+        table.set_nostr(transport.clone());
+        assert!(
+            !transport.handle().is_allowed(peer),
+            "a closed handle before the want"
+        );
+
+        table.want_nostr(peer);
+
+        assert!(
+            transport.handle().is_allowed(peer),
+            "the want allows the destination, so the next dial sends its first flight"
+        );
+    }
+
     /// A peer that the engine wants Nostr for but that has no slot (the dial that failed left no
     /// connection) is allowed by the sweep: the next dial must be able to send its frames.
     #[test]

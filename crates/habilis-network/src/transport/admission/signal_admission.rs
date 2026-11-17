@@ -647,6 +647,9 @@ impl SignalAdmission {
         let mut inner = self.lock();
         if inner.nostr.is_some() {
             inner.nostr_wanted.insert(peer);
+            // The handle is closed until a sweep allows a destination, and the sweep runs from a
+            // connection that is noted: the next dial must not wait for one.
+            inner.sync_nostr();
         }
     }
 
