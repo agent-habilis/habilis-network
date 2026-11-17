@@ -17,6 +17,11 @@ test-relay = ["tokio-websockets/server", "tokio/net"]
 [lints]
 workspace = true
 
+# Serves the test relay on a port, for the browser test.
+[[example]]
+name = "serve_relay"
+required-features = ["test-relay"]
+
 [lib]
 name = "habilis_network_iroh_nostr_address_lookup"
 path = "src/lib.rs"
@@ -62,8 +67,12 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
-[dev-dependencies]
-# The integration tests drive the in-process relay.
+# The integration tests drive the in-process relay, which is native only.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 habilis-network-iroh-nostr-address-lookup = { path = ".", features = ["test-relay"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 tracing-subscriber.workspace = true
+
+# `tests/data_browser.rs` runs in a browser, against a relay that runs outside it.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

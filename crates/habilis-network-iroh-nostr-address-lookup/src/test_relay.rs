@@ -89,7 +89,19 @@ impl TestRelay {
     /// # Panics
     /// Never in practice: a socket address always makes a valid URL.
     pub async fn spawn() -> Result<Self, io::Error> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        Self::spawn_on("127.0.0.1:0").await
+    }
+
+    /// Like [`TestRelay::spawn`], on the socket address `bind`: a browser test needs a port it
+    /// knows before it starts.
+    ///
+    /// # Errors
+    /// `bind` is not a socket address, or the listener cannot bind to it.
+    ///
+    /// # Panics
+    /// Never in practice: a socket address always makes a valid URL.
+    pub async fn spawn_on(bind: &str) -> Result<Self, io::Error> {
+        let listener = TcpListener::bind(bind).await?;
         let address = format!("ws://{}", listener.local_addr()?);
         let url: Url = address.parse().expect("a socket address makes a valid URL");
         // The accept loop and the handle read the same state.
