@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use iroh::Endpoint;
 use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
 use rand::RngCore;
@@ -89,6 +89,12 @@ impl BlobServer {
         relay_transport: PayloadPath,
         limits: ServeLimits,
     ) -> Result<Self> {
+        // A ticket carries no Nostr, so a producer on such a mesh would mint tickets that decode as
+        // loopback-only: no other machine could use them.
+        ensure!(
+            !lookups.is_nostr_only(),
+            "a blob ticket carries no Nostr: add mdns, dht or relay to the lookups"
+        );
         let endpoint =
             // `TransportHandles::default()` — IP and relay only. The blob
             // server is a side-channel endpoint of its own; the mesh's custom

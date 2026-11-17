@@ -10,6 +10,7 @@ const BASE: WireOpts = {
   lookup: null,
   transport: null,
   relayUrls: null,
+  nostrUrls: null,
   maxPeers: 0,
   maxDirect: 0,
 }
@@ -31,15 +32,15 @@ describe('encodeOpts', () => {
   // is the layout assert on `HabilisNetworkOpts` in crates/habilis-network-ffi/src/ffi.rs; a
   // linked C consumer keeps passing the old struct when it moves, so both
   // sides must be edited together.
-  test('the struct is the 72 bytes the C header lays out', () => {
-    expect(OPTS_BYTES).toBe(72)
+  test('the struct is the 80 bytes the C header lays out', () => {
+    expect(OPTS_BYTES).toBe(80)
   })
 
   test('null selectors and empty lists encode as NULL pointers', () => {
     const { struct } = encodeOpts(BASE, fakePointers().pointerOf)
     expect(struct.byteLength).toBe(OPTS_BYTES)
     const view = new DataView(struct.buffer)
-    for (const offset of [0, 8, 16, 24, 32, 40, 48]) {
+    for (const offset of [0, 8, 16, 24, 32, 40, 48, 64, 72]) {
       expect(view.getBigUint64(offset, true)).toBe(0n)
     }
   })
@@ -94,6 +95,14 @@ describe('encodeOpts', () => {
       ...new TextEncoder().encode('http://a/,http://b/'),
       0,
     ])
+  })
+
+  test('the Nostr relay list lands after max_direct', () => {
+    const pointers = fakePointers()
+    const { struct } = encodeOpts({ ...BASE, nostrUrls: 'wss://a/,wss://b/' }, pointers.pointerOf)
+    const view = new DataView(struct.buffer)
+    expect(view.getBigUint64(72, true)).toBe(0x1000n) // nostr_urls
+    expect(Array.from(pointers.buffers[0] ?? [])).toEqual([...new TextEncoder().encode('wss://a/,wss://b/'), 0])
   })
 
   test('keepAlive roots every encoded string', () => {

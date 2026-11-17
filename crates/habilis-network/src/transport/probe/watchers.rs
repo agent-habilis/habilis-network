@@ -172,8 +172,8 @@ pub(crate) fn nudge_climbing_pairs(
                 state.path_kinds.get(&address.id).copied(),
                 state.webrtc_admission.selected_kind(address.id),
             )?;
-            // The relay and gossip are the two rungs that a route can still climb from.
-            matches!(kind, PathKind::Relay | PathKind::Gossip).then(|| {
+            // The relay, gossip and Nostr are the rungs that a route can still climb from.
+            matches!(kind, PathKind::Relay | PathKind::Gossip | PathKind::Nostr).then(|| {
                 let has_session = state
                     .webrtc
                     .as_ref()
@@ -214,7 +214,7 @@ pub(crate) fn forget_route_unless_climbing(
     peer: EndpointId,
     kind: PathKind,
 ) {
-    if !matches!(kind, PathKind::Relay | PathKind::Gossip) {
+    if !matches!(kind, PathKind::Relay | PathKind::Gossip | PathKind::Nostr) {
         route_dialed.remove(&peer);
     }
 }
@@ -269,6 +269,9 @@ pub(crate) async fn on_path_change(
     }
     tracing::debug!(target: transport::LOG_TARGET, %peer, ?kind, "selected path changed");
     state.path_kinds.insert(peer, kind);
+    if kind != PathKind::Nostr {
+        state.forget_nostr_proof(peer);
+    }
     forget_route_unless_climbing(&mut state.route_dialed, peer, kind);
     // The pair may have just reached WebRTC, or IP: the underlay opens or drops its
     // session now, not at the alive tick.
@@ -278,6 +281,7 @@ pub(crate) async fn on_path_change(
     // all of its connections, so that this path and the sweep never disagree on what to tell
     // the gossip transport.
     state.webrtc_admission.sync_gossip();
+    state.webrtc_admission.sync_nostr();
     let Some(handle) = &state.webrtc else {
         return;
     };
@@ -298,7 +302,11 @@ pub(crate) async fn on_path_change(
             mark_proven(state, peer);
         }
         PathAction::Rerace => {
-            if matches!(kind, PathKind::Multihop | PathKind::Gossip) {
+            // A pair on Nostr is off the relay as well when the mesh lists Nostr: payload flows on
+            // it, no gossip link does, and the pair has no lane yet.
+            let off_the_relay = matches!(kind, PathKind::Multihop | PathKind::Gossip)
+                || (kind == PathKind::Nostr && state.relay_transport.nostr_allowed());
+            if off_the_relay {
                 // Off the relay, so frames may flow; but the pair has no lane yet.
                 mark_proven(state, peer);
                 tracing::info!(target: transport::LOG_TARGET, %peer, ?kind, "pair is off the relay; racing for a lane");

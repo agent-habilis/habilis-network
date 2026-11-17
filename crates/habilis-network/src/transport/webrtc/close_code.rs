@@ -36,13 +36,16 @@ pub(crate) const EVICTED: u32 = 11;
 /// A gossip connection whose selected path is the gossip rung: gossip would carry the
 /// frames that gossip needs to carry itself.
 pub(crate) const GOSSIP_ON_GOSSIP_PATH: u32 = 10;
-// The next free number is 12.
+/// A gossip connection whose selected path is Nostr: a graft never rides it, because the relays
+/// that carry it limit the rate and see every datagram.
+pub(crate) const GOSSIP_ON_NOSTR_PATH: u32 = 12;
+// The next free number is 13.
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CAP_REFUSED, EVICTED, GOSSIP_ON_GOSSIP_PATH, GOSSIP_RELAY_REFUSED, IDLE, NOT_A_NEIGHBOR,
-        SIGNAL_ABORTED, SIGNAL_FAILED, UNICAST_RELAY_REFUSED,
+        CAP_REFUSED, EVICTED, GOSSIP_ON_GOSSIP_PATH, GOSSIP_ON_NOSTR_PATH, GOSSIP_RELAY_REFUSED,
+        IDLE, NOT_A_NEIGHBOR, SIGNAL_ABORTED, SIGNAL_FAILED, UNICAST_RELAY_REFUSED,
     };
     use std::collections::HashSet;
 
@@ -58,6 +61,7 @@ mod tests {
             IDLE,
             NOT_A_NEIGHBOR,
             GOSSIP_ON_GOSSIP_PATH,
+            GOSSIP_ON_NOSTR_PATH,
             EVICTED,
         ];
         let distinct: HashSet<_> = all.into_iter().collect();

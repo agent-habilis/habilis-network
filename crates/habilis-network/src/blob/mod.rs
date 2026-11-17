@@ -52,7 +52,7 @@ pub use ticket::BlobTicket;
 #[cfg(test)]
 mod tests {
     use super::{BlobError, BlobServer, BlobTicket, ContentId, fetch};
-    use crate::protocol::meshes::LookupOpts;
+    use crate::protocol::meshes::{LookupOpts, NostrChoice};
     use crate::transport::PayloadPath;
     use rand::RngCore;
     use std::path::PathBuf;
@@ -178,6 +178,29 @@ mod tests {
         fs::remove_file(&src).ok();
         server.shutdown().await;
         out
+    }
+
+    /// **A Nostr-only mesh starts no producer.** A ticket carries no Nostr, so the tickets of such a
+    /// producer would decode as loopback-only, and no other machine could fetch from it.
+    #[test]
+    fn a_nostr_only_mesh_starts_no_producer() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let nostr_only = LookupOpts::loopback().nostr(NostrChoice::Pinned);
+                let started =
+                    BlobServer::start(nostr_only, temp_spool(), None, PayloadPath::RelayAllowed)
+                        .await;
+                let Err(refused) = started else {
+                    panic!("a Nostr-only mesh started a producer");
+                };
+                assert!(
+                    refused.to_string().contains("carries no Nostr"),
+                    "the refusal says why: {refused}"
+                );
+            },
+        );
     }
 
     /// **A caller's long-lived endpoint serves many fetches and stays open.**

@@ -43,31 +43,40 @@ typedef struct habilis_network_mesh habilis_network_mesh;
  *   - neither — create a fresh mesh; `lookup` says how far it reaches, and
  *               habilis_network_mesh_id() returns the minted id.
  *
- * Three comma-separated lists name the mesh-wide choices a create bakes into
- * the id, one concept each: `lookup` is how members find each other,
- * `transport` is what payload may ride, `relay_urls` is which relay. A joiner
- * inherits all three from the id; a topic fixes `lookup` to all three lookups.
+ * Comma-separated lists name the mesh-wide choices a create bakes into the id,
+ * one concept each: `lookup` is how members find each other, `transport` is
+ * what payload may ride, `relay_urls` and `nostr_urls` are which relays. A
+ * joiner inherits all of them from the id; a topic fixes `lookup` to all four
+ * lookups.
  *
  * String fields are NUL-terminated or NULL. `max_peers == 0` takes the engine's
  * default active-view cap (G, 32). `max_direct == 0` takes the default ceiling
  * of direct connections (C, 64): the WebRTC sessions and unicast connections
  * together. A newcomer past C evicts the least valuable peer.
+ *
+ * The struct has no size field. It is 80 bytes on a 64-bit target (`nostr_urls`
+ * is at offset 72): rebuild every caller that was built with an older header,
+ * because the library reads the whole struct.
  */
 typedef struct {
   const char *mesh;
   const char *topic;
   const char *nick;       /* NULL mints a random nickname */
   const char *name;       /* mesh name on create; NULL falls back to "habilis-network" */
-  const char *lookup;     /* "mdns,dht,relay", any subset; NULL = none, a
+  const char *lookup;     /* "mdns,dht,relay,nostr", any subset; NULL = none, a
                              loopback mesh reachable from this machine only */
   const char *transport;  /* "udp,webrtc,relay", any subset with "udp" or
                              "webrtc"; NULL = "udp,webrtc", so every byte of
-                             data goes peer to peer. "relay", or a list without
-                             "udp", needs "relay" in `lookup` */
+                             data goes peer to peer. "relay" needs "relay" in
+                             `lookup`; a list without "udp" needs "relay" or
+                             "nostr" there */
   const char *relay_urls; /* comma-separated custom relay ladder; NULL = the
                              default. Needs "relay" in `lookup` */
   size_t max_peers;
   size_t max_direct;
+  const char *nostr_urls; /* comma-separated ws:// or wss:// Nostr relays;
+                             NULL = the pinned public list. Needs "nostr" in
+                             `lookup` */
 } habilis_network_opts;
 
 /*

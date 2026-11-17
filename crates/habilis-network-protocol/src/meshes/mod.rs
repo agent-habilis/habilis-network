@@ -26,8 +26,8 @@ pub use error::ConfigError;
 pub use id::{MeshId, MeshIdError};
 pub use lookup::{
     AdvertiseRequiresReachable, DEFAULT_DIRECTORY, DirectorySelection, Lookup, LookupOpts,
-    LookupSet, MeshConfig, OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection,
-    resolve_lookups, validate_advertise,
+    LookupSet, MeshConfig, NostrChoice, OptFlag, RelayChoice, RelayLadder, RelayLadderError,
+    RelaySelection, parse_nostr_urls, resolve_lookups, validate_advertise,
 };
 pub use name::{MeshName, NameError};
 pub use transport::{Transport, TransportPolicy};

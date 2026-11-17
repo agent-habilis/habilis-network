@@ -81,7 +81,7 @@ The user-facing word in the CLI is **gossip**, and that word never reaches the w
 
 ## 3. Workspace structure
 
-The workspace is a virtual manifest: fourteen crates under `crates/`, plus `tasks` and the chat example.
+The workspace is a virtual manifest: fifteen crates under `crates/`, plus `tasks` and the chat example.
 All crates share one version from `[workspace.package]`.
 Dependencies point strictly downward.
 
@@ -98,6 +98,7 @@ graph TD
     engine --> logging["habilis-network-logging<br>tracing sink"]
     engine --> mh["habilis-network-iroh-multihop-transport"]
     engine --> webrtc["habilis-network-iroh-webrtc-transport"]
+    engine --> nostr["habilis-network-iroh-nostr-address-lookup<br>Nostr relay client"]
     doc --> proto["habilis-network-protocol<br>wire vocabulary"]
     logging --> proto
     proto --> util["habilis-network-util<br>host helpers, constants"]
@@ -122,6 +123,7 @@ The engine depends on `habilis-network-iroh-webrtc-transport` on both targets: t
 | `habilis-network-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `habilis-network-blobs`. The engine keeps the chunked values of the shared state in it (section 8.3). |
 | `habilis-network-iroh-webrtc-transport` | An iroh custom transport: QUIC datagrams over a WebRTC data channel. |
 | `habilis-network-iroh-multihop-transport` | An iroh custom transport: source-routed relaying through peers. |
+| `habilis-network-iroh-nostr-address-lookup` | A Nostr relay client: signed ephemeral events, one socket per relay per process. Knows nothing about meshes. Reaches wasm32. |
 
 The measurement that drove the split was a consumer binary where the engine cost 39.4 MiB of 40.7 MiB.
 
@@ -140,6 +142,7 @@ It adds the control socket, the state file, process helpers, the log sink, and t
 The `mdns` and `dht` features each select one address-lookup mechanism, and each implies `host`.
 The `blob` feature adds a side channel for oversize payloads (section 7.3).
 A build with `--no-default-features` leaves the portable engine that runs in a browser.
+The Nostr lookup has no feature: it runs on both targets, so a browser and a native peer can meet with it alone.
 
 ## 4. Identity and cryptography
 
@@ -170,10 +173,14 @@ graph TD
 
 A joiner derives all of these locally, before any network contact.
 
+The Nostr lookup derives three more values from the topic id, not from the seed, so a password or an invite gates them too: `nostr-room` (the room tag), `nostr-seal` (the key that seals every signal) and `nostr-relays` (the seed that ranks the relays).
+
 ### 4.3 The mesh id
 
 The mesh id is a bare Base58Check string, called the **join id** in user-facing text.
 The decoded wire format is: one version byte, the 32-byte seed, the name length and name, the configuration length and configuration.
+The configuration holds the lookup byte, the transport byte, and a feature byte that is present only when a feature is on.
+A password, an invite and the Nostr lookup are features, so a build that predates one refuses the id with an upgrade error instead of reading it as a mesh without it.
 No peer address is ever stored, so the mesh is creator-independent.
 The id carries the seed, so the id **is** the bearer credential.
 For this reason the logs print the derived topic id and never the mesh id.
@@ -327,6 +334,28 @@ A holder checks the ladder at every heal tick:
 - The holder of rung 0 is never asked to yield: the lowest live rung wins.
 
 A loopback mesh has no timed rival re-check. The two checks above are its repair of a second beacon, which can stand up when a host is too loaded to answer.
+
+### 5.5 The Nostr lookup
+
+A mesh with `nostr` among its lookups also meets over public Nostr relays, the model Trystero uses.
+Each member publishes a `Hello` on the room tag: its endpoint id, whether it needs a data channel, and up to eight IP addresses.
+It announces at 0, 1, 3, 5, 10, 15, 20, 25 and 30 s, then every 60 s.
+At the 60 s cadence it also sends a `Hello` to its own tag, so the relay pool sees whether each relay still forwards directed events.
+Every signal is sealed with the room key and signed by the iroh endpoint key, so the `from` field is as strong as a TLS-proven id.
+The receiver drops a signal with a bad signature, a timestamp outside ±120 s, the wrong addressee, or a nonce it has already seen.
+
+A `Hello` from an unlinked peer starts a link.
+If both ends have IP and the peer gave addresses, the node tries those addresses for 3 s.
+If that fails, or either end needs a data channel, the lower endpoint id sends a WebRTC offer to the peer's own tag, and the answer comes back the same way.
+The higher id instead sends a `Hello` to the lower id's tag, at most once every 30 s.
+Every path ends in the existing gossip graft, so a Nostr pair needs no beacon.
+
+A mesh whose only lookup is Nostr has no rendezvous: no member hosts a beacon or dials one.
+Every member ranks the relays the same way (HRW over `nostr-relays`).
+A node holds the top 3 healthy relays while it has no link, and the top 1 once it has been linked for 10 s.
+A hidden browser tab holds 1.
+So a joiner at width 3 overlaps a linked member at width 1, unless one side has retired the first relay and the other has not.
+`nostr_urls` (`nostrUrls`, `--nostr-url`) replaces the pinned public list; like `relay_urls`, it is in the id.
 
 ## 6. The engine at run time
 
@@ -696,9 +725,10 @@ The policy is in the id so that every member enforces the same rule; one relayin
 An id of version 1, minted before the policy had its own byte, is refused with a request to upgrade: the mesh is created again.
 
 Every create surface names three mesh-wide choices apart, because they are three concepts.
-`lookup` (`--lookup mdns,dht,relay` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
+`lookup` (`--lookup mdns,dht,relay,nostr` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
 `transport` (`--transport udp,webrtc,multihop,gossip,relay`, `transport: ['udp', 'webrtc', 'multihop', 'gossip', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, `multihop` and `gossip` need one of the two next to them, and `udp,webrtc,multihop,gossip` is the default.
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
+`nostr_urls` (`--nostr-url`, `nostrUrls`) says which Nostr relays, and needs `nostr` among the lookups.
 `habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
 The two rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, and so does letting the relay carry payload.
 A config that breaks either is rejected before any network, along with a custom ladder that would not survive the wire (`MeshConfig::validate`).
@@ -731,6 +761,8 @@ A live connection gains a path only when another connection to the peer complete
 Signaling is vanilla ICE, with no trickle.
 Candidates ride inside the SDP, so gathering completes before an envelope goes out.
 In the mesh, the iroh relay is the signaling rendezvous.
+On a mesh with the Nostr lookup, the offer and answer can ride Nostr instead (section 5.5).
+The engine uses Nostr when the mesh has no rendezvous, or when it heard the peer over Nostr in the last 5 min, so a dead iroh relay does not hold an admission slot.
 
 ```mermaid
 sequenceDiagram

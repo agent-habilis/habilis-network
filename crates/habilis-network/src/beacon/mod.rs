@@ -59,7 +59,7 @@ pub(crate) use held::{Held, Walk, read_busy_rungs, read_ladder, walk_ladder};
 pub(crate) use lookups::beacon_lookups;
 pub(crate) use rendezvous::{Rendezvous, RendezvousLane};
 pub(crate) use rendezvous_params::RendezvousParams;
-pub(crate) use rival_probe::{RivalProbe, probe_verdict, spawn_rival_probe};
+pub(crate) use rival_probe::{RivalProbe, bare_id_resolvable, probe_verdict, spawn_rival_probe};
 pub(crate) use rung_ladder::{
     busy_rungs, refresh_holder_rung, rendezvous_addr, rendezvous_addr_without, rung_of,
 };

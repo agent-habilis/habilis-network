@@ -51,6 +51,10 @@ pub struct TransportHandles {
     /// direct path and above the relay. On the member endpoint only: the beacon, the
     /// blob endpoint and the multihop underlay never carry it.
     pub gossip: Option<habilis_network_iroh_gossip_transport::GossipHandle>,
+    /// Nostr as a path: QUIC datagrams in ephemeral events on the relays of a custom list, the
+    /// last rung before the relay's own `Other`. On the member endpoint only. The admission
+    /// table keeps a clone: the receive task of the transport stops with the last one.
+    pub nostr: Option<habilis_network_iroh_nostr_transport::NostrTransport>,
     /// The table that decides who holds a direct-peer slot. When set, the
     /// endpoint reports every connection to it, so that it can drop the ones
     /// that are gone.
@@ -71,6 +75,6 @@ impl TransportHandles {
         if self.multihop.is_some() {
             return false;
         }
-        self.webrtc.is_none() && self.gossip.is_none()
+        self.webrtc.is_none() && self.gossip.is_none() && self.nostr.is_none()
     }
 }

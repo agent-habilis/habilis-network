@@ -13,6 +13,7 @@ use crate::daemon::state;
 use crate::lookup::EndpointError;
 use crate::transport::probe;
 
+use crate::transport;
 use n0_future::task;
 use n0_future::time::Instant;
 /// What an offer is for, which decides what happens once its session attaches.
@@ -35,6 +36,33 @@ pub(crate) enum Offer {
     /// was taken back): nothing to judge, so the frames parked for it flush at once. The
     /// connection that was open before the attach is nudged onto the session, as in the race.
     AfterLoss,
+}
+
+/// Whether the session a round just attached stays. A UDP-race round's
+/// session goes if UDP won while the round ran: it would sit unused and hold
+/// one of the direct-peer slots. Shared by the signal ALPN and Nostr offers.
+pub(crate) async fn keeps_session(
+    offer: Offer,
+    endpoint: &iroh::Endpoint,
+    pool: &transport::UnicastPool,
+    handle: &WebRtcHandle,
+    peer: EndpointId,
+) -> bool {
+    // A connection opened before the attach rides the session only after a connect.
+    if matches!(
+        offer,
+        Offer::UdpRace | Offer::AfterLoss | Offer::RendezvousLinked
+    ) {
+        nudge_acceptor::nudge_session(endpoint, peer).await;
+    }
+    // The race is judged on the connection after the nudge.
+    if offer == Offer::UdpRace && pool.udp_won(peer).await {
+        if handle.detach(&peer) {
+            tracing::debug!(target: LOG_TARGET, %peer, "udp won the race; webrtc session detached");
+        }
+        return false;
+    }
+    true
 }
 
 /// The shared tail of every offer: hold the admission slot in a spawned
@@ -78,21 +106,10 @@ pub(crate) fn spawn_offer_round(
         // The peer took the round: it is not refusing us, so its wait starts over.
         admission.note_success(peer);
         admission.sync_gossip();
-        // A connection opened before the attach rides the session only after a connect.
-        if matches!(
-            offer,
-            Offer::UdpRace | Offer::AfterLoss | Offer::RendezvousLinked
-        ) {
-            nudge_acceptor::nudge_session(&endpoint, peer).await;
+        if !keeps_session(offer, &endpoint, &pool, &handle, peer).await {
+            return;
         }
-        // The race is judged on the connection after the nudge.
-        if offer == Offer::UdpRace && pool.udp_won(peer).await {
-            // UDP won while the round ran: the session would sit unused and hold
-            // one of the direct-peer slots.
-            if handle.detach(&peer) {
-                tracing::debug!(target: LOG_TARGET, %peer, "udp won the race; webrtc session detached");
-            }
-        } else if offer == Offer::RendezvousLinked {
+        if offer == Offer::RendezvousLinked {
             tracing::info!(target: LOG_TARGET, %peer, "webrtc session attached to the linked rendezvous");
         } else {
             if offer == Offer::Rendezvous {

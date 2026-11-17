@@ -53,6 +53,13 @@ pub enum Transport {
     /// for payload rather than relayed. Meaningless without a relay lookup, so rejected together
     /// with [`RelayChoice::Disabled`](crate::RelayChoice).
     Relay,
+    /// Carry payload over ephemeral events on the Nostr relays of a custom `nostr_urls`, when no
+    /// other path links a pair. It is the last rung before `Other`. It needs the Nostr lookup and a
+    /// custom relay list, because only those relays are trusted to carry payload (the pinned public
+    /// ones carry lookup and signalling alone). [`MeshConfig::resolve_with_nostr`](crate::MeshConfig)
+    /// turns it on for a custom list when the `transport` list is empty; the bare
+    /// [`TransportPolicy::default`] does not.
+    Nostr,
 }
 
 /// The error for `multihop` with no direct transport next to it: it forwards
@@ -61,7 +68,7 @@ pub enum Transport {
 pub(super) const MULTIHOP_ALONE: &str = "transport `multihop` cannot be the only transport: it forwards over a direct path, name `udp` or `webrtc`";
 
 impl Transport {
-    const NAMES: &[&str] = &["udp", "webrtc", "multihop", "gossip", "relay"];
+    const NAMES: &[&str] = &["udp", "webrtc", "multihop", "gossip", "relay", "nostr"];
 
     /// The name the list spells this transport by.
     #[must_use]
@@ -72,6 +79,7 @@ impl Transport {
             Self::Multihop => "multihop",
             Self::Gossip => "gossip",
             Self::Relay => "relay",
+            Self::Nostr => "nostr",
         }
     }
 
@@ -83,6 +91,7 @@ impl Transport {
             Self::Multihop => super::lookup::TRANSPORT_MULTIHOP,
             Self::Gossip => super::lookup::TRANSPORT_GOSSIP,
             Self::Relay => super::lookup::TRANSPORT_RELAY,
+            Self::Nostr => super::lookup::TRANSPORT_NOSTR,
         }
     }
 }
@@ -97,6 +106,7 @@ impl FromStr for Transport {
             "multihop" => Ok(Self::Multihop),
             "gossip" => Ok(Self::Gossip),
             "relay" => Ok(Self::Relay),
+            "nostr" => Ok(Self::Nostr),
             other => Err(ChoiceError::new("transport", other, Self::NAMES)),
         }
     }
@@ -132,7 +142,8 @@ pub struct TransportPolicy {
 
 impl Default for TransportPolicy {
     /// `udp,webrtc,multihop,gossip`: every direct path, multi-hop and gossip, the relay for
-    /// lookup alone.
+    /// lookup alone. It does not add the Nostr transport: [`MeshConfig::resolve_with_nostr`](crate::MeshConfig)
+    /// does, for an empty `transport` list and a custom relay list.
     fn default() -> Self {
         Self {
             transports: BTreeSet::from([
@@ -212,6 +223,18 @@ impl TransportPolicy {
     ) -> Self {
         self.set(Transport::Relay, relay_transport)
     }
+
+    /// Set whether the Nostr relays of a custom list carry payload. It stays off in
+    /// [`TransportPolicy::default`]: [`MeshConfig::resolve_with_nostr`](crate::MeshConfig) turns it
+    /// on for a custom list, and a mesh that carries it needs one (see [`MeshConfig::validate`](crate::MeshConfig)).
+    #[must_use]
+    pub fn nostr_transport(
+        self,
+        // true enables the Nostr transport
+        nostr_transport: bool,
+    ) -> Self {
+        self.set(Transport::Nostr, nostr_transport)
+    }
 }
 
 impl TransportPolicy {
@@ -281,6 +304,7 @@ impl TryFrom<u8> for TransportPolicy {
             Transport::Multihop,
             Transport::Gossip,
             Transport::Relay,
+            Transport::Nostr,
         ]
         .into_iter()
         .filter(|transport| byte & transport.bit() != 0)

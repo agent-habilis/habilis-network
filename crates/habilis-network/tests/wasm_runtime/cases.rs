@@ -87,6 +87,89 @@ fn a_message_can_be_authored() {
     assert!(!message.id.to_string().is_empty(), "frame carries no id");
 }
 
+/// A browser endpoint on a Nostr-only mesh: no relay, no IP, only the `WebRTC`
+/// hub. It must bind. Its address is empty by design; the signed lane flag,
+/// not the address, tells peers to reach it over a data channel.
+#[wasm_bindgen_test]
+async fn a_relayless_webrtc_endpoint_binds() {
+    use habilis_network::iroh::SecretKey;
+    use habilis_network::net::{TransportHandles, TransportOpts, build_endpoint};
+    use habilis_network::protocol::LookupOpts;
+    use habilis_network::protocol::meshes::NostrChoice;
+    use habilis_network_iroh_webrtc_transport::WebRtcHandle;
+
+    let key = SecretKey::generate();
+    let hub = WebRtcHandle::hub(key.public());
+    let lookups = LookupOpts::loopback().nostr(NostrChoice::Pinned);
+    let mut transports = TransportHandles::default();
+    transports.webrtc = Some(hub);
+    transports.options = TransportOpts::default()
+        .udp(false)
+        .relay(false)
+        .webrtc(true)
+        .gossip(false);
+    let endpoint = build_endpoint(&lookups, Some(key), None, Vec::new(), transports)
+        .await
+        .expect("a relay-less WebRTC endpoint binds");
+    // Empty on purpose: this is why peers learn the lane from a signed flag.
+    // An address here would mean a path the browser does not have.
+    assert!(
+        endpoint.addr().addrs.is_empty(),
+        "a browser with no relay advertises no address"
+    );
+    endpoint.close().await;
+}
+
+/// A browser endpoint whose only transport is Nostr: no relay, no IP, no data channel. It must
+/// bind, and a mesh that lists Nostr must count it as a way to carry payload without UDP.
+#[wasm_bindgen_test]
+async fn a_nostr_only_browser_endpoint_binds_and_carries() {
+    use habilis_network::iroh::SecretKey;
+    use habilis_network::net::{TransportHandles, TransportOpts, build_endpoint};
+    use habilis_network::protocol::meshes::NostrChoice;
+    use habilis_network::protocol::{LookupOpts, TransportPolicy};
+    use habilis_network_iroh_nostr_transport::NostrTransport;
+
+    let key = SecretKey::generate();
+    let custom: url::Url = "wss://relay.example".parse().expect("a relay URL");
+    let lookups = LookupOpts::loopback().nostr(NostrChoice::Custom(vec![custom]));
+    let nostr = NostrTransport::new(key.public());
+    // The browser socket opens on activation: the transport serves this endpoint and carries no
+    // frame before an engine allows a pair.
+    assert!(
+        nostr.activate(
+            habilis_network::protocol::nostr::NostrKeys::derive(
+                &habilis_network::protocol::TopicId::from_bytes([1u8; 32])
+            ),
+            vec!["wss://relay.example".parse().expect("a relay URL")],
+        ),
+        "the first activation opens the data lane"
+    );
+    assert_eq!(
+        nostr.handle().app_id(),
+        key.public(),
+        "it serves the endpoint"
+    );
+    let mut transports = TransportHandles::default();
+    transports.nostr = Some(nostr);
+    let options = TransportOpts::default().udp(false).relay(false);
+    transports.options = options.webrtc(false).gossip(false).nostr(true);
+    let endpoint = build_endpoint(&lookups, Some(key), None, Vec::new(), transports)
+        .await
+        .expect("a Nostr-only endpoint binds");
+    endpoint.close().await;
+
+    let policy = TransportPolicy::default().nostr_transport(true);
+    let options = TransportOpts::default()
+        .udp(false)
+        .webrtc(false)
+        .within(&policy);
+    assert!(
+        options.carry_without_udp(&policy),
+        "a browser carries payload over Nostr when the mesh lists it"
+    );
+}
+
 /// A tab has no UDP socket, whatever the mesh's list allows. The paths a node
 /// runs come from `within`, so it must say so there: code that reads
 /// `TransportOpts::udp` then needs no browser special case.

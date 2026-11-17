@@ -35,6 +35,41 @@ impl From<bool> for GossipPath {
     }
 }
 
+/// Whether Nostr is one of the paths of an instance, kept as an enum for the same reason as
+/// [`GossipPath`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum NostrPath {
+    /// Nostr carries no data.
+    #[default]
+    Off,
+    /// Nostr carries data.
+    On,
+}
+
+impl NostrPath {
+    /// Whether Nostr carries data.
+    #[must_use]
+    pub fn is_on(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    /// Make the Nostr path from a flag.
+    #[must_use]
+    pub fn from_bool(
+        // `true` makes Nostr carry data (`On`); `false` keeps it off (`Off`).
+        on: bool,
+    ) -> Self {
+        if on { Self::On } else { Self::Off }
+    }
+}
+
+impl From<bool> for NostrPath {
+    fn from(on: bool) -> Self {
+        Self::from_bool(on)
+    }
+}
+
 /// Which transports this *instance* may carry data on.
 ///
 /// Deliberately **not** part of the mesh id. [`LookupOpts`](crate::protocol::meshes::LookupOpts) is mixed into
@@ -81,6 +116,10 @@ pub struct TransportOpts {
     /// other path. Off by default, and set only by [`Self::within`]: it is a choice of the
     /// mesh, which every member makes the same way, and not a limit of this node.
     pub gossip: GossipPath,
+    /// Nostr as a path: the data lane of the relays of a custom list carries the QUIC datagrams of
+    /// a pair that has no other path. Off by default, and set only by [`Self::within`], as
+    /// gossip is: the mesh decides.
+    pub nostr: NostrPath,
 }
 
 impl TransportOpts {
@@ -127,6 +166,17 @@ impl TransportOpts {
         self.gossip = GossipPath::from(gossip);
         self
     }
+
+    /// Set the Nostr transport.
+    #[must_use]
+    pub fn nostr(
+        mut self,
+        // true enables the Nostr transport
+        nostr: bool,
+    ) -> Self {
+        self.nostr = NostrPath::from(nostr);
+        self
+    }
 }
 
 impl Default for TransportOpts {
@@ -136,6 +186,7 @@ impl Default for TransportOpts {
             relay: true,
             webrtc: true,
             gossip: GossipPath::Off,
+            nostr: NostrPath::Off,
         }
     }
 }
@@ -176,6 +227,7 @@ impl TransportOpts {
             relay: true,
             webrtc: true,
             gossip: GossipPath::Off,
+            nostr: NostrPath::Off,
         }
     }
 }
@@ -197,6 +249,8 @@ impl TransportOpts {
                     && (udp || webrtc)
                     && !cfg!(target_arch = "wasm32"),
             ),
+            // Set, not narrowed: the mesh decides, and a mesh that lists Nostr has a custom list.
+            nostr: NostrPath::from(policy.allows(Transport::Nostr)),
             ..self
         }
     }
@@ -205,6 +259,6 @@ impl TransportOpts {
     /// browser: only a data channel or relay payload can.
     #[must_use]
     pub fn carry_without_udp(self, policy: &TransportPolicy) -> bool {
-        self.webrtc || policy.allows(Transport::Relay)
+        self.webrtc || self.nostr.is_on() || policy.allows(Transport::Relay)
     }
 }

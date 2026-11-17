@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::{Ad, ListingChange, Listings, directory_mesh};
 use crate::MeshId;
-use crate::meshes::{LookupOpts, MeshName};
+use crate::meshes::{DirectorySelection, LookupOpts, MeshName, NostrChoice, validate_advertise};
 
 fn directory(name: &str) -> MeshName {
     MeshName::try_new(name).expect("the name in this test is a valid mesh name")
@@ -24,7 +24,11 @@ fn advertised_id(name: &str) -> MeshId {
 fn golden_global_directory_is_pinned() {
     let _guard = ::habilis_network_test_tracing::init();
     let name = directory("global");
-    let public = directory_mesh(&name, LookupOpts::public_preset());
+    // The public lookups as they were before the Nostr lookup: that config's ids keep their bytes.
+    let public = directory_mesh(
+        &name,
+        LookupOpts::public_preset().nostr(NostrChoice::Disabled),
+    );
     let loopback = directory_mesh(&name, LookupOpts::loopback());
     assert_eq!(
         public.to_string(),
@@ -53,6 +57,24 @@ fn golden_global_directory_is_pinned() {
             "the golden directory rendezvous id is pinned"
         );
     }
+}
+
+// The golden id and topic of the `global` directory on the Nostr preset, the
+// public preset today. The id is the pre-Nostr id with the Nostr feature byte appended.
+#[test]
+fn golden_global_directory_on_the_nostr_preset_is_pinned() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let mesh = directory_mesh(&directory("global"), LookupOpts::public_preset());
+    assert_eq!(
+        mesh.to_string(),
+        "RCgDMvmaAZ2LjzM6By9bM3bSPB2ZKqeZ9U4gtjUD3FHjHGsvZwqfdmFiYFy5AMtgyr",
+        "the golden global directory id on the Nostr preset is pinned"
+    );
+    assert_eq!(
+        format!("{:?}", mesh.topic_id()),
+        "TopicId(d5c6c0044a4171e5e947f4c26d9223ade1f3da800afcb92dab7fa2b872ec2387)",
+        "the golden global directory topic on the Nostr preset is pinned"
+    );
 }
 
 #[test]
@@ -104,6 +126,30 @@ fn directory_topic_couples_to_lookups() {
     assert_ne!(
         all_on, loopback,
         "same name, different lookups ⇒ different directory (they won't meet)"
+    );
+}
+
+/// A Nostr-only mesh can advertise (it is reachable), and it advertises
+/// into its own directory: a discoverer meets it only by naming Nostr too.
+#[test]
+fn a_nostr_only_mesh_advertises_into_its_own_directory() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let nostr_only = LookupOpts::loopback().nostr(NostrChoice::Pinned);
+    assert!(
+        validate_advertise(&DirectorySelection::Default, &nostr_only).is_ok(),
+        "a Nostr-only mesh is reachable, so it may advertise"
+    );
+    let name = directory("global");
+    let advertiser = directory_mesh(&name, nostr_only.clone()).to_string();
+    assert_eq!(
+        advertiser,
+        directory_mesh(&name, nostr_only).to_string(),
+        "the same lookups give the same directory"
+    );
+    assert_ne!(
+        advertiser,
+        directory_mesh(&name, LookupOpts::public_preset()).to_string(),
+        "a discoverer meets a Nostr-only mesh only by naming Nostr alone"
     );
 }
 

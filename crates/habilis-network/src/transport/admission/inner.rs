@@ -10,6 +10,7 @@ use iroh::endpoint::WeakConnectionHandle;
 
 use crate::util::clock::Instant;
 
+use super::nostr_name::NostrName;
 use super::{RefusalBackoff, Sessions, Slot, Victims, sampler};
 use tokio::sync::mpsc;
 
@@ -42,6 +43,14 @@ pub(crate) struct Inner {
     /// connection, so it tells the handle which peers are established and which pairs a higher
     /// rung carries (see [`Inner::sync_gossip`]).
     pub(crate) gossip: Option<habilis_network_iroh_gossip_transport::GossipHandle>,
+    /// The Nostr transport of the endpoint, when the mesh lists it. The table lets it carry only a
+    /// pair that has no other selected path (see [`Inner::sync_nostr`]).
+    pub(crate) nostr: Option<habilis_network_iroh_nostr_transport::NostrTransport>,
+    /// The peers that the engine wants Nostr for: no other usable path served them at the last
+    /// reading, or a dial to them failed. Only these get the Nostr address in a dial.
+    pub(crate) nostr_wanted: HashSet<EndpointId>,
+    /// Whether the mesh lets the relay carry payload. A relay path serves a pair only then.
+    pub(crate) relay_carries: bool,
     /// The peers that we evicted. A peer whose session we detach has no connection to read the code
     /// on, so we refuse its offer for the same minute instead.
     pub(crate) we_evicted: ceiling::EvictionBackoff,
@@ -51,7 +60,7 @@ pub(crate) struct Inner {
     /// When the recursion rule last closed a gossip connection of a peer. The closed connection
     /// leaves the table at once, so this is what keeps the pair reading as the gossip rung while
     /// the event loop handles the loss of the link (see `SignalAdmission::selected_kind`).
-    pub(crate) closed_on_rung: HashMap<EndpointId, Instant>,
+    pub(crate) closed_on_rung: HashMap<EndpointId, (Instant, probe::PathKind)>,
 }
 
 impl fmt::Debug for Inner {
@@ -182,6 +191,65 @@ impl Inner {
         }
     }
 
+    /// Tell the Nostr transport what the table sees: a peer with a live connection is established,
+    /// and frames go to a peer only when no other path is selected for the pair (see
+    /// `nostr_view`). Like [`Inner::sync_gossip`], it runs when a connection is noted and on every
+    /// sweep. A session that carries a pair with no connection left is another path too.
+    pub(crate) fn sync_nostr(&mut self) {
+        let Some(transport) = self.nostr.clone() else {
+            return;
+        };
+        let nostr = transport.handle();
+        let local = nostr.app_id();
+        let mut wanted_now: Vec<EndpointId> = Vec::new();
+        let mut unwanted: Vec<EndpointId> = Vec::new();
+        for (peer, slot) in &self.slots {
+            let open = slot.conns.iter().filter_map(WeakConnectionHandle::upgrade);
+            let live = open.filter(|connection| connection.close_reason().is_none());
+            let kinds: Vec<probe::PathKind> = live
+                .map(|connection| probe::selected_kind_unblocked(&connection, local))
+                .collect();
+            let wanted = self.nostr_wanted.contains(peer);
+            let (established, allowed) = sampler::nostr_view(&kinds, self.relay_carries, wanted);
+            nostr.set_established(*peer, established);
+            let session_hub = self.hub.as_ref();
+            let carried = kinds.is_empty() && session_hub.is_some_and(|hub| hub.has_session(peer));
+            match sampler::nostr_name(&kinds, self.relay_carries, wanted, carried) {
+                NostrName::Allow => nostr.allow(*peer, true),
+                NostrName::Stop => nostr.allow(*peer, false),
+                // No refusal by name outlives the idle slot: a peer that dials first gets its reply.
+                NostrName::Forget => nostr.forget_destination(*peer),
+            }
+            // A pair with connections and no usable path is one that the engine wants Nostr for,
+            // and a pair with a usable path is not. A pair with no connection keeps its want.
+            if !kinds.is_empty() {
+                if allowed {
+                    wanted_now.push(*peer);
+                } else {
+                    unwanted.push(*peer);
+                }
+            }
+        }
+        // A wanted peer with no slot (the dial that failed left no connection) has no reading, and
+        // the next dial must be able to send: the want alone allows it, unless a session carries it.
+        for peer in &self.nostr_wanted {
+            if self.slots.contains_key(peer) {
+                continue;
+            }
+            let session_hub = self.hub.as_ref();
+            let carried = session_hub.is_some_and(|hub| hub.has_session(peer));
+            match sampler::nostr_name(&[], self.relay_carries, true, carried) {
+                NostrName::Allow => nostr.allow(*peer, true),
+                NostrName::Stop => nostr.allow(*peer, false),
+                NostrName::Forget => nostr.forget_destination(*peer),
+            }
+        }
+        self.nostr_wanted.extend(wanted_now);
+        for peer in unwanted {
+            self.nostr_wanted.remove(&peer);
+        }
+    }
+
     /// Drop the connections that are gone, and the slots nothing holds.
     pub(crate) fn sample(&mut self) {
         for slot in self.slots.values_mut() {
@@ -192,9 +260,10 @@ impl Inner {
             });
         }
         self.sync_gossip();
+        self.sync_nostr();
         let now = Instant::now();
         self.closed_on_rung
-            .retain(|_, at| now.saturating_duration_since(*at) < RUNG_CLOSE_MEMORY);
+            .retain(|_, (at, _)| now.saturating_duration_since(*at) < RUNG_CLOSE_MEMORY);
         for peer in self.ceiling.quic_peers() {
             self.drop_quic_without_connection(peer);
         }

@@ -90,8 +90,28 @@ fn a_browser_refuses_a_stream_with_no_relay_lookup() {
         .expect_err("no path to signal on");
     assert_eq!(
         error.to_string(),
-        runtime::BROWSER_NEEDS_RELAY_LOOKUP,
+        runtime::BROWSER_CANNOT_SIGNAL,
         "a browser refuses a stream with no relay lookup with the browser message"
+    );
+}
+
+// A stream's JSEP rides the signal ALPN only, on every target, so a stream
+// refuses the Nostr lookup rather than bind with no path to signal on.
+#[test]
+fn a_stream_refuses_the_nostr_lookup() {
+    ::habilis_network_test_tracing::run_multi_thread(
+        ::habilis_network_test_tracing::init(),
+        2,
+        async {
+            let error = StreamNode::bind(&StreamOpts {
+                lookup: vec![Lookup::Nostr],
+                transport: vec![Transport::WebRtc],
+                ..StreamOpts::default()
+            })
+            .await
+            .expect_err("a stream cannot signal over nostr");
+            assert!(error.to_string().contains("nostr"), "{error}");
+        },
     );
 }
 

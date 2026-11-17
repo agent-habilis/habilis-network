@@ -36,7 +36,7 @@ mod tests {
     use super::BlobTicket;
     use crate::blob::{BlobDigest, HASH_LEN, SECRET_LEN};
     use crate::protocol::crypto::TicketSecret;
-    use crate::protocol::meshes::LookupOpts;
+    use crate::protocol::meshes::{LookupOpts, RelayChoice};
     use crate::transport::PayloadPath;
     use iroh::{EndpointAddr, SecretKey};
 
@@ -52,13 +52,19 @@ mod tests {
         )
     }
 
+    /// The lookups of the golden ticket: the public preset as it was before Nostr, which the
+    /// token carries. The preset has Nostr on now, and that changes the bytes of a ticket.
+    fn golden_lookups() -> LookupOpts {
+        LookupOpts::new(RelayChoice::Pinned).mdns(true).dht(true)
+    }
+
     fn sample(password: bool) -> BlobTicket {
         BlobTicket {
             address: sample_addr(3),
             secret: TicketSecret::from([9u8; SECRET_LEN]),
             sha256: BlobDigest::from([7u8; HASH_LEN]),
             size: 1_234_567,
-            lookups: LookupOpts::public_preset(),
+            lookups: golden_lookups(),
             password,
             relay_transport: PayloadPath::RelayAllowed,
         }
@@ -95,8 +101,8 @@ mod tests {
         );
         assert_eq!(
             decoded.lookups,
-            LookupOpts::public_preset(),
-            "the decoded lookups match the preset"
+            golden_lookups(),
+            "the decoded lookups match the sample lookups"
         );
         assert!(
             !decoded.password,

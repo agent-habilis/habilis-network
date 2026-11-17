@@ -42,13 +42,15 @@ pub(crate) fn step(input: StepInput) -> Step {
     } = input;
     let action = path_action(kind, has_session);
     let route = match kind {
-        PathKind::Relay | PathKind::None | PathKind::Gossip => route,
+        PathKind::Relay | PathKind::Nostr | PathKind::None | PathKind::Gossip => route,
         PathKind::Ip | PathKind::WebRtc | PathKind::Multihop => None,
     };
-    let gossip = gossip_on && matches!(kind, PathKind::Relay | PathKind::None) && route.is_none();
+    let gossip = gossip_on
+        && matches!(kind, PathKind::Relay | PathKind::Nostr | PathKind::None)
+        && route.is_none();
     let climbing = matches!(
         kind,
-        PathKind::Relay | PathKind::None | PathKind::Multihop | PathKind::Gossip
+        PathKind::Relay | PathKind::Nostr | PathKind::None | PathKind::Multihop | PathKind::Gossip
     );
     let nudge = (climbing && (has_session || route.is_some() || gossip)).then_some(NudgeAddrs {
         session: has_session,
@@ -56,4 +58,55 @@ pub(crate) fn step(input: StepInput) -> Step {
         gossip,
     });
     Step { action, nudge }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NudgeAddrs, PathKind, Step, StepInput};
+    use crate::transport::probe;
+    use crate::transport::probe::path_action::PathAction;
+    use habilis_network_iroh_gossip_transport as gossip_transport;
+
+    /// A pair on Nostr climbs like a pair on the relay: a route or a gossip address in a dial
+    /// moves it up. Nostr is the lowest rung, so there is always a rung above it.
+    #[test]
+    fn a_pair_on_nostr_is_nudged_up_the_ladder() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let route = iroh::TransportAddr::Custom(gossip_transport::gossip_addr(
+            iroh::SecretKey::from_bytes(&[3; 32]).public(),
+        ));
+        let on_gossip = probe::step(StepInput {
+            kind: PathKind::Nostr,
+            has_session: false,
+            route: None,
+            gossip_on: true,
+        });
+        assert_eq!(
+            on_gossip,
+            Step {
+                action: PathAction::Rerace,
+                nudge: Some(NudgeAddrs {
+                    session: false,
+                    route: None,
+                    gossip: true
+                }),
+            },
+            "a pair on Nostr is nudged onto the gossip rung"
+        );
+        let with_route = probe::step(StepInput {
+            kind: PathKind::Nostr,
+            has_session: false,
+            route: Some(route.clone()),
+            gossip_on: true,
+        });
+        assert_eq!(
+            with_route.nudge,
+            Some(NudgeAddrs {
+                session: false,
+                route: Some(route),
+                gossip: false
+            }),
+            "a pair on Nostr gets the route that the topology has"
+        );
+    }
 }

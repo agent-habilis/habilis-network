@@ -22,7 +22,10 @@ import { loadWasm } from './module.ts'
 import type { ProducerHandle, ReaderHandle, StreamNodeHandle } from './module.ts'
 import type { WasmOpts } from './index.ts'
 
-/** How a stream node reaches peers: the same lists a mesh create takes. */
+/**
+ * How a stream node reaches peers: the same lists a mesh create takes, but
+ * without `'nostr'`, which signals only a mesh.
+ */
 export interface StreamOpts {
   lookup?: Lookup[]
   transport?: Transport[]

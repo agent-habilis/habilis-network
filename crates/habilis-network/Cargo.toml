@@ -166,7 +166,13 @@ iroh-mainline-address-lookup = { workspace = true, optional = true }
 # handshake tokens). default-features off: no `password-hash` string format —
 # we only need the raw `hash_password_into` KDF.
 argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
-futures-util = "0.3"
+futures-util.workspace = true
+# The Nostr lookup and JSEP carrier, on both targets: a browser's WebSocket
+# natively, tokio-websockets on a host.
+habilis-network-iroh-nostr-address-lookup = { path = "../habilis-network-iroh-nostr-address-lookup" }
+# Nostr as an iroh custom transport: the last rung, for a mesh with a custom relay list.
+habilis-network-iroh-nostr-transport = { path = "../habilis-network-iroh-nostr-transport" }
+url.workspace = true
 # End-to-end sealing of directed frames: a NaCl-style sealed box (ephemeral
 # X25519 ECDH → ChaCha20-Poly1305) so only the addressed recipient can read a
 # directed body. The AEAD key is derived from the ECDH secret via the in-tree
@@ -223,6 +229,7 @@ iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh"
 habilis-network-iroh-webrtc-transport = { path = "../habilis-network-iroh-webrtc-transport", features = ["web"] }
 iroh.workspace = true
 iroh-gossip.workspace = true
+web-sys = { workspace = true, features = ["Document", "VisibilityState", "Window"] }
 
 # Scoped to non-wasm on purpose. The workspace `tokio` dev-dep turns on `net`,
 # which drags in `mio` — and dev-dependencies are resolved for test targets too,
@@ -233,6 +240,7 @@ habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
 # The unit tests of the daemon setup bind on a relay of this machine (`test_relay::spawn_plain`)
 # with no `iroh-test-utils`: a test must not reach the real relay and its DNS.
 iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "e970dd25148386850feaffbac044bba64765fe73", default-features = false, features = ["server"] }
+habilis-network-iroh-nostr-address-lookup = { path = "../habilis-network-iroh-nostr-address-lookup", features = ["test-relay"] }
 proptest.workspace = true
 insta.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

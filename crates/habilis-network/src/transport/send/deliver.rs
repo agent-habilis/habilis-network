@@ -316,7 +316,10 @@ fn want_lane_if_needed(state: &mut EventLoopState, eid: EndpointId) {
     });
     // A pair that lost its direct path reads as the relay: if its offer failed, nobody would
     // offer again, so the parked frame asks.
-    let reads_as_relay = state.pair_path_kind(eid) == Some(PathKind::Relay);
+    let reads_as_relay = matches!(
+        state.pair_path_kind(eid),
+        Some(PathKind::Relay | PathKind::Nostr)
+    );
     if needs_lane || reads_as_relay {
         state.want_lane_session(eid, clock::Instant::now());
     }

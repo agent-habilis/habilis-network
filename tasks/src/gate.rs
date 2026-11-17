@@ -87,15 +87,20 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "native,bench", "--all-targets"],
     },
-    // Six crates are reachable on wasm32 and between them that is a
+    // Seven crates are reachable on wasm32 and between them that is a
     // substantial amount of code nothing else compiles: `habilis-network-chunks`'s
     // IndexedDB backend, the whole `web` backend of the WebRTC transport, the
-    // portable half of the engine, `habilis-network-netplay`'s simulation,
+    // browser socket of the Nostr client, the portable half of the engine, `habilis-network-netplay`'s simulation,
     // `habilis-network-stream`'s byte streams, and `habilis-network-wasm`, the browser peer.
     // Without these rows that code rots silently, and the `#[expect(...)]`
     // attributes inside it are never lint-checked either.
     // `wasm-simd` only changes blake3's codegen, so checking with it on costs
     // nothing and keeps the feature from rotting.
+    Step {
+        kind: Kind::OmittedPatterns,
+        scope: Scope::Workspace,
+        args: &["--all-targets"],
+    },
     Step {
         kind: Kind::WasmCheck,
         scope: Scope::Crate("habilis-network-chunks"),
@@ -105,6 +110,16 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::WasmCheck,
         scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "web,bench"],
+    },
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("habilis-network-iroh-nostr-address-lookup"),
+        args: &[],
+    },
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("habilis-network-iroh-nostr-transport"),
+        args: &[],
     },
     // The multihop transport forwards through a browser too, so its crate must
     // build for the browser by itself: the engine's own rows do not reach it
@@ -174,6 +189,11 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-iroh-nostr-address-lookup"),
+        args: &[],
+    },
+    Step {
+        kind: Kind::WasmClippy,
         scope: Scope::Crate("habilis-network-iroh-multihop-transport"),
         args: &[],
     },
@@ -223,6 +243,11 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::WasmClippy,
         scope: Scope::Crate("habilis-network-iroh-gossip-transport"),
+        args: &[],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-iroh-nostr-transport"),
         args: &[],
     },
     Step {

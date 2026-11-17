@@ -1,7 +1,7 @@
 use super::transport::Transport;
 use super::{
-    LockedMesh, LookupOpts, Mesh, MeshConfig, MeshName, RelayChoice, SEED_LEN, TransportPolicy,
-    UnlockError,
+    LockedMesh, LookupOpts, Mesh, MeshConfig, MeshName, NostrChoice, RelayChoice, SEED_LEN,
+    TransportPolicy, UnlockError,
 };
 use crate::crypto::{Password, Seed};
 use crate::meshes::lookup::MAX_RELAY_URL_BYTES;
@@ -9,6 +9,16 @@ use iroh_base::RelayUrl;
 
 use crate::crypto;
 use crate::crypto::Keying;
+
+/// The public preset as it was before the Nostr lookup: every id of that
+/// config keeps its bytes, so the goldens below pin it.
+fn pre_nostr_preset() -> MeshConfig {
+    MeshConfig {
+        lookups: LookupOpts::public_preset().nostr(NostrChoice::Disabled),
+        ..MeshConfig::public_preset()
+    }
+}
+
 fn dummy_seed() -> Seed {
     Seed::new([7u8; SEED_LEN])
 }
@@ -30,6 +40,7 @@ fn custom_config() -> MeshConfig {
                     .parse()
                     .expect("the literal is a valid relay URL"),
             ]),
+            nostr: NostrChoice::Disabled,
         },
         password: None,
         issuer_pubkey: None,
@@ -135,6 +146,7 @@ fn ladder_config(count: usize) -> MeshConfig {
             mdns: false,
             dht: false,
             relay_lookup: RelayChoice::Custom(ladder),
+            nostr: NostrChoice::Disabled,
         },
         password: None,
         issuer_pubkey: None,
@@ -178,6 +190,7 @@ fn validate_rejects_a_relay_url_over_the_wire_ceiling() {
                     .parse()
                     .expect("the literal relay URL is valid for this host"),
             ]),
+            nostr: NostrChoice::Disabled,
         },
         password: None,
         issuer_pubkey: None,
@@ -465,7 +478,7 @@ fn golden_passwordless_id_and_topic_are_pinned() {
     // That split is the point: this pair is what proved the de-branding
     // reached the key-derivation transcript (topic moved) without leaking
     // into the id encoding (id held).
-    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), pre_nostr_preset())
         .expect("the fixture seed, name and public config form a valid mesh");
     assert_eq!(
         mesh.to_string(),
@@ -481,13 +494,35 @@ fn golden_passwordless_id_and_topic_are_pinned() {
     );
 }
 
+// The Nostr preset is the public preset today. Its id is the id above with
+// the Nostr feature byte appended, so a build that predates Nostr refuses it
+// with its upgrade error rather than reading it as the id above.
+#[test]
+fn golden_nostr_preset_id_and_topic_are_pinned() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())
+        .expect("the fixture seed, name and public config form a valid mesh");
+    assert_eq!(
+        mesh.to_string(),
+        "ygcm7i6ZRpAx9QiqJdjGx3E2QCbjyCPRi6osHncLkGVXusApZ6JEeUyFP7FSdzz",
+        "the Nostr preset id is pinned to its golden text"
+    );
+    let topic =
+        crypto::derive_topic_id(Keying::Wire(mesh.seed()), mesh.name(), &mesh.config_bytes());
+    assert_eq!(
+        format!("{topic:?}"),
+        "TopicId(984d02b736eae0761c450a0c2d596315e32be6a2c8fa93a5454bff50439e9b4c)",
+        "the Nostr preset topic is pinned to its golden text"
+    );
+}
+
 // The golden derivations of a passworded mesh, for a fixed seed and password. They equal what the
 // code before the newtype refactor (795c4f88) gives: the password key replaces the seed in every
 // derivation, and none of the outputs moved.
 #[test]
 fn golden_passworded_mesh_id_topic_and_rendezvous_are_pinned() {
     let _guard = ::habilis_network_test_tracing::init();
-    let mut mesh = Mesh::try_new(dummy_seed(), dummy_name(), MeshConfig::public_preset())
+    let mut mesh = Mesh::try_new(dummy_seed(), dummy_name(), pre_nostr_preset())
         .expect("the fixture seed, name and public config form a valid mesh");
     mesh.set_password(Password::new("hunter2".to_owned()));
     assert_eq!(

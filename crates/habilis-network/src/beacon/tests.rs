@@ -948,6 +948,7 @@ fn public_params() -> RendezvousParams {
         relay_transport: PayloadPath::DirectOnly,
         bootstrap_relay: None,
         rung_tx: watch::channel(None).0,
+        has_rendezvous: true,
     }
 }
 

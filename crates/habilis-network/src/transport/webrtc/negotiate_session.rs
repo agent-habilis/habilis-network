@@ -1,7 +1,7 @@
 //! Negotiating one `WebRTC` session with a peer.
 
 use super::offer::Offer;
-use super::{nudge_acceptor, offer, retry, session_policy};
+use super::{nostr_signal, nudge_acceptor, offer, retry, session_policy};
 use crate::daemon::handler_ctx::HandlerCtx;
 
 use iroh::{EndpointAddr, EndpointId};
@@ -39,7 +39,7 @@ pub(crate) fn negotiate_session(
     // browser is the lower id it is the browser that evaluates this. It would
     // see the native peer's IP, skip, and the native — waiting to be dialled —
     // would never offer. The pair would silently never get a channel.
-    let needs_lane = session_policy::pair_needs_lane(&address, state.local_udp_transport);
+    let needs_lane = session_policy::peer_needs_lane(state, peer, &address);
     let kind = state.pair_path_kind(peer);
     let proven = state.direct.get(&peer) == Some(&DirectState::Direct);
     if !session_policy::wants_session(needs_lane, kind, proven) {
@@ -81,7 +81,10 @@ pub(crate) fn negotiate_session(
         let endpoint = context.endpoint.clone();
         task::spawn(async move { nudge_acceptor::nudge_session(&endpoint, peer).await });
     }
-    let demoted = reads_as_relay && !has_session;
+    // A pair that Nostr carries keeps its proof where the mesh lists Nostr: the offer of a session
+    // is a climb, not a loss of the pair. It stays out of `RelayOnly`, which would hold its frames.
+    let on_nostr = kind == Some(probe::PathKind::Nostr) && state.relay_transport.nostr_allowed();
+    let demoted = reads_as_relay && !has_session && !on_nostr;
     if demoted {
         state.direct.insert(peer, DirectState::RelayOnly);
         tracing::info!(
@@ -112,5 +115,11 @@ pub(crate) fn negotiate_session(
     } else {
         Offer::UdpRace
     };
+    // With no rendezvous, or a peer heard over Nostr, the ALPN may have no
+    // path to ride; the offer goes over Nostr instead.
+    if nostr_signal::discovery::prefer_nostr(state, peer) {
+        nostr_signal::discovery::spawn_offer(state, peer, guard, offer);
+        return;
+    }
     offer::spawn_offer_round(state, context, peer, address, handle, guard, offer);
 }

@@ -206,7 +206,8 @@ pub(crate) fn offer_rendezvous_off_tick(
     state: &mut state::EventLoopState,
     context: &HandlerCtx<'_>,
 ) {
-    if offers_off_tick(state) {
+    // A mesh with no rendezvous (Nostr only) has no id to offer to.
+    if state.has_rendezvous && offers_off_tick(state) {
         negotiate_rendezvous_session(state, context);
     }
 }

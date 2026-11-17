@@ -25,7 +25,7 @@ use crate::counters::{Counters, Stats};
 use crate::delivery::Delivery;
 use crate::frame_sink::FrameSink;
 use crate::shared::{INBOUND_CAP, Packet, Shared, locked};
-use crate::{frame, gossip_addr, parse_gossip_addr};
+use crate::{GOSSIP_TRANSPORT_ID, frame, parse_transport_addr, transport_addr};
 
 use iroh::endpoint::transports;
 
@@ -59,13 +59,25 @@ impl GossipHandle {
     /// A handle with no sink. The path is not valid until `attach` is called.
     #[must_use]
     pub fn new(app_id: EndpointId) -> Self {
+        Self::with_transport_id(app_id, GOSSIP_TRANSPORT_ID)
+    }
+
+    /// A handle with no sink for the custom transport `transport_id`: the core that
+    /// frames, budgets, counts and delivers is the same for every frame transport,
+    /// and the id is the one thing that names which transport it serves. The sink
+    /// that `attach` takes is the other.
+    #[must_use]
+    pub fn with_transport_id(app_id: EndpointId, transport_id: u64) -> Self {
         // shared by the handle, the transport and the receive task
         let shared = Arc::new(Shared {
             app_id,
-            local_addr: gossip_addr(app_id),
+            transport_id,
+            local_addr: transport_addr(transport_id, app_id),
             sink: Mutex::new(None),
             attached: AtomicBool::new(false),
             blocked: Mutex::new(HashSet::new()),
+            default_allowed: AtomicBool::new(true),
+            permitted: Mutex::new(HashSet::new()),
             budget: Mutex::new(None),
             established: Mutex::new(HashSet::new()),
             counters: Counters::default(),
@@ -129,18 +141,49 @@ impl GossipHandle {
         allowed: bool,
     ) {
         let mut blocked = locked(&self.shared.blocked);
+        let mut permitted = locked(&self.shared.permitted);
         if allowed {
             blocked.remove(&dst);
+            permitted.insert(dst);
         } else {
             blocked.insert(dst);
+            permitted.remove(&dst);
         }
     }
 
+    /// Forget everything the engine said about `dst`: it is a destination that was never named
+    /// again. The engine calls this for a pair with no connection and no want, so that no
+    /// refusal by name outlives the slot of the pair.
+    pub fn forget_destination(&self, dst: EndpointId) {
+        locked(&self.shared.blocked).remove(&dst);
+        locked(&self.shared.permitted).remove(&dst);
+    }
+
+    /// Allow frames to `dst` as replies to a frame that it sent, unless the engine stopped `dst`
+    /// by name: `allow(dst, false)` stands. On a closed handle (see [`Self::set_default_allow`])
+    /// this is how a pair that chose this path gets its answers.
+    pub fn allow_reply(&self, dst: EndpointId) {
+        if !locked(&self.shared.blocked).contains(&dst) {
+            locked(&self.shared.permitted).insert(dst);
+        }
+    }
+
+    /// Whether a destination that was never named is allowed. It is by default: a handshake to a
+    /// new peer must not be dropped. A transport that carries a pair only when nothing else does
+    /// sets it to `false`, and the engine allows the pairs that need it by name.
+    pub fn set_default_allow(
+        &self,
+        // true allows a destination that was never named, false refuses it
+        allowed: bool,
+    ) {
+        self.shared.default_allowed.store(allowed, Ordering::SeqCst);
+    }
+
     /// Whether frames to `dst` are allowed: the last call of [`Self::allow`], and true for a
-    /// destination that was never named.
+    /// destination that was never named, unless [`Self::set_default_allow`] closed the handle.
     #[must_use]
     pub fn is_allowed(&self, dst: EndpointId) -> bool {
-        !locked(&self.shared.blocked).contains(&dst)
+        self.shared.is_allowed(dst)
     }
 
     /// Whether `dst` was last told to be established, by [`Self::set_established`].
@@ -225,7 +268,7 @@ impl GossipHandle {
             return Delivery::NotForUs;
         }
         let packet = Packet {
-            remote: gossip_addr(frame.src),
+            remote: transport_addr(self.shared.transport_id, frame.src),
             bytes: frame.datagram.to_vec(),
         };
         if self.inbound.try_send(packet).is_err() {
@@ -337,7 +380,8 @@ impl CustomSender for GossipSender {
     /// Valid only for a gossip address, and only while a sink is attached: a path
     /// that cannot carry a packet must not be selected.
     fn is_valid_send_addr(&self, address: &CustomAddr) -> bool {
-        parse_gossip_addr(address).is_some() && self.shared.path_is_valid()
+        parse_transport_addr(self.shared.transport_id, address).is_some()
+            && self.shared.path_is_valid()
     }
 
     fn poll_send(
@@ -347,8 +391,8 @@ impl CustomSender for GossipSender {
         _src: Option<&CustomAddr>,
         transmit: &Transmit<'_>,
     ) -> Poll<io::Result<()>> {
-        let Some(dst) = parse_gossip_addr(dst) else {
-            return Poll::Ready(Err(io::Error::other("not a gossip address")));
+        let Some(dst) = parse_transport_addr(self.shared.transport_id, dst) else {
+            return Poll::Ready(Err(io::Error::other("not an address of this transport")));
         };
         // A GSO batch is several datagrams; each is one QUIC packet and one frame.
         for datagram in habilis_network_iroh_transport_util::datagrams(transmit) {
@@ -372,12 +416,12 @@ mod tests {
 
     use super::{
         Arc, Context, CustomTransport, Delivery, EndpointId, FrameSink, GossipHandle, Mutex,
-        Ordering, Poll, RecvInfo, gossip_addr, io,
+        Ordering, Poll, RecvInfo, io,
     };
     use crate::frame::Frame;
     use crate::hub::Hub;
     use crate::shared::{INBOUND_CAP, locked};
-    use crate::{GOSSIP_TRANSPORT_ID, frame};
+    use crate::{GOSSIP_TRANSPORT_ID, NOSTR_TRANSPORT_ID, frame, gossip_addr, transport_addr};
 
     use iroh::endpoint::{Connection, Connection as iroh_Connection};
     use std::{panic, task};
@@ -513,6 +557,57 @@ mod tests {
         assert!(sender.is_valid_send_addr(&to_bob), "after attach");
         handle.detach();
         assert!(!sender.is_valid_send_addr(&to_bob), "after detach");
+    }
+
+    /// The core takes its transport id as a parameter: a handle made for the Nostr id
+    /// names and reads Nostr addresses, and refuses a gossip address.
+    #[test]
+    fn a_handle_for_another_transport_id_speaks_that_id_only() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = secret(1).public();
+        let handle = GossipHandle::with_transport_id(me, NOSTR_TRANSPORT_ID);
+        let mut endpoint = handle.transport.bind().expect("bind");
+        let sender = endpoint.create_sender();
+        let to_bob = secret(2).public();
+        // the test reads the recorder after the handle takes a clone
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(Arc::clone(&recorder));
+
+        assert!(
+            sender.is_valid_send_addr(&transport_addr(NOSTR_TRANSPORT_ID, to_bob)),
+            "a Nostr address is valid for a Nostr handle"
+        );
+        assert!(
+            !sender.is_valid_send_addr(&gossip_addr(to_bob)),
+            "a gossip address is not valid for a Nostr handle"
+        );
+        handle.shared.send_datagram(to_bob, &[1u8; 10]);
+        assert_eq!(locked(&recorder.0).len(), 1, "the datagram is framed");
+
+        let from_bob = (Frame {
+            dst: me,
+            src: to_bob,
+            datagram: &[5u8; 100],
+        })
+        .encode()
+        .expect("a frame");
+        assert_eq!(handle.deliver(&from_bob), Delivery::Queued, "accepted");
+        // the Wake contract hands the waker out as an Arc
+        let waker = Arc::new(CountingWaker::default());
+        let std_waker = task::Waker::from(Arc::clone(&waker));
+        let mut cx = Context::from_waker(&std_waker);
+        let mut storage = [0u8; 2048];
+        let mut bufs = [io::IoSliceMut::new(&mut storage)];
+        let mut metas = [noq_udp::RecvMeta::default()];
+        let mut infos = [RecvInfo::new(transport_addr(NOSTR_TRANSPORT_ID, me), None)];
+        let read = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);
+        assert!(matches!(read, Poll::Ready(Ok(1))), "{read:?}");
+        let expected = format!("{:?}", transport_addr(NOSTR_TRANSPORT_ID, to_bob));
+        assert!(
+            format!("{:?}", infos[0]).contains(&expected),
+            "the packet comes from a Nostr address: {:?}",
+            infos[0]
+        );
     }
 
     #[test]
@@ -845,6 +940,91 @@ mod tests {
         handle.allow(bob, true);
         handle.shared.send_datagram(bob, &[1u8; 100]);
         assert_eq!(locked(&recorder.0).len(), 2, "allowed again");
+    }
+
+    /// A transport that carries a pair only when nothing else does starts closed: a destination
+    /// that was never named is refused until the engine allows it, and a frame that arrives from
+    /// a peer lets the replies go back (the peer chose this path).
+    #[test]
+    fn a_handle_that_starts_closed_refuses_a_destination_until_it_is_allowed() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        handle.set_default_allow(false);
+        // the test reads the recorder after the handle takes a clone
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(Arc::clone(&recorder));
+        let (bob, carol) = (secret(2).public(), secret(3).public());
+
+        handle.shared.send_datagram(bob, &[1u8; 10]);
+        assert!(
+            locked(&recorder.0).is_empty(),
+            "a closed handle sends nothing to a stranger"
+        );
+        assert!(!handle.is_allowed(bob), "bob is not allowed");
+        assert_eq!(
+            handle.stats().dropped_not_allowed,
+            1,
+            "the refusal is counted"
+        );
+
+        handle.allow(bob, true);
+        handle.shared.send_datagram(bob, &[1u8; 10]);
+        handle.shared.send_datagram(carol, &[1u8; 10]);
+        assert_eq!(locked(&recorder.0).len(), 1, "only the frame to bob");
+
+        handle.allow(bob, false);
+        handle.shared.send_datagram(bob, &[1u8; 10]);
+        assert_eq!(locked(&recorder.0).len(), 1, "bob is refused again");
+    }
+
+    /// A reply is allowed to a peer that the engine did not stop: `allow_reply` never lifts a
+    /// refusal by name, so a frame that a peer sends cannot cancel the rule of the engine.
+    #[test]
+    fn a_reply_is_allowed_unless_the_engine_stopped_the_destination() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        handle.set_default_allow(false);
+        let (bob, carol) = (secret(2).public(), secret(3).public());
+
+        handle.allow(bob, false);
+        handle.allow_reply(bob);
+        handle.allow_reply(carol);
+
+        assert!(
+            !handle.is_allowed(bob),
+            "the engine stopped bob, and a reply does not lift it"
+        );
+        assert!(
+            handle.is_allowed(carol),
+            "carol was not stopped, so a reply to her passes"
+        );
+        handle.allow(carol, false);
+        assert!(
+            !handle.is_allowed(carol),
+            "the engine can stop a reply after it"
+        );
+    }
+
+    /// A destination that the engine stopped and then forgot is a stranger again: a reply to it
+    /// passes. A slot with no connection and no want must not keep a refusal by name, or the
+    /// handshake of a peer that dials first is refused.
+    #[test]
+    fn a_forgotten_destination_takes_a_reply_again() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let handle = GossipHandle::new(secret(1).public());
+        handle.set_default_allow(false);
+        let bob = secret(2).public();
+
+        handle.allow(bob, false);
+        handle.allow_reply(bob);
+        assert!(!handle.is_allowed(bob), "stopped by name");
+        handle.forget_destination(bob);
+        assert!(
+            !handle.is_allowed(bob),
+            "a forgotten destination is a stranger on a closed handle"
+        );
+        handle.allow_reply(bob);
+        assert!(handle.is_allowed(bob), "and a reply to it passes");
     }
 
     /// A destination that was never named is allowed: its handshake must pass.

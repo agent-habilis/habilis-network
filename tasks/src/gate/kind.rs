@@ -3,6 +3,10 @@
 pub(crate) enum Kind {
     Lint,
     Check,
+    /// `cargo check` with the unstable `non_exhaustive_omitted_patterns` lint denied: a `match` on
+    /// a foreign `#[non_exhaustive]` enum must name the variants that it knows (CI step
+    /// "Omitted patterns"). It needs the nightly flags of [`Kind::rustflags`].
+    OmittedPatterns,
     Test,
     /// The same two, against `wasm32-unknown-unknown`. Separate kinds rather
     /// than a flag on the host ones because the wasm rows are not the host rows
@@ -17,7 +21,7 @@ impl Kind {
     pub(super) fn subcommand(self) -> &'static str {
         match self {
             Self::Lint | Self::WasmClippy => "clippy",
-            Self::Check | Self::WasmCheck => "check",
+            Self::Check | Self::WasmCheck | Self::OmittedPatterns => "check",
             Self::Test => "test",
         }
     }
@@ -26,7 +30,7 @@ impl Kind {
     pub(crate) fn verb(self) -> &'static str {
         match self {
             Self::Lint | Self::WasmClippy => "Linting",
-            Self::Check | Self::WasmCheck => "Checking",
+            Self::Check | Self::WasmCheck | Self::OmittedPatterns => "Checking",
             Self::Test => "Testing",
         }
     }
@@ -36,10 +40,18 @@ impl Kind {
         match self {
             Self::Lint => "clippy",
             Self::Check => "check",
+            Self::OmittedPatterns => "omitted patterns",
             Self::Test => "test",
             Self::WasmCheck => "wasm check",
             Self::WasmClippy => "wasm clippy",
         }
+    }
+
+    /// The `RUSTFLAGS` of the kind, if it has any.
+    pub(crate) fn rustflags(self) -> Option<&'static str> {
+        (self == Self::OmittedPatterns).then_some(
+            "-Zcrate-attr=feature(non_exhaustive_omitted_patterns_lint) -D non_exhaustive_omitted_patterns",
+        )
     }
 
     pub(super) fn is_wasm(self) -> bool {

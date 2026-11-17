@@ -11,6 +11,7 @@ use habilis_network::net::direct::{
     build_peer_webrtc, dial_signal, pair_needs_lane, wait_direct,
 };
 use habilis_network::net::{TransportOpts, add_peer_addr, address_book};
+use habilis_network::protocol::meshes::NostrChoice;
 use habilis_network::protocol::{
     LookupOpts, MeshConfig, RelayChoice, RelayLadder, RelayLadderError, Transport, TransportPolicy,
 };
@@ -27,6 +28,13 @@ use habilis_network::net::EndpointError;
 #[cfg(target_arch = "wasm32")]
 use habilis_network::runtime;
 use n0_future::time;
+
+/// Why a stream refuses the Nostr lookup. A stream's JSEP rides the signal ALPN
+/// only, over the relay or UDP: Nostr signals a mesh, not a stream, so a stream
+/// that names it could never be reached.
+const NOSTR_REFUSED: &str =
+    "a stream does not signal over nostr: name `relay`, `mdns` or `dht` instead";
+
 /// One endpoint serving and opening streams. It never joins a gossip mesh.
 ///
 /// # Examples
@@ -109,6 +117,9 @@ impl StreamNode {
         transport: TransportPolicy,
         transports: TransportOpts,
     ) -> Result<Self, StreamError> {
+        if lookups.nostr != NostrChoice::Disabled {
+            return Err(StreamError::Options(NOSTR_REFUSED));
+        }
         #[cfg(target_arch = "wasm32")]
         runtime::refuse_in_browser(&lookups, &transport, transports)
             .map_err(StreamError::bind("start the stream node"))?;

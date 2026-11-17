@@ -33,8 +33,9 @@ use zeroize::Zeroizing;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::lookup;
 use crate::protocol::crypto::Password;
-use crate::protocol::meshes::{LookupOpts, Mesh, MeshConfig, MeshName, Transport};
-use crate::protocol::{MeshId, Nickname};
+use crate::protocol::meshes::{LookupOpts, Mesh, MeshConfig, MeshName, NostrChoice, Transport};
+use crate::protocol::nostr::NostrKeys;
+use crate::protocol::{MeshId, Nickname, TopicId as MeshTopicId};
 use crate::util::tuning::{RELAY_RUNG_PROBE, SETUP_RUNG_READ};
 use lookup::{
     ProbeAnswer, StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
@@ -42,6 +43,7 @@ use lookup::{
 
 use crate::beacon::RendezvousParams;
 use crate::lifecycle;
+use crate::transport::webrtc::nostr_signal::NostrParams;
 
 use super::config::{
     EndpointOwner, Endpoints, MeshSpec, RendezvousConfig, RuntimeConfig, TransportSet,
@@ -85,6 +87,9 @@ fn rendezvous_params(
     // private / relay-disabled ⇒ `None`.
     let bootstrap_relay = relay_ladder(&lookups.relay_lookup).next();
     let relay_transport = mesh.config().transport.allows(Transport::Relay);
+    let has_rendezvous = !bind_ports.is_empty()
+        || lookups.relay_lookup != RelayChoice::Disabled
+        || beacon::bare_id_resolvable(lookups);
     RendezvousParams {
         topic_id,
         secret: mesh.rendezvous_secret(),
@@ -94,6 +99,22 @@ fn rendezvous_params(
         relay_transport: transport::PayloadPath::from(relay_transport),
         bootstrap_relay,
         rung_tx,
+        has_rendezvous,
+    }
+}
+
+/// The co-host policy a member runs under: the caller's override, else the
+/// setup kind's default, and `Never` on a mesh with no rendezvous, where
+/// nothing could reach a beacon.
+fn effective_cohost(
+    has_rendezvous: bool,
+    cohost_override: Option<CoHostPolicy>,
+    default: CoHostPolicy,
+) -> CoHostPolicy {
+    if has_rendezvous {
+        cohost_override.unwrap_or(default)
+    } else {
+        CoHostPolicy::Never
     }
 }
 
@@ -387,6 +408,30 @@ async fn build_member_endpoint(
     Ok((endpoint, None, webrtc, admission, None, mdns))
 }
 
+/// Open the data lane of the Nostr transport of the member endpoint, once the mesh knows its topic.
+/// A mesh with no custom relay list has no plan, and its transport stays inactive.
+///
+/// # Errors
+///
+/// An injected transport is active already for another mesh.
+fn activate_nostr(
+    build: &SetupBuild<'_>,
+    admission: &transport::SignalAdmission,
+    topic: &proto::TopicId,
+) -> Result<()> {
+    if let Some(plan) = nostr_plan(build, topic) {
+        admission.activate_nostr(plan)?;
+    }
+    Ok(())
+}
+
+/// The Nostr plan of this mesh: the keys of its topic and the custom relay list, or `None` when the
+/// mesh has no custom list (the pinned relays carry no payload).
+fn nostr_plan(build: &SetupBuild<'_>, topic: &proto::TopicId) -> Option<lookup::NostrPlan> {
+    let keys = NostrKeys::derive(&MeshTopicId::from_bytes(*topic.as_bytes()));
+    lookup::NostrPlan::for_mesh(&keys, &build.lookups.nostr)
+}
+
 /// The endpoint and its `WebRTC` transport must share one key: the transport
 /// advertises `custom_addr(local_id)`, so a mismatch is silent, and every `WebRTC`
 /// dial goes to an address nobody listens on.
@@ -422,9 +467,9 @@ fn check_hop_key(
     Ok(())
 }
 
-/// Why a browser refuses a mesh with no relay lookup: one string, so a test
+/// Why a browser refuses a mesh it cannot signal on: one string, so a test
 /// can match the refusal without copying its text.
-pub const BROWSER_NEEDS_RELAY_LOOKUP: &str = "a browser cannot reach a peer in this mesh: it has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node)";
+pub const BROWSER_CANNOT_SIGNAL: &str = "a browser cannot reach a peer in this mesh: it has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node) or `nostr` in lookup";
 
 /// Why a browser refuses a mesh whose list leaves it no payload path.
 pub const BROWSER_HAS_NO_PATH: &str = "a browser cannot carry payload in this mesh: its transport list has neither `webrtc` nor `relay`";
@@ -433,8 +478,8 @@ pub const BROWSER_HAS_NO_PATH: &str = "a browser cannot carry payload in this me
 /// paths exist, and a node can only have fewer.
 ///
 /// # Errors
-/// A node that can never reach anyone: without UDP, one with no relay (see
-/// [`reaches_relay`]). On a browser, also a mesh [`refuse_in_browser`]
+/// A node that can never reach anyone: without UDP, one that
+/// [cannot reach](reaches_without_udp) a peer. On a browser, also a mesh [`refuse_in_browser`]
 /// refuses. Refused here rather than left as a member that links to nobody
 /// and says nothing. Whether a reachable node may carry payload in this mesh
 /// is the accept gate's call at runtime, not this one's.
@@ -447,8 +492,8 @@ fn member_transports(
     #[cfg(target_arch = "wasm32")]
     refuse_in_browser(lookups, policy, transports)?;
     anyhow::ensure!(
-        transports.udp || reaches_relay(lookups, transports),
-        "this node has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node)"
+        transports.udp || reaches_without_udp(lookups, transports),
+        "this node has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node) or a data channel (`webrtc`) with `nostr` in lookup"
     );
     Ok(transports)
 }
@@ -460,11 +505,28 @@ fn reaches_relay(lookups: &LookupOpts, transports: lookup::TransportOpts) -> boo
     lookups.relay_lookup != RelayChoice::Disabled && transports.relay
 }
 
+/// Whether a node without UDP can reach a peer at all: over the relay, over a data channel that
+/// Nostr opens with no relay, or over the Nostr transport itself (the mesh lists it, so it has a
+/// custom list). Nostr alone is not enough: it only signals, so a node with no data
+/// channel gets nothing from it. Whether the mesh lets payload ride the path is the accept gate's
+/// call at runtime, as for the relay.
+fn reaches_without_udp(lookups: &LookupOpts, transports: lookup::TransportOpts) -> bool {
+    reaches_relay(lookups, transports)
+        || (lookups.nostr != NostrChoice::Disabled && transports.webrtc)
+        || transports.nostr.is_on()
+}
+
+/// Whether a node without UDP has a path for the JSEP that opens its data
+/// channels: the relay, or Nostr, which needs no relay transport.
+fn can_signal(lookups: &LookupOpts, transports: lookup::TransportOpts) -> bool {
+    reaches_relay(lookups, transports) || lookups.nostr != NostrChoice::Disabled
+}
+
 /// Whether a browser, which has no UDP, can run with these lookups and paths
 /// (already narrowed to `policy`).
 ///
 /// # Errors
-/// A browser that cannot reach the relay (`reaches_relay`). Or a list that
+/// A browser with no path to signal on: no relay it can dial and no `nostr` in the lookups. Or a list that
 /// leaves both the data channel and relay payload out: nothing could carry
 /// its payload.
 ///
@@ -495,10 +557,7 @@ fn refuse_in_browser_checked(
     policy: &crate_TransportPolicy,
     transports: lookup::TransportOpts,
 ) -> Result<()> {
-    anyhow::ensure!(
-        reaches_relay(lookups, transports),
-        BROWSER_NEEDS_RELAY_LOOKUP
-    );
+    anyhow::ensure!(can_signal(lookups, transports), BROWSER_CANNOT_SIGNAL);
     anyhow::ensure!(transports.carry_without_udp(policy), BROWSER_HAS_NO_PATH);
     Ok(())
 }
@@ -1353,11 +1412,17 @@ pub(crate) fn default_state_path(base: &Path, mesh: &MeshId, author: &Nickname) 
     util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.state.json"))
 }
 
-/// The chunk folder of a node: `<runtime base>/<mesh folder>/<nickname>.chunks`. A run clears it when it starts.
+/// The chunk folder of one run of a node: `<runtime base>/<mesh folder>/<nickname>.<run>.chunks`. The run is in the
+/// name because two daemons of one nickname can share the mesh folder, and a run clears its folder when it starts.
 #[cfg(feature = "host")]
-pub(crate) fn default_chunks_path(base: &Path, mesh: &MeshId, author: &Nickname) -> PathBuf {
+pub(crate) fn default_chunks_path(
+    base: &Path,
+    mesh: &MeshId,
+    author: &Nickname,
+    run: uuid::Uuid,
+) -> PathBuf {
     use crate::util;
-    util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.chunks"))
+    util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.{}.chunks", run.simple()))
 }
 
 /// The keys of this run, under the state path that [`keys_state_path`] gives. `mesh` is the mesh id and the
@@ -1525,8 +1590,24 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // caller-side and passed back in here as the real port.
     let mesh_config = validated_mesh_config(&kind)?;
     let lookups = mesh_config.lookups.clone();
-    let relay_transport =
-        transport::PayloadPath::from(mesh_config.transport.allows(Transport::Relay));
+    let relay_transport = transport::PayloadPath::from_policy(
+        mesh_config.transport.allows(Transport::Relay),
+        mesh_config.transport.allows(Transport::Nostr),
+    );
+    // The selectors of an endpoint rank Nostr above a relay that carries no payload, one ordering
+    // for every mesh on it. An injected endpoint can carry several meshes, so a mesh that the
+    // ordering cannot serve is refused before anything of it is built. A bound endpoint is the
+    // mesh's own and registers once it exists.
+    let early_policy: Option<habilis_network_iroh_transport_util::RelayPolicy> = injected
+        .as_ref()
+        .map(|shared| {
+            habilis_network_iroh_transport_util::register_relay_policy(
+                shared.endpoint.id(),
+                relay_transport.relay_allowed(),
+                relay_transport.nostr_allowed(),
+            )
+        })
+        .transpose()?;
     let transports = member_transports(&lookups, transports, &mesh_config.transport)?;
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the
@@ -1591,6 +1672,14 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         key_lock,
     )
     .await?;
+    let relay_policy = match early_policy {
+        Some(policy) => policy,
+        None => habilis_network_iroh_transport_util::register_relay_policy(
+            endpoint.id(),
+            relay_transport.relay_allowed(),
+            relay_transport.nostr_allowed(),
+        )?,
+    };
     Ok(EventLoopConfig {
         mesh: MeshSpec {
             mesh: mesh_id,
@@ -1610,7 +1699,10 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             webrtc_ice,
             address_book,
             local_udp_transport: UdpTransport::from(transports.udp),
+            nostr: NostrParams::for_mesh(&lookups, rdv.topic_id.as_bytes()),
             relay_transport,
+            // shared by the config and the loop state, so that the policy ends with the last holder
+            relay_policy: Some(sync::Arc::new(relay_policy)),
             #[cfg(feature = "multihop")]
             multihop: multihop_handle,
             #[cfg(feature = "multihop")]
@@ -1627,13 +1719,13 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             lan_contacts,
         },
         rendezvous: RendezvousConfig {
+            cohost: effective_cohost(rdv.has_rendezvous, cohost_override, cohost),
             rendezvous_params: rdv,
             rung_rx,
             // Off the critical path: nothing below blocks `ready`, which `run` emits
             // once the IPC socket accepts. Confirm/correct the optimistic rung 0 in the
             // background (covers a joiner, which has no beacon self-monitor of its own).
             rung_probe: spawn_startup_rung_confirmation(ladder, rung_tx),
-            cohost: cohost_override.unwrap_or(cohost),
         },
         runtime: RuntimeConfig {
             sink,
@@ -1833,6 +1925,7 @@ async fn setup_create(
     // Keeping the conversion here is what lets habilis-network-protocol build
     // without iroh-gossip at all (see habilis_network_protocol::topic).
     let topic_id = proto::TopicId::from_bytes(mesh.topic_id().to_bytes());
+    activate_nostr(build, &admission, &topic_id)?;
     let lan_contacts = lookup::lan_contacts(&endpoint, mdns, &topic_id).await?;
     lifecycle::log_ready(
         topic_id,
@@ -1915,6 +2008,7 @@ async fn setup_join(
     let (endpoint, multihop, webrtc, admission, underlay_webrtc, mdns) =
         build_member_endpoint(build, injected).await?;
 
+    activate_nostr(build, &admission, &topic_id)?;
     let lan_contacts = lookup::lan_contacts(&endpoint, mdns, &topic_id).await?;
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
     let (gossip, router, webrtc_admission, address_book, webrtc_ice) =
@@ -1939,7 +2033,12 @@ async fn setup_join(
         build.relay_transport.relay_allowed(),
         UdpTransport::from(build.transports.udp),
     );
-    let bootstrap = if needs_session { vec![] } else { vec![rdv.id] };
+    // A mesh with no rendezvous (Nostr only) has no bare id worth dialing.
+    let bootstrap = if needs_session || !rdv.has_rendezvous {
+        vec![]
+    } else {
+        vec![rdv.id]
+    };
     let topic = split::subscribe_mesh(&gossip, topic_id, rdv.id, bootstrap).await?;
 
     // `ready` is emitted by `run`, once the IPC socket accepts — not here.
@@ -3292,7 +3391,9 @@ mod tests {
 
     use std::time::Duration;
 
-    use crate::protocol::meshes::{LookupOpts, RelayChoice, Transport, TransportPolicy};
+    use crate::protocol::meshes::{
+        LookupOpts, NostrChoice, RelayChoice, Transport, TransportPolicy,
+    };
 
     // A browser has no UDP: it reaches a peer only through the relay, and a
     // data channel's handshake crosses the relay too. `validate` accepts
@@ -3314,7 +3415,7 @@ mod tests {
             .expect_err("no path to signal on");
         assert_eq!(
             error.to_string(),
-            super::BROWSER_NEEDS_RELAY_LOOKUP,
+            super::BROWSER_CANNOT_SIGNAL,
             "a browser refuses a mesh with no relay lookup with the browser message"
         );
 
@@ -3322,6 +3423,97 @@ mod tests {
             .mdns(dht_only.mdns)
             .dht(dht_only.dht);
         super::refuse_in_browser(&relay, &policy, transports).expect("the relay signals");
+    }
+
+    // Nostr carries the JSEP as the relay does, so a Nostr-only mesh has a
+    // path to signal on even with no relay transport on this node.
+    #[test]
+    fn nostr_alone_signals_for_a_node_without_udp() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let nostr_only = LookupOpts::loopback().nostr(NostrChoice::Pinned);
+        let policy =
+            TransportPolicy::try_from(&[Transport::Udp, Transport::WebRtc]).expect("valid");
+        let no_relay = lookup::TransportOpts {
+            relay: false,
+            ..lookup::TransportOpts::webrtc_only()
+        };
+        super::refuse_in_browser(&nostr_only, &policy, no_relay.within(&policy))
+            .expect("a browser signals over Nostr");
+        super::member_transports(&nostr_only, no_relay, &policy)
+            .expect("a native node without UDP signals over Nostr");
+    }
+
+    // Nostr only signals: a node without UDP reaches a peer through it only with a data channel to
+    // open. A node with neither the data channel nor the relay lookup reaches nobody, so it is
+    // refused. The relay transport alone does not help on a Nostr-only mesh: no lookup names a relay.
+    #[test]
+    fn a_native_node_without_udp_that_can_only_signal_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let nostr_only = LookupOpts::loopback().nostr(NostrChoice::Pinned);
+        let policy =
+            TransportPolicy::try_from(&[Transport::Udp, Transport::WebRtc]).expect("valid");
+        let bare = lookup::TransportOpts {
+            webrtc: false,
+            relay: false,
+            ..lookup::TransportOpts::webrtc_only()
+        };
+        let relay_only = lookup::TransportOpts {
+            relay: true,
+            ..bare
+        };
+
+        assert!(
+            super::member_transports(&nostr_only, bare, &policy).is_err(),
+            "no UDP, no data channel and no relay transport: the node signals and reaches nobody"
+        );
+        assert!(
+            super::member_transports(&nostr_only, relay_only, &policy).is_err(),
+            "a relay transport on a Nostr-only mesh reaches nobody: no lookup names a relay"
+        );
+        assert!(
+            super::member_transports(&nostr_only, lookup::TransportOpts::webrtc_only(), &policy)
+                .is_ok(),
+            "Nostr opens a data channel for a node with no UDP"
+        );
+        let relay_lookup = LookupOpts::new(RelayChoice::Pinned);
+        assert!(
+            super::member_transports(&relay_lookup, relay_only, &policy).is_ok(),
+            "the relay reaches a peer for a node with no data channel"
+        );
+    }
+
+    // The Nostr transport carries a node with no UDP, no relay and no data channel: a mesh that
+    // lists it with a custom list is reachable that way. The same node on a mesh that does not
+    // list it reaches nobody, and a node that turned the transport off does too.
+    #[test]
+    fn a_node_without_udp_relay_or_webrtc_is_accepted_when_the_mesh_lists_nostr() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let custom: url::Url = "wss://relay.example".parse().expect("a relay URL");
+        let lookups = LookupOpts::loopback().nostr(NostrChoice::Custom(vec![custom]));
+        let with_nostr = TransportPolicy::default().nostr_transport(true);
+        let without = TransportPolicy::default();
+        let bare = lookup::TransportOpts {
+            webrtc: false,
+            relay: false,
+            ..lookup::TransportOpts::webrtc_only()
+        };
+        assert!(
+            super::member_transports(&lookups, bare, &with_nostr).is_ok(),
+            "Nostr carries the node: no UDP, no relay and no data channel is enough"
+        );
+        assert!(
+            super::member_transports(&lookups, bare, &without).is_err(),
+            "a mesh that does not list Nostr gives such a node no path"
+        );
+        let carries = |policy: &TransportPolicy| {
+            let options = lookup::TransportOpts::default().udp(false).webrtc(false);
+            options.within(policy).carry_without_udp(policy)
+        };
+        assert!(carries(&with_nostr), "a browser carries payload over Nostr");
+        assert!(
+            !carries(&without),
+            "and carries none when the mesh does not list it"
+        );
     }
 
     // A native node without UDP signals its data channel over the relay, as a
@@ -3681,6 +3873,7 @@ mod tests {
                 multihop: Some(handle),
                 webrtc: Some(webrtc),
                 gossip: None,
+                nostr: None,
                 admission: None,
                 underlay: false,
                 options: lookup::TransportOpts::default(),
@@ -3707,6 +3900,7 @@ mod tests {
                     multihop,
                     webrtc,
                     gossip: None,
+                    nostr: None,
                     admission: None,
                     underlay: false,
                     options: lookup::TransportOpts::default(),
@@ -3820,6 +4014,13 @@ mod tests {
             transport: list,
             ..membership::JoinOptions::default()
         };
+        setup_with_options(options, injected).await
+    }
+
+    async fn setup_with_options(
+        options: membership::JoinOptions,
+        injected: super::InjectedEndpoint,
+    ) -> anyhow::Result<super::EventLoopConfig> {
         let (kind, author) = membership::resolve_kind(&options, None)?;
         super::setup_mesh(
             kind,
@@ -3873,6 +4074,52 @@ mod tests {
             if let Some(handle) = default_list.transports.multihop.as_ref() {
                 handle.close().await;
             }
+        });
+    }
+
+    // The selectors of an endpoint have one path ordering. A second mesh on an injected endpoint
+    // whose relay carries payload and lists no Nostr, beside a mesh with a lookup-only relay that
+    // lists Nostr, would see Nostr ranked above its relay and refuse the payload: it is refused
+    // at setup, and the error names both policies.
+    #[test]
+    fn a_second_mesh_on_an_injected_endpoint_with_a_conflicting_relay_policy_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "habilis_network::lookup::peer",
+                "injected endpoint advertises no relay address",
+            );
+            let shared = injected(PayloadPath::DirectOnly).await;
+            let nostr_mesh = membership::JoinOptions {
+                transport: vec![Transport::Udp, Transport::WebRtc, Transport::Nostr],
+                nostr_urls: vec!["ws://127.0.0.1:9".to_owned()],
+                lookup: vec![Lookup::Relay, Lookup::Nostr],
+                ..membership::JoinOptions::default()
+            };
+            let first = setup_with_options(nostr_mesh, shared.clone())
+                .await
+                .expect("a lookup-only mesh that lists Nostr sets up");
+            let relay_mesh = membership::JoinOptions {
+                transport: vec![Transport::Udp, Transport::WebRtc, Transport::Relay],
+                lookup: vec![Lookup::Relay],
+                ..membership::JoinOptions::default()
+            };
+            let error = setup_with_options(relay_mesh, shared.clone())
+                .await
+                .expect_err(
+                    "a mesh whose relay carries, beside a Nostr mesh with a lookup-only relay",
+                );
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("relay carries payload")
+                    && message.contains("relay is lookup only"),
+                "the error names both policies: {message}"
+            );
+            let (endpoint, _underlay) = leave_and_keep_handles(first).await;
+            // The mesh has no multihop, so the underlay of the injected handle is the caller's.
+            if let Some(handle) = shared.multihop.clone() {
+                handle.close().await;
+            }
+            endpoint.close().await;
         });
     }
 

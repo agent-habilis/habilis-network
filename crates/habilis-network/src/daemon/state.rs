@@ -2317,6 +2317,85 @@ mod tests {
         );
     }
 
+    /// The members that the Nostr transport answers are the roster, not the bounded list of
+    /// sighted endpoints: the cap of that list evicts a live member, and the member would then lose
+    /// its replies. Dropping an endpoint forgets its Nostr proof too.
+    #[test]
+    fn the_nostr_members_are_the_roster_and_a_dropped_endpoint_loses_its_proof() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let bob = endpoint_id(1);
+        let mut node = fresh_state();
+        node.names.insert(test_key("bob"), nick("bob"));
+        node.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
+        assert!(
+            node.nostr_member_ids().contains(&bob),
+            "a member of the roster is known to the transport"
+        );
+        node.note_proven_over_nostr(bob);
+        node.forget_peer_endpoint("bob");
+        assert!(!node.rides_nostr(bob), "the proof goes with the endpoint");
+    }
+
+    /// A sighted endpoint that is not on the roster yet stays a member of the Nostr transport
+    /// through the next sighting and the next alive tick: its datagrams are answered until it
+    /// joins the roster or the bounded list of sightings forgets it.
+    #[test]
+    fn a_sighted_endpoint_stays_a_nostr_member_after_another_sighting_and_a_tick() {
+        use habilis_network_iroh_nostr_transport::NostrTransport;
+        let _guard = ::habilis_network_test_tracing::init();
+        let (first, second) = (endpoint_id(21), endpoint_id(22));
+        let mut node = fresh_state();
+        let transport = NostrTransport::new(endpoint_id(20));
+        node.webrtc_admission.set_nostr(transport.clone());
+        node.note_known_endpoint(first);
+        node.note_known_endpoint(second);
+        node.feed_nostr_members();
+        assert!(
+            transport.knows(first) && transport.knows(second),
+            "both sighted endpoints are members, though neither is on the roster"
+        );
+    }
+
+    /// A pair that a probe proved over Nostr is remembered: when the probe connection is gone the
+    /// selected kind reads as none, and a graft would dial a gossip link that the hook closes at
+    /// once. A report of another path takes the proof back.
+    #[test]
+    fn a_pair_proven_over_nostr_is_not_grafted_after_its_probe_connection_is_gone() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let bob = endpoint_id(1);
+        let mut node = fresh_state();
+        assert!(!node.rides_nostr(bob), "a pair nobody proved");
+        node.note_proven_over_nostr(bob);
+        assert!(node.rides_nostr(bob), "the proof outlives the connection");
+        node.forget_nostr_proof(bob);
+        assert!(!node.rides_nostr(bob), "another path takes the proof back");
+    }
+
+    /// A proven pair that falls to Nostr is raced as one on the relay: Nostr carries no gossip
+    /// link, so a quick re-graft would dial it for nothing.
+    #[test]
+    fn a_proven_pair_that_falls_to_nostr_is_raced_and_not_regrafted() {
+        use crate::transport::probe::PathKind;
+        let _guard = ::habilis_network_test_tracing::init();
+        let (bob, now) = (endpoint_id(1), Instant::now());
+        let address = iroh::EndpointAddr::new(bob);
+        let mut node = fresh_state();
+        node.names.insert(test_key("bob"), nick("bob"));
+        node.bind_peer_endpoint(test_key("bob"), nick("bob"), address.clone());
+        node.direct.insert(bob, DirectState::Direct);
+        node.path_kinds.insert(bob, PathKind::Nostr);
+
+        assert!(
+            !node.plan_regraft_on_link_loss(bob, now, 0.0),
+            "a pair on Nostr is not grafted again"
+        );
+        assert_eq!(
+            node.relay_race_on_link_loss(bob, now),
+            Some(address),
+            "a pair on Nostr races for a session"
+        );
+    }
+
     /// A pair that reads as the relay is raced again by `relay_race_on_link_loss`, and its graft
     /// follows the attach. A quick re-graft would dial the relay for nothing and arm the backoff.
     #[test]
@@ -4565,6 +4644,69 @@ mod tests {
         assert!(
             !state.peerinfo_refresh_due(after(grown)),
             "a node that is not meshed refreshed"
+        );
+    }
+
+    /// A departed peer leaves every per-peer map, the lane flag included.
+    #[test]
+    fn forgetting_a_peer_forgets_its_lane_flag() {
+        let mut state = fresh_state();
+        let bob = endpoint_id(9);
+        state
+            .peer_endpoints
+            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.lane_peers.insert(bob);
+        state.forget_peer_endpoint("bob");
+        assert!(
+            !state.lane_peers.contains(&bob),
+            "a departed peer leaves the lane set"
+        );
+    }
+
+    /// The lane flag belongs to the endpoint: a nickname that forgets its hint leaves the flag
+    /// while another nickname still binds the endpoint, and the last one takes it away.
+    #[test]
+    fn forgetting_one_nickname_keeps_the_lane_flag_while_another_binds_the_endpoint() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let shared = endpoint_id(9);
+        state
+            .peer_endpoints
+            .insert(nick("bob"), iroh::EndpointAddr::new(shared));
+        state
+            .peer_endpoints
+            .insert(nick("bobby"), iroh::EndpointAddr::new(shared));
+        state.lane_peers.insert(shared);
+
+        state.forget_peer_endpoint("bob");
+        assert!(
+            state.lane_peers.contains(&shared),
+            "another nickname still binds the endpoint, so its lane flag stays"
+        );
+
+        state.forget_peer_endpoint("bobby");
+        assert!(
+            !state.lane_peers.contains(&shared),
+            "no nickname binds the endpoint any more, so its lane flag goes"
+        );
+    }
+
+    /// A nickname that moves to a new endpoint leaves the lane flag of the old one behind unless
+    /// the release of the old endpoint takes it.
+    #[test]
+    fn replacing_the_endpoint_of_a_nickname_drops_the_lane_flag_of_the_old_one() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = fresh_state();
+        let (old, new) = (endpoint_id(9), endpoint_id(10));
+        let key = test_key("bob");
+        state.place_endpoint(key, &nick("bob"), iroh::EndpointAddr::new(old));
+        state.lane_peers.insert(old);
+
+        state.place_endpoint(key, &nick("bob"), iroh::EndpointAddr::new(new));
+
+        assert!(
+            !state.lane_peers.contains(&old),
+            "the old endpoint has no nickname now, so its lane flag goes"
         );
     }
 }

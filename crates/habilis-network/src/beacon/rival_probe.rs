@@ -226,7 +226,7 @@ pub(crate) async fn spawn_rival_probe(
 /// only condition a probe may dial one. mDNS and DHT are compile-time
 /// features and `host`-only, so a browser or a feature-trimmed build
 /// resolves nothing regardless of what the mesh id asks for.
-fn bare_id_resolvable(lookups: &LookupOpts) -> bool {
+pub(crate) fn bare_id_resolvable(lookups: &LookupOpts) -> bool {
     (cfg!(all(feature = "host", feature = "mdns")) && lookups.mdns)
         || (cfg!(all(feature = "host", feature = "dht")) && lookups.dht)
 }

@@ -29,6 +29,7 @@ mod dht;
 mod error;
 #[cfg(all(feature = "host", feature = "mdns"))]
 mod mdns;
+mod nostr_plan;
 mod relay;
 mod transport_handles;
 mod transport_opts;
@@ -55,6 +56,7 @@ pub mod test_relay;
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
 pub use error::EndpointError;
+pub(crate) use nostr_plan::NostrPlan;
 pub use relay::{RENDEZVOUS_RELAY_LADDER, probe_ladder, relay_ladder};
 pub(crate) use relay::{
     RungRefresh, StoppableTask, plan_rung_refresh, select_bootstrap_rung, spawn_relay_monitor,

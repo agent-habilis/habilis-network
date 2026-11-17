@@ -72,6 +72,7 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
       relay_urls: 'const char *',
       max_peers: 'size_t',
       max_direct: 'size_t',
+      nostr_urls: 'const char *',
     })
     optsRegistered = true
   }
@@ -134,6 +135,7 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
         relay_urls: opts.relayUrls,
         max_peers: opts.maxPeers,
         max_direct: opts.maxDirect,
+        nostr_urls: opts.nostrUrls,
       }) as NativePointer,
     close: () => library.unload(),
   }

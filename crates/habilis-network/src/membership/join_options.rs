@@ -13,9 +13,10 @@ use crate::runtime::{
     derive_topic_mesh_config, setup_mesh,
 };
 use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use tokio::sync::mpsc;
+use url::Url;
 
 use super::membership_app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp, Request};
 
@@ -32,7 +33,7 @@ use tokio::sync::oneshot;
 ///
 /// A create names three mesh-wide choices, kept apart because they are three
 /// concepts: `lookup` says how members find each other, `transport` says what
-/// payload may ride, `relay_urls` says which relay.
+/// payload may ride, `relay_urls` and `nostr_urls` say which relays.
 ///
 /// `Deserialize` so a browser tab can hand its constructor a plain object and
 /// have it land here, which is what stops the browser and the C caller growing
@@ -62,19 +63,18 @@ pub struct JoinOptions {
     /// Mesh name to create with; `None` falls back to `"habilis-network"`. Ignored
     /// when joining (the name travels with the id/topic instead).
     pub name: Option<String>,
-    /// How members find each other: any of `mdns`, `dht`, `relay`. Naming
-    /// any uses only those; naming none is a loopback mesh. Ignored with a
-    /// `topic` (always all three) or a `mesh` id (which carries its own).
+    /// How members find each other: any of `mdns`, `dht`, `relay`, `nostr`.
+    /// Naming any uses only those; naming none is a loopback mesh. Ignored
+    /// with a `topic` (always all four) or a `mesh` id (which carries its
+    /// own).
     pub lookup: Vec<Lookup>,
     /// What may carry payload: any of `udp`, `webrtc`, `multihop`, `gossip`, `relay`, with
     /// `udp` or `webrtc` among them, and `udp` with `multihop`. Empty ⇒
     /// `udp,webrtc,multihop,gossip`, so all data is peer to peer (through other members
     /// when no direct path exists, and through the mesh topic when no member routes) and the
     /// relay serves lookup only. A list names what it carries: without `gossip` there is none.
-    /// `relay`, or
-    /// a list without `udp`,
-    /// needs `relay` in `lookup`. Part of the mesh id, so a joiner inherits
-    /// it; ignored when joining by id.
+    /// `relay` needs `relay` in `lookup`, and a list without `udp` needs `relay` or `nostr`
+    /// in it. Part of the mesh id, so a joiner inherits it; ignored when joining by id.
     pub transport: Vec<Transport>,
     /// Which relay: an ordered ladder (first preferred) replacing the
     /// default. Needs `relay` in `lookup`. Part of the mesh id — with
@@ -82,6 +82,10 @@ pub struct JoinOptions {
     /// different meshes. Empty ⇒ the default ladder. Ignored when joining
     /// by id.
     pub relay_urls: Vec<String>,
+    /// Which Nostr relays, replacing the pinned public list. Needs `nostr`
+    /// in `lookup` (a topic always has it). Part of the mesh id, like
+    /// `relay_urls`. Empty ⇒ the pinned list. Ignored when joining by id.
+    pub nostr_urls: Vec<String>,
     /// Active-view cap (G); `0` takes the engine default.
     pub max_peers: usize,
     /// Ceiling of direct connections (C); `0` takes the engine default.
@@ -138,6 +142,13 @@ impl JoinOptions {
         self
     }
 
+    /// The Nostr relay URLs to use, in the order given.
+    #[must_use]
+    pub fn nostr_urls(mut self, nostr_urls: impl IntoIterator<Item = String>) -> Self {
+        self.nostr_urls = nostr_urls.into_iter().collect();
+        self
+    }
+
     /// Set the peer cap.
     #[must_use]
     pub fn max_peers(mut self, max_peers: usize) -> Self {
@@ -161,6 +172,25 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
     }
     let ladder: Result<RelayLadder, _> = urls.join(",").parse();
     ladder.map(Some).map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+/// The Nostr relays these options name, or `None` for the pinned list. Each entry is one URL, so a
+/// comma inside a URL (a query such as `?channels=a,b`) stays in it: the comma list belongs to the
+/// C string boundary, not to this vector.
+fn nostr_list(urls: &[String]) -> Result<Option<Vec<Url>>> {
+    if urls.is_empty() {
+        return Ok(None);
+    }
+    let parsed: Result<Vec<Url>> = urls.iter().map(|entry| nostr_url(entry)).collect();
+    parsed.map(Some)
+}
+
+/// One Nostr relay URL. The scheme and the length are checked when the mesh config is built.
+fn nostr_url(entry: &str) -> Result<Url> {
+    entry
+        .trim()
+        .parse()
+        .with_context(|| format!("nostr relay URL {entry:?} is not a URL"))
 }
 
 /// One live membership's moving parts.
@@ -271,7 +301,7 @@ pub async fn join<S: NodeSink + 'static>(
         };
         if loopback {
             return Err(SetupError::internal(anyhow::anyhow!(
-                "a browser peer cannot reach a loopback mesh: name a lookup (`relay`), or a topic / mesh id"
+                "a browser peer cannot reach a loopback mesh: name a lookup (`relay` or `nostr`), or a topic / mesh id"
             )));
         }
     }
@@ -396,15 +426,16 @@ pub fn resolve_kind(
         (None, Some(string)) => {
             // Note what this ignores: `lookup`. `TopicParams::resolve` always
             // derives through the all-on preset, so a topic mesh is always
-            // mDNS + DHT + the relay. That is what lets a tab and a terminal
+            // mDNS + DHT + the relay + Nostr (`LookupOpts::public_preset`). That is what lets a tab and a terminal
             // derive the same id from the same string — the lookups are mixed
             // into the derivation, so two reaches over one string are two
-            // different meshes. `relay_urls` and `transport` are the two
-            // choices that *do* change the id, and every member must pass the
+            // different meshes. `relay_urls`, `nostr_urls` and `transport` are
+            // the choices that *do* change the id, and every member must pass the
             // same values.
-            let config = MeshConfig::resolve(
-                &[Lookup::Mdns, Lookup::Dht, Lookup::Relay],
+            let config = MeshConfig::resolve_with_nostr(
+                &[Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Nostr],
                 relay_ladder(&options.relay_urls).map_err(SetupError::internal)?,
+                nostr_list(&options.nostr_urls).map_err(SetupError::internal)?,
                 &options.transport,
             )
             .map_err(SetupError::Config)?;
@@ -418,9 +449,10 @@ pub fn resolve_kind(
             ))
         }
         (None, None) => {
-            let config = MeshConfig::resolve(
+            let config = MeshConfig::resolve_with_nostr(
                 &options.lookup,
                 relay_ladder(&options.relay_urls).map_err(SetupError::internal)?,
+                nostr_list(&options.nostr_urls).map_err(SetupError::internal)?,
                 &options.transport,
             )
             .map_err(SetupError::Config)?;
@@ -439,8 +471,10 @@ pub fn resolve_kind(
 
 #[cfg(test)]
 mod tests {
+    use crate::protocol::meshes::NostrChoice;
     use crate::protocol::{LookupOpts, RelayChoice};
     use crate::runtime;
+    use url::Url;
 
     use super::{JoinOptions, Lookup, MeshConfig, SetupKind, Transport, resolve_kind};
     fn options() -> JoinOptions {
@@ -448,7 +482,7 @@ mod tests {
     }
 
     fn all_lookups() -> Vec<Lookup> {
-        vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
+        vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Nostr]
     }
 
     fn create_config(options: &JoinOptions) -> MeshConfig {
@@ -736,6 +770,116 @@ mod tests {
             )
             .is_err(),
             "a bad URL is an error, not a shrunk ladder"
+        );
+    }
+
+    /// A relay URL may hold a comma (a query such as `?channels=a,b`). Each entry of `nostr_urls`
+    /// is one URL: the list is a vector here, and the comma list belongs to the C string boundary.
+    #[test]
+    fn a_nostr_url_with_a_comma_stays_one_url() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let url = "wss://relay.example/path?channels=a,b".to_owned();
+
+        let config = create_config(&JoinOptions {
+            lookup: vec![Lookup::Nostr],
+            nostr_urls: vec![url.clone()],
+            ..options()
+        });
+        let NostrChoice::Custom(custom) = &config.lookups.nostr else {
+            panic!("nostrUrls must resolve to a custom list")
+        };
+        let kept: Vec<&str> = custom.iter().map(Url::as_str).collect();
+        assert_eq!(
+            kept,
+            vec![url.as_str()],
+            "the comma stays in the URL, which is one relay"
+        );
+
+        let topic = resolve_kind(
+            &JoinOptions {
+                topic: Some("standup".to_owned()),
+                nostr_urls: vec![url],
+                ..options()
+            },
+            None,
+        );
+        assert!(
+            topic.is_ok(),
+            "a topic with such a relay resolves too: {:?}",
+            topic.err()
+        );
+    }
+
+    /// `nostr_urls` swaps the pinned Nostr relays for the caller's, on a
+    /// create and on a topic. Like `relay_urls` it needs its lookup: a topic
+    /// always has Nostr, a create must name it.
+    #[test]
+    fn nostr_urls_replace_the_pinned_relays() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let urls = vec!["wss://relay.example/".to_owned()];
+        let config = create_config(&JoinOptions {
+            lookup: vec![Lookup::Nostr],
+            nostr_urls: urls.clone(),
+            ..options()
+        });
+        let NostrChoice::Custom(custom) = &config.lookups.nostr else {
+            panic!("nostrUrls must resolve to a custom list")
+        };
+        assert_eq!(
+            custom.len(),
+            1,
+            "one Nostr url replaces the pinned list with one relay"
+        );
+        assert!(
+            resolve_kind(
+                &JoinOptions {
+                    nostr_urls: urls.clone(),
+                    ..options()
+                },
+                None,
+            )
+            .is_err(),
+            "a Nostr list without the Nostr lookup is an error, not an implied lookup"
+        );
+        assert!(
+            resolve_kind(
+                &JoinOptions {
+                    lookup: vec![Lookup::Nostr],
+                    nostr_urls: vec!["https://relay.example/".to_owned()],
+                    ..options()
+                },
+                None,
+            )
+            .is_err(),
+            "a Nostr relay is a websocket"
+        );
+
+        let (plain, _) = resolve_kind(
+            &JoinOptions {
+                topic: Some("standup".to_owned()),
+                ..options()
+            },
+            None,
+        )
+        .expect("a plain topic resolves");
+        let (own, _) = resolve_kind(
+            &JoinOptions {
+                topic: Some("standup".to_owned()),
+                nostr_urls: urls,
+                ..options()
+            },
+            None,
+        )
+        .expect("a topic with its own Nostr relays resolves");
+        let (SetupKind::Topic { mesh: plain, .. }, SetupKind::Topic { mesh: own, .. }) =
+            (plain, own)
+        else {
+            panic!("a topic selector must resolve to SetupKind::Topic")
+        };
+        assert_ne!(
+            plain.to_string(),
+            own.to_string(),
+            "the Nostr list is mixed into the id"
         );
     }
 

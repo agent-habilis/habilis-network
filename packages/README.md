@@ -28,18 +28,20 @@ for await (const message of mesh.messages()) {
 ## Two things that surprise people
 
 **`join({ topic })` is always public.** A topic mesh is reached over mDNS, the
-mainline DHT and the relay ladder, and that is not a default you can change.
+mainline DHT, the relay ladder and public Nostr relays, and that is not a
+default you can change.
 The engine mixes the lookup set into the mesh id, so two peers reaching the
 same string over different lookups derive two different meshes and never
-meet. `JoinOpts` therefore carries no `lookup` — the two choices it does
-carry, `transport` and `relayUrls`, are exactly the two that are mixed into
-the id, and every member must pass the same values.
+meet. `JoinOpts` therefore carries no `lookup` — the choices it does carry,
+`transport`, `relayUrls` and `nostrUrls`, are exactly the ones that are mixed
+into the id, and every member must pass the same values.
 
 **`create({})` is machine-local.** Naming no lookup is not "the default set"
 — it resolves to a loopback mesh nothing off this machine can reach. That is
 what makes the offline two-peer test possible, and it is surprising
 everywhere else. Name the lookups you want: `lookup: ['mdns', 'dht',
-'relay']` is the all-on set a topic uses.
+'relay', 'nostr']` is the all-on set a topic uses. In a tab, `['relay']` or
+`['nostr']` alone is enough to reach native peers and other tabs.
 
 **The relay carries no data unless you say so.** Three lists name three
 concepts. `lookup: ['relay']` uses the relay as a *lookup*: a meeting point
@@ -48,7 +50,8 @@ cannot open a direct path stays unlinked for data. `transport: ['udp',
 'webrtc', 'relay']` lets payload fall back to the relay, and `['webrtc']`
 keeps every member on WebRTC data channels. The list is part of the mesh id,
 so joiners inherit whatever the creator chose. `relayUrls` says *which* relay
-and nothing about its role.
+and nothing about its role. `nostrUrls` says which Nostr relays, in place of
+the pinned public list.
 
 ## Byte streams
 

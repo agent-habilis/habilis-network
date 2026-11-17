@@ -42,6 +42,7 @@ use crate::daemon::state_file::StateFile;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::meshes::MeshName;
 use crate::protocol::messages::Authored;
+use crate::protocol::nostr::Signal as NostrHello;
 use crate::protocol::{MeshId, Nickname, UnixSecs};
 use crate::transport::{IpcMessage, MeshSender};
 use crate::util::clock::{Instant, millis_saturating};
@@ -175,7 +176,7 @@ async fn run_checked<Driver: NodeDriver>(
     };
     let (fetch_tx, fetch_rx) = mpsc::unbounded_channel();
     state.fetches = chunk_fetch::Fetches::new(fetch_tx);
-    let (direct_rx, path_rx) = wire_transports(
+    let (direct_rx, path_rx, nostr_rx) = wire_transports(
         &mut state,
         &endpoints.endpoint,
         transports,
@@ -280,6 +281,7 @@ async fn run_checked<Driver: NodeDriver>(
         fetch_rx,
         lan_contacts: endpoints.lan_contacts,
         direct_rx,
+        nostr_rx,
         path_rx,
         owned,
     }))
@@ -410,7 +412,7 @@ fn open_chunks(
     if let Some(base) = runtime_base {
         use crate::util;
         util::ensure_mesh_runtime_dir(base, mesh.as_str())?;
-        let folder = setup::default_chunks_path(base, mesh, author);
+        let folder = setup::default_chunks_path(base, mesh, author, uuid::Uuid::new_v4());
         return Ok(MeshChunks::open(Some(&folder))?);
     }
     #[cfg(not(feature = "host"))]
@@ -467,12 +469,31 @@ fn wire_transports(
 ) -> (
     mpsc::UnboundedReceiver<probe::DirectOutcome>,
     mpsc::UnboundedReceiver<probe::PathChange>,
+    Option<mpsc::Receiver<NostrHello>>,
 ) {
     #[cfg(feature = "multihop")]
     {
         state.multihop = transports.multihop; // the mesh policy's multihop: the registered transport's handle
         state.underlay_webrtc = transports.underlay_webrtc;
     }
+    state.has_rendezvous = rendezvous_params.has_rendezvous;
+    let nostr_rx: Option<mpsc::Receiver<NostrHello>> = transports.nostr.map(|params| {
+        let (signal, hellos) =
+            webrtc::nostr_signal::NostrSignal::start(webrtc::nostr_signal::NostrSignalParts {
+                endpoint: endpoint.clone(),
+                book: state.address_book.clone(),
+                handle: transports.webrtc.clone(),
+                admission: state.webrtc_admission.clone(),
+                ice: state.webrtc_ice,
+                keys: params.keys,
+                relays: params.relays,
+                answers: transports.webrtc_enabled,
+            });
+        state.nostr = Some(signal);
+        state.nostr_width = webrtc::nostr_signal::JOINING_WIDTH;
+        state.next_hello = Some(TokioInstant::now());
+        hellos
+    });
     // The direct-path transport the session manager fills; `None` leaves
     // every pair to iroh's own paths.
     state.webrtc = transports.webrtc_enabled.then_some(transports.webrtc);
@@ -482,6 +503,15 @@ fn wire_transports(
     state.gossip_handle = state.webrtc_admission.gossip_handle();
     state.unicast_pool =
         transport::UnicastPool::new(endpoint.clone(), transports.relay_transport.relay_allowed());
+    state
+        .unicast_pool
+        .set_nostr_transport(transports.relay_transport.nostr_allowed());
+    state
+        .webrtc_admission
+        .set_relay_carries(transports.relay_transport.relay_allowed());
+    // The selectors of the endpoint rank Nostr above a relay that carries no payload. Setup
+    // registered the policy; it lives with the state, and ends with the mesh.
+    state.relay_policy = transports.relay_policy;
     state
         .unicast_pool
         .set_admission(state.webrtc_admission.clone());
@@ -519,7 +549,7 @@ fn wire_transports(
         state.rendezvous_flags.remove(&RendezvousFlag::AnswersJsep);
     }
     state.write_peer_count();
-    (direct_rx, path_rx)
+    (direct_rx, path_rx, nostr_rx)
 }
 
 /// Starts the rendezvous: an eager member co-hosts from t=0, and everyone else defers to the heal
@@ -877,6 +907,8 @@ struct EventLoop<Driver: NodeDriver> {
     /// Direct-path probe verdicts (`transport::probe`). Never closes: `state`
     /// holds a sender for the loop's lifetime.
     direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
+    /// `Hello`s heard over Nostr; `None` without the Nostr lookup.
+    nostr_rx: Option<mpsc::Receiver<NostrHello>>,
     /// Path watcher reports (`transport::probe::on_path_change`). Never closes,
     /// like `direct_rx`.
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
@@ -933,6 +965,7 @@ struct Loop<'node, Driver: NodeDriver> {
     fetch_rx: mpsc::UnboundedReceiver<chunk_fetch::FetchDone>,
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
     direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
+    nostr_rx: Option<mpsc::Receiver<NostrHello>>,
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
     anchors: TickAnchors,
     resubscribe_attempts: u32,
@@ -1084,6 +1117,21 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state.idle.ext.note_gossip(event.as_ref());
         let context = self.parts.handler_ctx(&self.sender);
         gossip::handle_gossip_event(event, &mut self.state, &mut self.app, &context).await;
+        webrtc::nostr_signal::discovery::update_width(&mut self.state);
+    }
+
+    /// A `Hello` heard over Nostr.
+    fn nostr_hello(&mut self, hello: &NostrHello) {
+        self.state.idle.ext.other += 1;
+        let context = self.parts.handler_ctx(&self.sender);
+        webrtc::nostr_signal::discovery::on_hello(&mut self.state, &context, hello);
+    }
+
+    /// The next `Hello` of this node is due.
+    fn nostr_announce(&mut self) {
+        self.state.idle.ext.other += 1;
+        let context = self.parts.handler_ctx(&self.sender);
+        webrtc::nostr_signal::discovery::announce(&mut self.state, &context);
     }
 
     async fn direct_outcome(&mut self, outcome: probe::DirectOutcome) {
@@ -1210,6 +1258,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             context.rendezvous_id,
         );
         probe::nudge_webrtc_riders(&mut self.state, &context);
+        webrtc::nostr_signal::discovery::update_width(&mut self.state);
     }
 
     async fn sweep(&mut self) {
@@ -1588,6 +1637,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         fetch_rx,
         lan_contacts,
         direct_rx,
+        nostr_rx,
         path_rx,
         owned,
     } = loop_state;
@@ -1667,6 +1717,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         fetch_rx,
         lan_contacts,
         direct_rx,
+        nostr_rx,
         path_rx,
         anchors,
         resubscribe_attempts,
@@ -1716,6 +1767,11 @@ async fn run_loop<Driver: NodeDriver>(
                 lp.gossip_event(event).await;
             }
             Some(outcome) = lp.direct_rx.recv() => { lp.direct_outcome(outcome).await; },
+            hello = recv_opt(&mut lp.nostr_rx) => match hello {
+                None => { lp.nostr_rx = None; },
+                Some(hello) => { lp.nostr_hello(&hello); },
+            },
+            () = sleep_until_opt(lp.state.next_hello) => { lp.nostr_announce(); },
             () = slot_freed.notified() => { lp.top_up_lanes().await; },
             () = underlay_slot_freed.notified() => {
                 lp.state.idle.ext.other += 1;
@@ -2055,6 +2111,9 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+    use std::{env, fs};
+
+    use uuid::Uuid;
 
     use tokio::sync::oneshot;
 
@@ -2070,6 +2129,28 @@ mod tests {
     use crate::testing::{fresh_state, nick, test_key};
     use crate::util::clock::Instant;
     use crate::util::tuning;
+
+    /// Two daemons of one mesh and one nickname run on one machine. The second run must not delete the
+    /// chunks that the first run uses.
+    #[cfg(feature = "host")]
+    #[tokio::test]
+    async fn a_second_run_of_one_nickname_keeps_the_chunks_of_the_first() {
+        let base = env::temp_dir().join(format!("habilis-open-chunks-{}", Uuid::new_v4()));
+        let mesh = MeshId::from("test");
+        let first = super::open_chunks(Some(&base), &mesh, &nick("us")).expect("the first store");
+        let root = first
+            .put_value(b"a value of the first run")
+            .await
+            .expect("a value");
+        let second = super::open_chunks(Some(&base), &mesh, &nick("us")).expect("the second store");
+        let kept = first.has_map(root).await;
+        drop(second);
+        drop(fs::remove_dir_all(&base));
+        assert!(
+            kept,
+            "the second run deleted the chunk map of the first run"
+        );
+    }
 
     /// One `PingReport` that the engine emitted: the rows and the `known` count.
     #[derive(Debug, PartialEq, Eq)]

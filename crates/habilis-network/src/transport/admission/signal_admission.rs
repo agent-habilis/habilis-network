@@ -1,4 +1,5 @@
 //! The admission gate of the signalling plane.
+use crate::lookup::NostrPlan;
 use crate::transport::{ceiling, probe, webrtc};
 
 use std::collections::{HashMap, HashSet};
@@ -90,6 +91,9 @@ impl SignalAdmission {
                 proven_sink: None,
                 path_sink: None,
                 gossip: None,
+                nostr: None,
+                nostr_wanted: HashSet::new(),
+                relay_carries: false,
                 closed_on_rung: HashMap::new(),
             })),
             cap,
@@ -149,21 +153,24 @@ impl SignalAdmission {
         let connections = handles.iter().filter_map(WeakConnectionHandle::upgrade);
         let live = connections.filter(|connection| connection.close_reason().is_none());
         let kinds = live.map(|connection| probe::selected_kind(&connection));
-        probe::best_kind(kinds).or_else(|| self.recently_closed_on_rung(peer))
+        let relay_carries = self.lock().relay_carries;
+        probe::best_kind(kinds, relay_carries).or_else(|| self.recently_closed_on_rung(peer))
     }
 
-    /// The recursion rule closed a gossip connection of `peer`: for a while, the pair reads as
-    /// the gossip rung though no connection is left to read it from.
-    pub(crate) fn note_closed_on_rung(&self, peer: EndpointId) {
-        self.lock().closed_on_rung.insert(peer, Instant::now());
+    /// A rule closed a gossip connection of `peer` because its path is `kind` (the gossip rung, or
+    /// Nostr): for a while, the pair reads as that rung though no connection is left to read it
+    /// from.
+    pub(crate) fn note_closed_on_rung(&self, peer: EndpointId, kind: probe::PathKind) {
+        self.lock()
+            .closed_on_rung
+            .insert(peer, (Instant::now(), kind));
     }
 
-    /// The gossip rung, if the recursion rule closed a connection of `peer` lately.
+    /// The rung on which a rule closed a connection of `peer` lately, if one did.
     pub(crate) fn recently_closed_on_rung(&self, peer: EndpointId) -> Option<probe::PathKind> {
         let inner = self.lock();
-        let at = inner.closed_on_rung.get(&peer)?;
-        (Instant::now().saturating_duration_since(*at) < RUNG_CLOSE_MEMORY)
-            .then_some(probe::PathKind::Gossip)
+        let (at, kind) = inner.closed_on_rung.get(&peer)?;
+        (Instant::now().saturating_duration_since(*at) < RUNG_CLOSE_MEMORY).then_some(*kind)
     }
 
     /// Whether any live connection of `peer` with a selected path reads below IP: the relay, a
@@ -482,6 +489,7 @@ impl SignalAdmission {
         }
         inner.slot(peer).conns.push(handle);
         inner.sync_gossip();
+        inner.sync_nostr();
         let evictions = if connection.alpn() == transport::UNICAST_ALPN {
             inner.ceiling.register_quic(peer, Instant::now())
         } else {
@@ -591,6 +599,87 @@ impl SignalAdmission {
         self.lock().gossip = Some(handle);
     }
 
+    /// The Nostr transport of this endpoint, kept by the table so that it can tell the transport
+    /// which pairs have no other usable path. The table keeps the transport itself, not only its
+    /// handle: the receive task of the transport stops with the last clone, and the table lives as
+    /// long as the endpoint does.
+    pub(crate) fn set_nostr(
+        &self,
+        transport: habilis_network_iroh_nostr_transport::NostrTransport,
+    ) {
+        self.lock().nostr = Some(transport);
+    }
+
+    /// Open the data lane of the Nostr transport that [`set_nostr`](Self::set_nostr) set, now that
+    /// the mesh knows its topic. Returns whether it opened the lane: `false` for a table with no
+    /// Nostr transport, and for one that is active already. Call it inside a runtime.
+    ///
+    /// # Errors
+    ///
+    /// The transport is active already for another mesh: other keys or another relay list. An
+    /// injected transport serves one mesh for its life.
+    pub(crate) fn activate_nostr(&self, plan: NostrPlan) -> anyhow::Result<bool> {
+        let transport = self.lock().nostr.clone();
+        let (keys, ranking) = plan.into_parts();
+        let Some(transport) = transport else {
+            return Ok(false);
+        };
+        // One step: the transport opens once, and the plan of the first activation stays. The
+        // activation that did not open it learns from `serves` whether the plan that runs is its
+        // own, with no window between a check and the activation.
+        let opened = transport.activate(keys.clone(), ranking.clone());
+        anyhow::ensure!(
+            transport.serves(&keys, &ranking) == Some(true),
+            "the Nostr transport is active for another mesh: it serves one mesh for its life"
+        );
+        Ok(opened)
+    }
+
+    /// Whether the mesh lets the relay carry payload: a relay path serves a pair only then, and
+    /// on a lookup-only relay the pair has no usable path there.
+    pub(crate) fn set_relay_carries(
+        &self,
+        // true when the mesh lets the relay carry payload
+        carries: bool,
+    ) {
+        self.lock().relay_carries = carries;
+    }
+
+    /// The engine wants Nostr for `peer`: a dial to it failed, so the next dial names the Nostr
+    /// address. A pair that is served leaves the set at the next reading of its connections.
+    pub(crate) fn want_nostr(&self, peer: EndpointId) {
+        let mut inner = self.lock();
+        if inner.nostr.is_some() {
+            inner.nostr_wanted.insert(peer);
+            // The handle is closed until a sweep allows a destination, and the sweep runs from a
+            // connection that is noted: the next dial must not wait for one.
+            inner.sync_nostr();
+        }
+    }
+
+    /// Whether a dial to `peer` names the Nostr address: the table has a Nostr transport, and the
+    /// engine wants it for the pair. A table with no Nostr transport (an injected endpoint that
+    /// came without one) never wants it.
+    pub(crate) fn nostr_wanted(&self, peer: EndpointId) -> bool {
+        let inner = self.lock();
+        inner.nostr.is_some() && inner.nostr_wanted.contains(&peer)
+    }
+
+    /// Tell the Nostr transport which members the engine knows: a datagram opens replies only to
+    /// one of them. A table with no Nostr transport ignores it.
+    pub(crate) fn set_known_peers(&self, peers: impl IntoIterator<Item = EndpointId>) {
+        let transport = self.lock().nostr.clone();
+        if let Some(transport) = transport {
+            transport.set_known_peers(peers);
+        }
+    }
+
+    /// Whether [`set_nostr`](Self::set_nostr) set a Nostr transport.
+    #[cfg(test)]
+    pub(crate) fn has_nostr(&self) -> bool {
+        self.lock().nostr.is_some()
+    }
+
     /// The gossip transport that [`set_gossip`](Self::set_gossip) set, if the mesh has gossip.
     pub(crate) fn gossip_handle(
         &self,
@@ -601,6 +690,12 @@ impl SignalAdmission {
     /// [`Inner::sync_gossip`], now. The sweep and every new connection do it too.
     pub(crate) fn sync_gossip(&self) {
         self.lock().sync_gossip();
+    }
+
+    /// [`Inner::sync_nostr`], now: a path change tells the Nostr transport at once, not at the
+    /// next sweep.
+    pub(crate) fn sync_nostr(&self) {
+        self.lock().sync_nostr();
     }
 
     /// The event loop's channel for the sessions that this node answered.

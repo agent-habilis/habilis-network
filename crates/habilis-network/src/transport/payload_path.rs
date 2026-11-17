@@ -35,6 +35,9 @@ pub(crate) const GOSSIP_RELAY_REFUSED_CODE: u32 = super::webrtc::close_code::GOS
 pub(crate) const GOSSIP_RECURSION_REFUSED_CODE: u32 =
     super::webrtc::close_code::GOSSIP_ON_GOSSIP_PATH;
 
+/// Close code of a gossip connection whose selected path is Nostr.
+pub(crate) const GOSSIP_NOSTR_REFUSED_CODE: u32 = super::webrtc::close_code::GOSSIP_ON_NOSTR_PATH;
+
 static GOSSIP_RECURSION_CLOSES: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
 /// How many gossip connections the recursion rule closed since the process started: a total,
@@ -73,6 +76,26 @@ pub(crate) fn close_gossip_links_to(remote: iroh::EndpointId) -> usize {
         .count()
 }
 
+/// Close `connection` with [`GOSSIP_NOSTR_REFUSED_CODE`] once its selected path is Nostr, now or
+/// after a path change. Unconditional: it reads no mesh policy, and the mesh may allow the relay.
+pub(crate) fn watch_gossip_on_nostr(
+    connection: &Connection,
+    admission: super::admission::SignalAdmission,
+) {
+    let remote = connection.remote_id();
+    habilis_network_iroh_gossip_transport::watch_transport_path(
+        connection,
+        habilis_network_iroh_gossip_transport::NOSTR_TRANSPORT_ID,
+        GOSSIP_NOSTR_REFUSED_CODE,
+        move || {
+            // The pair reads as Nostr for a while, so that a graft does not dial the link again
+            // at once (see `request_graft`).
+            admission.note_closed_on_rung(remote, super::probe::PathKind::Nostr);
+            tracing::info!(target: LOG_TARGET, %remote, "gossip connection closed: its path is Nostr");
+        },
+    );
+}
+
 /// Close `conn` with [`GOSSIP_RECURSION_REFUSED_CODE`] once its selected path is the gossip
 /// rung, now or after a path change. Unconditional: it reads no mesh policy.
 pub(crate) fn watch_gossip_recursion(
@@ -85,19 +108,41 @@ pub(crate) fn watch_gossip_recursion(
         GOSSIP_RECURSION_REFUSED_CODE,
         move || {
             GOSSIP_RECURSION_CLOSES.fetch_add(1, Ordering::Relaxed);
-            admission.note_closed_on_rung(remote);
+            admission.note_closed_on_rung(remote, super::probe::PathKind::Gossip);
             tracing::info!(target: LOG_TARGET, %remote, "gossip connection closed: its path is the gossip rung");
         },
     );
 }
 
-/// Whether iroh's selected path to the remote is not the relay: a direct UDP
-/// path, or a custom transport (`WebRTC`, multihop), which is peer to peer as
-/// far as the relay is concerned. `false` while no path is selected yet.
+/// Whether a path address is peer to peer: a direct UDP address, or a custom transport
+/// (`WebRTC`, multihop, gossip). The relay is not, and Nostr is not either: its relays are
+/// infrastructure that sees every datagram, and it is the last fallback.
+pub(crate) fn is_peer_to_peer(address: &iroh::TransportAddr) -> bool {
+    !matches!(address, iroh::TransportAddr::Relay(_)) && !is_nostr(address)
+}
+
+/// Whether a path address is a Nostr address.
+pub(crate) fn is_nostr(address: &iroh::TransportAddr) -> bool {
+    matches!(address, iroh::TransportAddr::Custom(custom)
+        if custom.id() == habilis_network_iroh_gossip_transport::NOSTR_TRANSPORT_ID)
+}
+
+/// Whether the selected path of `connection` is one that `path` lets a payload ride.
+pub(crate) fn selected_is_payload_path(connection: &Connection, path: PayloadPath) -> bool {
+    let paths = connection.paths();
+    let selected = paths.iter().find(Path::is_selected);
+    let address: Option<iroh::TransportAddr> =
+        selected.map(|selected_path| selected_path.remote_addr().clone());
+    path.carries(address.as_ref())
+}
+
+/// Whether iroh's selected path to the remote is peer to peer: a direct UDP
+/// path, or a custom transport (`WebRTC`, multihop), but neither the relay nor Nostr
+/// (see [`is_peer_to_peer`]). `false` while no path is selected yet.
 pub(crate) fn selected_is_direct(connection: &Connection) -> bool {
     let paths = connection.paths();
     let selected = paths.iter().find(Path::is_selected);
-    selected.is_some_and(|path| !path.is_relay())
+    selected.is_some_and(|path| is_peer_to_peer(path.remote_addr()))
 }
 
 /// Whether iroh's selected path to the remote is a direct UDP path: the race
@@ -109,7 +154,7 @@ pub(crate) fn selected_is_ip(connection: &Connection) -> bool {
 }
 
 /// The rung of iroh's selected path on `conn`, for a test that shows a node
-/// stepping down the ladder: `ip`, `webrtc`, `multihop` or `relay`. `None`
+/// stepping down the ladder: `ip`, `webrtc`, `multihop`, `gossip`, `relay` or `nostr`. `None`
 /// while no path is selected yet.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub(crate) fn selected_rung(connection: &Connection) -> Option<&'static str> {
@@ -121,17 +166,19 @@ pub(crate) fn selected_rung(connection: &Connection) -> Option<&'static str> {
         PathKind::Multihop => Some("multihop"),
         PathKind::Gossip => Some("gossip"),
         PathKind::Relay => Some("relay"),
+        PathKind::Nostr => Some("nostr"),
         PathKind::None => None,
     }
 }
 
 /// Whether payload may go out on `conn` under the mesh's transport policy.
-/// With the relay allowed as a transport, anything goes — decided before the
-/// path snapshot, which locks and clones. With the relay lookup only, the
-/// selected path must be a proven non-relay one: "not selected yet" is
-/// refused, not trusted.
-pub(crate) fn payload_allowed_on(connection: &Connection, relay_transport: bool) -> bool {
-    relay_transport || selected_is_direct(connection)
+/// With both the relay and Nostr allowed as transports, anything goes — decided before the
+/// path snapshot, which locks and clones. Otherwise the selected path must be one that the
+/// policy lists (see [`PayloadPath::carries`]): a peer-to-peer path, the relay when it is
+/// listed, Nostr when it is listed. "Not selected yet" is trusted only when the relay is
+/// listed.
+pub(crate) fn payload_allowed_on(connection: &Connection, path: PayloadPath) -> bool {
+    path == PayloadPath::RelayOrNostr || selected_is_payload_path(connection, path)
 }
 
 /// The refusal every payload lane reports when the relay is lookup only and
@@ -161,6 +208,29 @@ pub async fn wait_direct(connection: &Connection, deadline: Duration) -> bool {
     wait_selected(connection, deadline, selected_is_direct).await
 }
 
+/// [`wait_direct`] for the paths that `path` lets a payload ride: a direct path, or a Nostr path
+/// when the policy lists Nostr.
+pub(crate) async fn wait_payload_path(
+    connection: &Connection,
+    deadline: Duration,
+    path: PayloadPath,
+) -> bool {
+    payload_path_wait(connection, deadline, path).await == PathWait::Selected
+}
+
+/// [`wait_payload_path`], with the way the wait ended: a caller that must tell a connection that
+/// closed from a path that did not come reads this one.
+pub(crate) async fn payload_path_wait(
+    connection: &Connection,
+    deadline: Duration,
+    path: PayloadPath,
+) -> PathWait {
+    wait_selected_outcome(connection, deadline, |connection| {
+        selected_is_payload_path(connection, path)
+    })
+    .await
+}
+
 /// [`wait_direct`] for a UDP path alone: whether UDP won the race against a
 /// `WebRTC` session within `deadline`.
 pub(crate) async fn wait_ip(connection: &Connection, deadline: Duration) -> bool {
@@ -187,13 +257,62 @@ pub enum PayloadPath {
     DirectOnly,
     /// Direct paths, or the relay.
     RelayAllowed,
+    /// Direct paths, or the Nostr relays of a custom list. The relay is lookup only.
+    DirectOrNostr,
+    /// Direct paths, the relay, or the Nostr relays of a custom list.
+    RelayOrNostr,
 }
 
 impl PayloadPath {
     /// The flag form that the wire and the handle config still carry.
     #[must_use]
     pub fn relay_allowed(self) -> bool {
-        matches!(self, Self::RelayAllowed)
+        matches!(self, Self::RelayAllowed | Self::RelayOrNostr)
+    }
+
+    /// Whether a payload may ride a Nostr path: the mesh lists the Nostr transport.
+    #[must_use]
+    pub fn nostr_allowed(self) -> bool {
+        matches!(self, Self::DirectOrNostr | Self::RelayOrNostr)
+    }
+
+    /// The payload path of a mesh policy: whether it lists the relay, and whether it lists Nostr.
+    #[must_use]
+    pub fn from_policy(
+        // `true` lets payloads use the relay
+        relay_allowed: bool,
+        // `true` lets payloads use the Nostr relays of a custom list
+        nostr_allowed: bool,
+    ) -> Self {
+        match (relay_allowed, nostr_allowed) {
+            (false, false) => Self::DirectOnly,
+            (true, false) => Self::RelayAllowed,
+            (false, true) => Self::DirectOrNostr,
+            (true, true) => Self::RelayOrNostr,
+        }
+    }
+
+    /// The same path with Nostr off: a gossip link never rides Nostr, whatever the mesh lists.
+    #[must_use]
+    pub fn without_nostr(self) -> Self {
+        Self::from_policy(self.relay_allowed(), false)
+    }
+
+    /// Whether a payload may ride the selected path `selected` (`None` while iroh selected no
+    /// path yet). A peer-to-peer path always carries it. The relay carries it when the mesh lists
+    /// the relay, Nostr when the mesh lists Nostr. No path yet reads as the relay does: it is
+    /// trusted only when the relay is listed.
+    #[must_use]
+    pub(crate) fn carries(self, selected: Option<&iroh::TransportAddr>) -> bool {
+        match selected {
+            None | Some(iroh::TransportAddr::Relay(_)) => self.relay_allowed(),
+            Some(address @ iroh::TransportAddr::Custom(_)) if is_nostr(address) => {
+                self.nostr_allowed()
+            }
+            // Direct UDP and any other custom transport are peer to peer. An address kind that
+            // iroh has not today is taken for peer to peer as far as we know.
+            Some(iroh::TransportAddr::Ip(_) | iroh::TransportAddr::Custom(_) | _) => true,
+        }
     }
 
     /// Make the payload path from a flag.
@@ -218,7 +337,7 @@ impl From<bool> for PayloadPath {
 
 /// How a wait for a selected path ended.
 #[derive(Debug, PartialEq, Eq)]
-enum PathWait {
+pub(crate) enum PathWait {
     Selected,
     /// The connection closed first: the other end gave up, which is not a refusal.
     Closed,
@@ -236,7 +355,7 @@ async fn wait_selected(
 async fn wait_selected_outcome(
     connection: &Connection,
     deadline: Duration,
-    selected: fn(&Connection) -> bool,
+    selected: impl Fn(&Connection) -> bool,
 ) -> PathWait {
     use futures_util::StreamExt as _;
     let mut events = connection.path_events();
@@ -281,10 +400,15 @@ pub async fn refuse_unless_direct(
     deadline: Duration,
     close_code: u32,
 ) -> bool {
-    let outcome = if relay.relay_allowed() {
+    // Only a mesh that lists both the relay and Nostr takes every path: for any other policy the
+    // selected path is read, so a gossip accept gate that dropped Nostr (`without_nostr`) refuses it.
+    let outcome = if relay == PayloadPath::RelayOrNostr {
         PathWait::Selected
     } else {
-        wait_selected_outcome(connection, deadline, selected_is_direct).await
+        wait_selected_outcome(connection, deadline, |connection| {
+            selected_is_payload_path(connection, relay)
+        })
+        .await
     };
     match outcome {
         PathWait::Selected => {
@@ -345,8 +469,212 @@ mod tests {
     use iroh::endpoint::presets;
     use iroh::{Endpoint, RelayMode};
 
-    use super::{Connection, PathWait, wait_selected_outcome};
+    use super::{Connection, PathWait, PayloadPath, is_peer_to_peer, wait_selected_outcome};
+    use habilis_network_iroh_gossip_transport as gossip_transport;
     use tokio::time;
+
+    /// The mesh policy decides what rides a path: a peer-to-peer path always, the relay when the
+    /// mesh lists it, Nostr when the mesh lists Nostr. A mesh without Nostr refuses it even if
+    /// the relay is listed.
+    #[test]
+    fn the_policy_lists_which_selected_paths_carry_a_payload() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let peer = iroh::SecretKey::from_bytes(&[6; 32]).public();
+        let nostr = iroh::TransportAddr::Custom(gossip_transport::transport_addr(
+            gossip_transport::NOSTR_TRANSPORT_ID,
+            peer,
+        ));
+        let relay = iroh::TransportAddr::Relay("https://relay.invalid".parse().expect("relay url"));
+        let udp = iroh::TransportAddr::Ip(([127, 0, 0, 1], 9).into());
+        for (policy, on_nostr, on_relay, on_udp, unselected) in [
+            (PayloadPath::DirectOnly, false, false, true, false),
+            (PayloadPath::RelayAllowed, false, true, true, true),
+            (PayloadPath::DirectOrNostr, true, false, true, false),
+            (PayloadPath::RelayOrNostr, true, true, true, true),
+        ] {
+            assert_eq!(
+                policy.carries(Some(&nostr)),
+                on_nostr,
+                "{policy:?} on Nostr"
+            );
+            assert_eq!(
+                policy.carries(Some(&relay)),
+                on_relay,
+                "{policy:?} on the relay"
+            );
+            assert_eq!(policy.carries(Some(&udp)), on_udp, "{policy:?} on UDP");
+            assert_eq!(
+                policy.carries(None),
+                unselected,
+                "{policy:?} with no path yet"
+            );
+        }
+        assert_eq!(
+            PayloadPath::from_policy(true, true),
+            PayloadPath::RelayOrNostr,
+            "both"
+        );
+        assert_eq!(
+            PayloadPath::RelayOrNostr.without_nostr(),
+            PayloadPath::RelayAllowed,
+            "a gossip link never rides Nostr"
+        );
+        assert_eq!(
+            PayloadPath::DirectOrNostr.without_nostr(),
+            PayloadPath::DirectOnly,
+            "a gossip link never rides Nostr, with the relay off too"
+        );
+    }
+
+    /// The gate on a live connection whose selected path is Nostr: a mesh that lists the Nostr
+    /// transport lets payload ride it, and a mesh that does not refuses it.
+    #[test]
+    fn a_connection_on_the_nostr_path_carries_a_payload_only_when_the_mesh_lists_nostr() {
+        use gossip_transport::hub::Hub;
+        use iroh::endpoint::presets;
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+        use iroh::{EndpointAddr, SecretKey};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                connection.closed().await;
+                Ok(())
+            }
+        }
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (alice_key, bob_key) = (
+                    SecretKey::from_bytes(&[41; 32]),
+                    SecretKey::from_bytes(&[42; 32]),
+                );
+                let hub = Hub::new();
+                let handles = (
+                    gossip_transport::GossipHandle::with_transport_id(
+                        alice_key.public(),
+                        gossip_transport::NOSTR_TRANSPORT_ID,
+                    ),
+                    gossip_transport::GossipHandle::with_transport_id(
+                        bob_key.public(),
+                        gossip_transport::NOSTR_TRANSPORT_ID,
+                    ),
+                );
+                hub.join(&handles.0);
+                hub.join(&handles.1);
+                let bind = |key: SecretKey, handle: gossip_transport::GossipHandle| async move {
+                    let builder = Endpoint::builder(presets::Minimal);
+                    let builder = builder.secret_key(key);
+                    let builder = builder.relay_mode(RelayMode::Disabled);
+                    let builder = builder.add_custom_transport(handle.custom_transport());
+                    let builder = builder.clear_ip_transports();
+                    let builder = builder.clear_relay_transports();
+                    builder.bind().await.expect("bind a Nostr-only endpoint")
+                };
+                let alice = bind(alice_key, handles.0).await;
+                let bob = bind(bob_key, handles.1).await;
+                let router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
+                let target = EndpointAddr::from_parts(
+                    bob.id(),
+                    [iroh::TransportAddr::Custom(
+                        gossip_transport::transport_addr(
+                            gossip_transport::NOSTR_TRANSPORT_ID,
+                            bob.id(),
+                        ),
+                    )],
+                );
+                let connection = alice
+                    .connect(target, ALPN)
+                    .await
+                    .expect("connect over Nostr");
+
+                for (policy, expected) in [
+                    (PayloadPath::DirectOnly, false),
+                    (PayloadPath::RelayAllowed, false),
+                    (PayloadPath::DirectOrNostr, true),
+                    (PayloadPath::RelayOrNostr, true),
+                ] {
+                    assert_eq!(
+                        super::payload_allowed_on(&connection, policy),
+                        expected,
+                        "{policy:?} on a Nostr path"
+                    );
+                }
+                assert!(
+                    super::wait_payload_path(
+                        &connection,
+                        Duration::from_secs(2),
+                        PayloadPath::DirectOrNostr
+                    )
+                    .await,
+                    "the wait ends on a Nostr path that the mesh lists"
+                );
+                assert!(
+                    !super::wait_payload_path(
+                        &connection,
+                        Duration::from_millis(300),
+                        PayloadPath::DirectOnly
+                    )
+                    .await,
+                    "the wait times out on a Nostr path that the mesh does not list"
+                );
+                // The accept gate applies the policy to the selected path too: a mesh that lists
+                // the relay and not Nostr refuses a Nostr path, and one that lists Nostr takes it.
+                assert!(
+                    super::refuse_unless_direct(
+                        &connection,
+                        PayloadPath::DirectOrNostr,
+                        Duration::from_millis(300),
+                        0,
+                    )
+                    .await,
+                    "a mesh that lists Nostr admits a Nostr path"
+                );
+                assert!(
+                    !super::refuse_unless_direct(
+                        &connection,
+                        PayloadPath::RelayAllowed,
+                        Duration::from_millis(300),
+                        0,
+                    )
+                    .await,
+                    "a relay-allowed mesh without Nostr refuses a Nostr path"
+                );
+                connection.close(0u32.into(), b"done");
+                router.shutdown().await.expect("shutdown");
+                alice.close().await;
+            },
+        );
+    }
+
+    /// The relay and Nostr are infrastructure, not peers: a path on either is not direct, so the
+    /// gate of a mesh whose relay is lookup only refuses payload on it.
+    #[test]
+    fn a_nostr_path_is_not_peer_to_peer() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let peer = iroh::SecretKey::from_bytes(&[5; 32]).public();
+        let custom = |id| iroh::TransportAddr::Custom(gossip_transport::transport_addr(id, peer));
+        assert!(
+            !is_peer_to_peer(&custom(gossip_transport::NOSTR_TRANSPORT_ID)),
+            "a Nostr path is not peer to peer"
+        );
+        assert!(
+            is_peer_to_peer(&custom(gossip_transport::GOSSIP_TRANSPORT_ID)),
+            "a gossip path is"
+        );
+        assert!(
+            is_peer_to_peer(&iroh::TransportAddr::Ip(([127, 0, 0, 1], 9).into())),
+            "a UDP path is"
+        );
+        assert!(
+            !is_peer_to_peer(&iroh::TransportAddr::Relay(
+                "https://relay.invalid".parse().expect("relay url")
+            )),
+            "the relay is not"
+        );
+    }
 
     const ALPN: &[u8] = b"test/path-wait";
 

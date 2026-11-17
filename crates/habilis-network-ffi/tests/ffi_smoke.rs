@@ -115,6 +115,26 @@ fn a_bad_mesh_id_fails_with_a_reason() {
     );
 }
 
+/// `nostr_urls` reaches the mesh config: a relay that is not a websocket is
+/// refused before anything binds.
+#[test]
+fn a_bad_nostr_relay_is_refused() {
+    let nick = CString::new("nostr").expect("no interior NUL");
+    let mut options = create_opts(&nick);
+    options.lookup = c"nostr".as_ptr();
+    options.nostr_urls = c"https://relay.example/".as_ptr();
+    let handle = open(&options);
+    if !handle.is_null() {
+        // SAFETY: the handle came from `habilis_network_mesh_open` and is not used after this.
+        unsafe {
+            habilis_network_mesh_close(handle);
+        }
+    }
+    assert!(handle.is_null(), "an https Nostr relay must be refused");
+    let reason = last_error().expect("a refusal sets the error slot");
+    assert!(reason.contains("ws"), "{reason}");
+}
+
 #[test]
 fn null_arguments_are_errors_not_crashes() {
     // Each rejected call is checked on the spot: a call clears the error slot on

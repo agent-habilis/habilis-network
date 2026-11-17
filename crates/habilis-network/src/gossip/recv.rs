@@ -28,7 +28,7 @@ use habilis_network_doc::SliceIngest;
 use n0_future::time::Instant as TokioInstant;
 
 use super::app::{AppClass, InboundApp, NodeApp};
-use super::merge_ctx::{announce_arrival, broadcast_peer_info, peer_info_seal_key};
+use super::merge_ctx::{announce_arrival, broadcast_peer_info, note_lane_flag, peer_info_seal_key};
 use super::{backfill, digest_round};
 use crate::net;
 use habilis_network_protocol::digest::{DigestPage, DigestRoot};
@@ -1962,6 +1962,15 @@ async fn handle_peer_info(
     // endpoint is believed.
     let proven = state.proven_endpoints.get(&signer) == Some(peer_id)
         || state.proven_endpoints.trusted(&signer) == Some(peer_id);
+    // Only the endpoint itself can say it needs a data channel: the gossip signature binds this
+    // body to a nickname, not to the id inside it, so the flag counts only from a signer that
+    // proved it owns `peer_id`.
+    note_lane_flag(
+        &mut state.lane_peers,
+        peer_id,
+        proven,
+        peer_addr_error::peer_info_needs_lane(&parsed, context.mesh.as_str().as_bytes()),
+    );
     state.note_rival_beacon_flag(
         context.endpoint.id(),
         signer,
@@ -1977,7 +1986,7 @@ async fn handle_peer_info(
     // state — a `PeerInfo` normally arrives over an already-formed link,
     // and recovery (`heal::rebridge_known`, the starvation watchdog's
     // precondition) needs the memory precisely *after* that link dies.
-    let first_sighting = state.known_endpoints.insert(peer_id);
+    let first_sighting = state.note_known_endpoint(peer_id);
     let peer_ips: Vec<_> = peer_addr.ip_addrs().collect();
     let local = context.endpoint.id().fmt_short();
     let peer = peer_id.fmt_short();

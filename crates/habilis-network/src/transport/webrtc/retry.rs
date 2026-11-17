@@ -50,7 +50,7 @@ pub(crate) fn retry_sessions(state: &mut state::EventLoopState, context: &Handle
         .filter(|address| address.id != context.rendezvous_id)
         .filter(|address| {
             session_policy::wants_session(
-                own_needs_lane || lane_needs::needs_webrtc_lane(address),
+                lane_pair(state, own_needs_lane, address),
                 state.pair_path_kind(address.id),
                 state.direct.get(&address.id) == Some(&DirectState::Direct),
             )
@@ -72,7 +72,7 @@ pub(crate) fn retry_sessions(state: &mut state::EventLoopState, context: &Handle
     // pass starts and which, so that the two passes do not add up to a round per member.
     let (lane, rest): (Vec<_>, Vec<_>) = peers
         .into_iter()
-        .partition(|address| own_needs_lane || lane_needs::needs_webrtc_lane(address));
+        .partition(|address| lane_pair(state, own_needs_lane, address));
     let pick = probe::lane_pick();
     let lane = probe::plan_lane_offers(lane, state.webrtc_admission.in_flight(), pick);
     let mut offers: Vec<EndpointAddr> = rest;
@@ -80,6 +80,20 @@ pub(crate) fn retry_sessions(state: &mut state::EventLoopState, context: &Handle
     for address in offers {
         negotiate_session::negotiate_session(state, context, address.id, address);
     }
+}
+
+/// Whether the pair with `address` runs on a data channel, for the filter and the pacing of the
+/// offers: this node needs the lane (judged by its address snapshot, see [`retry_sessions`]), the
+/// address of the peer says so, or the peer said so itself in a signed `PeerInfo` or `Hello`. An
+/// address with no relay and no IP reads as unknown, so for it only the word of the peer counts.
+pub(crate) fn lane_pair(
+    state: &state::EventLoopState,
+    own_needs_lane: bool,
+    address: &EndpointAddr,
+) -> bool {
+    own_needs_lane
+        || lane_needs::needs_webrtc_lane(address)
+        || state.lane_peers.contains(&address.id)
 }
 
 /// Whether the pair with `addr` waits for a send before it is offered a

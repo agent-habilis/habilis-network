@@ -16,7 +16,7 @@ pub struct HabilisNetworkOpts {
     pub nick: *const c_char,
     /// The mesh name on create, NUL-terminated. NULL falls back to `habilis-network`.
     pub name: *const c_char,
-    /// Comma-separated lookups, any of `mdns`, `dht`, `relay`; NULL ⇒ none
+    /// Comma-separated lookups, any of `mdns`, `dht`, `relay`, `nostr`; NULL ⇒ none
     /// (a loopback mesh on create).
     pub lookup: *const c_char,
     /// Comma-separated transports, any of `udp`, `webrtc`, `multihop`, `gossip`, `relay`;
@@ -28,6 +28,8 @@ pub struct HabilisNetworkOpts {
     pub max_peers: usize,
     /// C: the ceiling of direct connections, `WebRTC` sessions and unicast connections together.
     pub max_direct: usize,
+    /// Comma-separated custom Nostr relays; NULL ⇒ the pinned public list.
+    pub nostr_urls: *const c_char,
 }
 
 impl HabilisNetworkOpts {
@@ -44,6 +46,7 @@ impl HabilisNetworkOpts {
             relay_urls: ptr::null(),
             max_peers: 0,
             max_direct: 0,
+            nostr_urls: ptr::null(),
         }
     }
 }
@@ -62,7 +65,7 @@ const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
     assert!(
-        size_of::<HabilisNetworkOpts>() == 72,
+        size_of::<HabilisNetworkOpts>() == 80,
         "opts-struct.ts OPTS_BYTES"
     );
     assert!(
@@ -104,5 +107,9 @@ const _: () = {
     assert!(
         offset_of!(HabilisNetworkOpts, max_direct) == 64,
         "max_direct is at offset 64 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, nostr_urls) == 72,
+        "nostr_urls is at offset 72 of HabilisNetworkOpts"
     );
 };

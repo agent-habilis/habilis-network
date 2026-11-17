@@ -6,6 +6,7 @@ use std::sync::{Mutex, Weak};
 use std::time::Duration;
 
 use super::Inner;
+use super::nostr_name::NostrName;
 
 use n0_future::{task, time};
 /// Pure: what the table tells the gossip transport about a peer whose live connections read as
@@ -17,8 +18,41 @@ use n0_future::{task, time};
 /// Two ends of one pair may disagree for one sweep, and a multihop path that is dead stays
 /// selected until noq abandons it (15 s), so gossip is blocked for that long.
 pub(crate) fn gossip_view(kinds: &[probe::PathKind]) -> (bool, bool) {
-    let best = probe::best_kind(kinds.iter().copied());
+    let best = probe::best_kind(kinds.iter().copied(), true);
     (!kinds.is_empty(), best.is_none_or(probe::allow_for))
+}
+
+/// Pure: what the table tells the Nostr transport about a peer whose live connections read as
+/// `kinds`: whether it is established (any live connection) and whether frames may go to it
+/// (no other usable path: see [`nostr_allow_for`](probe::nostr_allow_for)).
+pub(crate) fn nostr_view(
+    kinds: &[probe::PathKind],
+    relay_carries: bool,
+    wanted: bool,
+) -> (bool, bool) {
+    (
+        !kinds.is_empty(),
+        probe::nostr_allow_for(kinds, relay_carries, wanted),
+    )
+}
+
+/// Pure: the name rule for a peer whose connections read as `kinds`, that the engine wants Nostr
+/// for (`wanted`) or not, and that a session `carried` has with no connection.
+pub(crate) fn nostr_name(
+    kinds: &[probe::PathKind],
+    relay_carries: bool,
+    wanted: bool,
+    carried: bool,
+) -> NostrName {
+    if kinds.is_empty() && !wanted && !carried {
+        return NostrName::Forget;
+    }
+    let allowed = probe::nostr_allow_for(kinds, relay_carries, wanted);
+    if allowed && !carried {
+        NostrName::Allow
+    } else {
+        NostrName::Stop
+    }
 }
 
 /// One timer for the whole table, ending with it.

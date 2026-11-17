@@ -38,6 +38,7 @@ so); `/peers` prints the roster; `/quit` leaves.
 Both halves accept the same selectors: a `topic` everyone shares, or a
 `mesh` id. `--relay-url <url>` / `?relay=<url>` swaps in a custom relay ladder
 and is part of the derived id, so every member must pass the same list.
+`--nostr-url <url>` / `?nostr=<url>` does the same for the Nostr relays.
 `--transport udp,webrtc,relay` / `?transport=udp,webrtc,relay` lets payload fall back to
 the relay — same rule.
 

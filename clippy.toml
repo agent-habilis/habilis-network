@@ -60,6 +60,7 @@ allowed-duplicate-crates = [
     "pem-rfc7468",
     "pkcs8",
     "rand",
+    "sec1",
     "signature",
     "spki",
     # hickory-net (through iroh) pulls the rand 0.10 line, so rand_core and chacha20 keep two lines.

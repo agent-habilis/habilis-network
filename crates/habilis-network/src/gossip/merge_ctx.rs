@@ -6,6 +6,8 @@
 //! lives in [`super::recv`].
 
 use crate::daemon::state::{Latch, PeerInfoFlood, RendezvousFlag, Standing};
+use iroh::EndpointId;
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::transport::MeshSender;
@@ -732,8 +734,8 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
 /// The endpoints that [`unicast_farewell`] dials: the dial address of each live peer, once for each
 /// endpoint, whatever the keys that use it. The rendezvous pseudo-node is never a directed target,
 /// and a quiet or ghost peer's stale address isn't worth a dial at shutdown.
-fn farewell_targets(state: &EventLoopState) -> Vec<iroh::EndpointId> {
-    let mut targets: Vec<iroh::EndpointId> = Vec::new();
+fn farewell_targets(state: &EventLoopState) -> Vec<EndpointId> {
+    let mut targets: Vec<EndpointId> = Vec::new();
     for key in &state.peers {
         let Some(address) = state.address_of(key) else {
             continue;
@@ -763,6 +765,27 @@ pub(crate) fn peer_info_json(
         json["beacon"] = serde_json::Value::Bool(true);
     }
     json
+}
+
+/// What a receiver does with the lane flag of a `PeerInfo`. A node says the flag only while it is
+/// `true`, so a `PeerInfo` with no flag (or a forged one) says that the node does not need the lane:
+/// a restart that gained IP clears the old `true` with no extra frame. The flag counts only when the
+/// signer of the `PeerInfo` proved that it owns the endpoint (`proven`): another member can neither
+/// replay a signed `true` of that endpoint in its own body nor clear it.
+pub(crate) fn note_lane_flag(
+    lane_peers: &mut HashSet<EndpointId>,
+    peer: EndpointId,
+    proven: bool,
+    flag: Option<bool>,
+) {
+    if !proven {
+        return;
+    }
+    if flag == Some(true) {
+        lane_peers.insert(peer);
+    } else {
+        lane_peers.remove(&peer);
+    }
 }
 
 /// The seal key that a `PeerInfo` body names, or `None` when the body names none or the text is
@@ -804,7 +827,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
         })
         .clone();
     let seal = state.identity.seal_public();
-    let addr_json = peer_info_json(
+    let mut addr_json = peer_info_json(
         &our_addr,
         proof,
         state
@@ -812,8 +835,22 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
             .contains(&RendezvousFlag::HostsRendezvous),
         &seal,
     );
+    // Whether this node needs a data channel, said out loud and signed by its
+    // endpoint key: a node with no IP and no relay advertises an empty
+    // address, which reads as unknown rather than as a browser.
+    // Said only while true: a node with IP says nothing, and a receiver reads that as "no lane".
+    if webrtc::lane_needs::local_needs_webrtc_lane(state.local_udp_transport) {
+        let lane = peer_addr_error::peer_info_to_json(
+            &our_addr,
+            true,
+            context.endpoint.secret_key(),
+            context.mesh.as_str().as_bytes(),
+        );
+        addr_json["webrtc"] = lane["webrtc"].clone();
+        addr_json["lane_sig"] = lane["lane_sig"].clone();
+    }
     let addr_data = serde_json::to_string(&addr_json)
-        .expect("endpoint_addr_to_json produces a Value that always serializes");
+        .expect("peer_info_json produces a Value that always serializes");
     let addr_body =
         MessageBody::try_new(&addr_data).expect("endpoint address JSON has no control characters");
     broadcast_msg(
@@ -874,7 +911,7 @@ fn json_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{farewell_targets, peer_info_json, wire};
+    use super::{farewell_targets, note_lane_flag, peer_info_json, wire};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::identity::Identity;
     use crate::protocol::seal_error::SEAL_SYMMETRIC_OVERHEAD;
@@ -884,10 +921,11 @@ mod tests {
     use crate::testing::{
         endpoint_id, fresh_state, fresh_state_with_mesh_key, longest_mesh_id, nick, test_key,
     };
-    use crate::transport::SendError;
+    use crate::transport::{SendError, proven_endpoints};
     use crate::util::consts::MAX_MESSAGE_SIZE;
     use crate::util::tuning::SLICE_VALUE_UNITS_MAX;
     use habilis_network_doc::SliceError;
+    use std::collections::HashSet;
     use std::time::Duration;
 
     use crate::protocol::peer_addr_error;
@@ -1399,6 +1437,99 @@ mod tests {
                 );
                 node.endpoint.close().await;
             },
+        );
+    }
+
+    /// A node says its lane flag only while it is true. A restart that gained IP says nothing, and a
+    /// receiver reads that as "no lane": the old `true` does not outlive the restart.
+    #[test]
+    fn a_proven_peer_info_with_no_lane_flag_clears_the_old_true() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let secret = iroh::SecretKey::generate();
+        let peer = secret.public();
+        let address = iroh::EndpointAddr::new(peer);
+        let scope = b"mesh-a";
+        let mut lane_peers = HashSet::new();
+
+        let said_true = peer_addr_error::peer_info_to_json(&address, true, &secret, scope);
+        note_lane_flag(
+            &mut lane_peers,
+            peer,
+            true,
+            peer_addr_error::peer_info_needs_lane(&said_true, scope),
+        );
+        assert!(
+            lane_peers.contains(&peer),
+            "the node said it needs the lane"
+        );
+
+        let said_nothing = peer_addr_error::endpoint_addr_to_json(&address);
+        note_lane_flag(
+            &mut lane_peers,
+            peer,
+            true,
+            peer_addr_error::peer_info_needs_lane(&said_nothing, scope),
+        );
+        assert!(
+            !lane_peers.contains(&peer),
+            "a PeerInfo with no flag says the node has IP now"
+        );
+    }
+
+    /// The flag of an endpoint counts only from a `PeerInfo` whose signer proved that it owns the
+    /// endpoint. Another member can replay the signed `true` of that endpoint in its own `PeerInfo`, but
+    /// its proof does not name the endpoint, so the replay is ignored, and so is a clearing one.
+    #[test]
+    fn a_lane_flag_replayed_by_another_member_is_ignored() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mesh = longest_mesh_id();
+        let scope = mesh.as_str().as_bytes();
+        let owner = iroh::SecretKey::generate();
+        let replayer = iroh::SecretKey::generate();
+        let replayer_key = test_key("replayer");
+        let replayer_proof = proven_endpoints::sign(&replayer, &mesh, &replayer_key);
+        let owner_address = iroh::EndpointAddr::new(owner.public());
+        let mut lane_peers = HashSet::new();
+
+        // The replayer's PeerInfo names the owner's endpoint and carries the owner's signed flag.
+        let copied_flag = peer_addr_error::peer_info_to_json(&owner_address, true, &owner, scope);
+        let proven =
+            proven_endpoints::verifies(owner.public(), &mesh, &replayer_key, &replayer_proof);
+        assert!(
+            !proven,
+            "the replayer cannot prove it owns the owner's endpoint"
+        );
+        note_lane_flag(
+            &mut lane_peers,
+            owner.public(),
+            proven,
+            peer_addr_error::peer_info_needs_lane(&copied_flag, scope),
+        );
+        assert!(lane_peers.is_empty(), "a copied_flag true is ignored");
+
+        // The owner's own, proven PeerInfo sets the flag; the same replayer cannot clear it.
+        note_lane_flag(
+            &mut lane_peers,
+            owner.public(),
+            true,
+            peer_addr_error::peer_info_needs_lane(&copied_flag, scope),
+        );
+        assert!(
+            lane_peers.contains(&owner.public()),
+            "the proven PeerInfo of the owner sets the flag"
+        );
+        note_lane_flag(
+            &mut lane_peers,
+            owner.public(),
+            proven,
+            peer_addr_error::peer_info_needs_lane(
+                &peer_addr_error::endpoint_addr_to_json(&owner_address),
+                scope,
+            ),
+        );
+        assert!(
+            lane_peers.contains(&owner.public()),
+            "an unproven PeerInfo with no flag clears nothing"
         );
     }
 

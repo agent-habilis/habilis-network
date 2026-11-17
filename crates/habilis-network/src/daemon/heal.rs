@@ -72,73 +72,77 @@ pub(super) async fn run_heal(
 ) {
     // A periodic return that fell due is owed from this tick, for a bounded time.
     state.pay_periodic_return(Instant::now(), context.endpoint.id());
-    // A browser-shaped peer's rendezvous link can only ever be admitted on
-    // a data channel; keep offering one while the link is down.
-    webrtc::rendezvous::negotiate_rendezvous_session(state, context);
-    // A node that came back to a mesh whose links are all up gets no link
-    // event to release on, so the heal tick checks too.
-    gossip::heal::release_rendezvous_if_due(state, context).await;
     let threshold = heal_stall_threshold();
     let hard_edge = is_resume(gap.mono, threshold) || is_wall_resume(gap.wall, gap.mono, threshold);
-    if hard_edge {
-        tracing::warn!(
-            target: "habilis_network::gossip",
-            mono_gap_ms = millis_saturating(gap.mono),
-            wall_gap_ms = millis_saturating(gap.wall),
-            "heal: hard re-bootstrap edge"
-        );
-        state.note_degraded();
-        // The frozen-era link view is stale by definition; clearing this
-        // re-arms the regular tick's probe until a fresh NeighborUp. Every link
-        // is stale too, so a node that had let go of the rendezvous is owed
-        // one return to it.
-        state.rendezvous_flags.remove(&RendezvousFlag::Linked);
-        state.owe_rendezvous_return(Instant::now());
-        // A free reading taken before the freeze is stale for the same
-        // reason, across the widest gap any of these deadlines can span.
-        state.forget_rendezvous_verdict();
-        // A rival re-check deadline that "matured" while the process was
-        // frozen would shed the beacon into a mesh that is still
-        // re-forming; push it out a steady interval so the re-bootstrap
-        // settles first.
-        if state.next_rival_recheck.is_some() {
-            state.next_rival_recheck = Some(Instant::now() + tuning::rival_recheck());
+    // A mesh with no rendezvous (Nostr only) has nothing to re-graft or
+    // re-assert; the re-bridge below still runs.
+    if params.has_rendezvous {
+        // A browser-shaped peer's rendezvous link can only ever be admitted on
+        // a data channel; keep offering one while the link is down.
+        webrtc::rendezvous::negotiate_rendezvous_session(state, context);
+        // A node that came back to a mesh whose links are all up gets no link
+        // event to release on, so the heal tick checks too.
+        gossip::heal::release_rendezvous_if_due(state, context).await;
+        if hard_edge {
+            tracing::warn!(
+                target: "habilis_network::gossip",
+                mono_gap_ms = millis_saturating(gap.mono),
+                wall_gap_ms = millis_saturating(gap.wall),
+                "heal: hard re-bootstrap edge"
+            );
+            state.note_degraded();
+            // The frozen-era link view is stale by definition; clearing this
+            // re-arms the regular tick's probe until a fresh NeighborUp. Every link
+            // is stale too, so a node that had let go of the rendezvous is owed
+            // one return to it.
+            state.rendezvous_flags.remove(&RendezvousFlag::Linked);
+            state.owe_rendezvous_return(Instant::now());
+            // A free reading taken before the freeze is stale for the same
+            // reason, across the widest gap any of these deadlines can span.
+            state.forget_rendezvous_verdict();
+            // A rival re-check deadline that "matured" while the process was
+            // frozen would shed the beacon into a mesh that is still
+            // re-forming; push it out a steady interval so the re-bootstrap
+            // settles first.
+            if state.next_rival_recheck.is_some() {
+                state.next_rival_recheck = Some(Instant::now() + tuning::rival_recheck());
+            }
+            // Re-assert the rendezvous hint (the network changed). The rung
+            // is re-validated off-loop by the beacon's liveness self-monitor,
+            // so a rung that died during the freeze self-corrects — no inline
+            // ladder walk on the event loop here.
+            setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
+            if webrtc::rendezvous::rendezvous_graftable(state) {
+                gossip::heal::tick_heal_hard(context.endpoint, params.id, context.sender).await;
+            }
+        } else if state.rendezvous_flags.contains(&RendezvousFlag::Linked) {
+            // A live rendezvous link has nothing to heal — and healing it
+            // anyway is what flapped it once per tick (both heal legs dial
+            // `GOSSIP_ALPN`, which the beacon's gossip adopts, superseding
+            // the healthy link; see `tick_heal`). `NeighborDown` re-arms
+            // this gate instantly.
+            tracing::debug!(
+                target: "habilis_network::gossip",
+                "heal tick: rendezvous linked; idle"
+            );
+        } else if !state.rendezvous_wanted() {
+            // Enough links to others: the rendezvous was let go of on purpose, and
+            // grafting it now would undo that. A node that falls below the count
+            // comes back through the next tick.
+            tracing::debug!(
+                target: "habilis_network::gossip",
+                "heal tick: rendezvous released; idle"
+            );
+        } else if webrtc::rendezvous::rendezvous_graftable(state) {
+            gossip::heal::tick_heal(params.id, context.sender).await;
+        } else {
+            // The JSEP offer fired at the top of this tick; the graft waits for
+            // the session it needs to survive the beacon's accept gate.
+            tracing::debug!(
+                target: "habilis_network::gossip",
+                "heal tick: rendezvous graft held until a webrtc session attaches"
+            );
         }
-        // Re-assert the rendezvous hint (the network changed). The rung
-        // is re-validated off-loop by the beacon's liveness self-monitor,
-        // so a rung that died during the freeze self-corrects — no inline
-        // ladder walk on the event loop here.
-        setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
-        if webrtc::rendezvous::rendezvous_graftable(state) {
-            gossip::heal::tick_heal_hard(context.endpoint, params.id, context.sender).await;
-        }
-    } else if state.rendezvous_flags.contains(&RendezvousFlag::Linked) {
-        // A live rendezvous link has nothing to heal — and healing it
-        // anyway is what flapped it once per tick (both heal legs dial
-        // `GOSSIP_ALPN`, which the beacon's gossip adopts, superseding
-        // the healthy link; see `tick_heal`). `NeighborDown` re-arms
-        // this gate instantly.
-        tracing::debug!(
-            target: "habilis_network::gossip",
-            "heal tick: rendezvous linked; idle"
-        );
-    } else if !state.rendezvous_wanted() {
-        // Enough links to others: the rendezvous was let go of on purpose, and
-        // grafting it now would undo that. A node that falls below the count
-        // comes back through the next tick.
-        tracing::debug!(
-            target: "habilis_network::gossip",
-            "heal tick: rendezvous released; idle"
-        );
-    } else if webrtc::rendezvous::rendezvous_graftable(state) {
-        gossip::heal::tick_heal(params.id, context.sender).await;
-    } else {
-        // The JSEP offer fired at the top of this tick; the graft waits for
-        // the session it needs to survive the beacon's accept gate.
-        tracing::debug!(
-            target: "habilis_network::gossip",
-            "heal tick: rendezvous graft held until a webrtc session attaches"
-        );
     }
     // Rendezvous-independent re-bridge. Fires on the hard (resume) edge —
     // where a reused endpoint id can be stuck behind a stale *accepted*
@@ -385,6 +389,7 @@ mod tests {
                     relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
                     rung_tx: watch::channel(None).0,
+                    has_rendezvous: true,
                 };
                 let parts = CtxParts {
                     endpoint: &node.endpoint,

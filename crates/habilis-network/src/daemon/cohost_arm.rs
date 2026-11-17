@@ -688,6 +688,7 @@ mod tests {
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
             rung_tx: watch::channel(None).0,
+            has_rendezvous: true,
         }
     }
 
@@ -988,6 +989,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: watch::channel(None).0,
+                has_rendezvous: true,
             };
 
             let endpoint = lookup::build_endpoint(
@@ -1085,6 +1087,7 @@ mod tests {
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
             rung_tx: watch::channel(None).0,
+            has_rendezvous: true,
         };
 
         // The holder: another member of the same room, on the only rung.
@@ -1274,6 +1277,7 @@ mod tests {
                     relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
                     rung_tx: watch::channel(None).0,
+                    has_rendezvous: true,
                 }
             };
             let params = params_of(6);
@@ -1399,6 +1403,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: watch::channel(None).0,
+                has_rendezvous: true,
             };
             // A beacon of another mesh holds the first rung: this member reads it as foreign and
             // binds the second.
@@ -1412,6 +1417,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: watch::channel(None).0,
+                has_rendezvous: true,
             };
             let other_endpoint = loopback_endpoint().await;
             let other_book = lookup::address_book(&other_endpoint);
@@ -1869,6 +1875,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: watch::channel(None).0,
+                has_rendezvous: true,
             };
 
             let endpoint = lookup::build_endpoint(
@@ -1975,6 +1982,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: watch::channel(None).0,
+                has_rendezvous: true,
             };
 
             let endpoint = lookup::build_endpoint(

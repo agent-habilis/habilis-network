@@ -22,6 +22,13 @@ use std::fmt;
 /// `LookupOpts` given to `bind` must also match the ones the mesh id derives, or
 /// the relay-direct rendezvous dial has no rung to ride.
 ///
+/// Several meshes may share one injected endpoint, with one limit: the endpoint has one path
+/// ordering. A mesh whose relay carries payload cannot run beside a mesh whose relay is lookup
+/// only if either of them lists Nostr, because the lookup-only mesh ranks Nostr above the relay
+/// for the whole endpoint, and the payload gate of the other mesh would refuse that path. Setup
+/// refuses the second mesh with an error that names both policies. Give such meshes separate
+/// endpoints, or one relay policy.
+///
 /// A literal does not compile outside this module:
 ///
 /// ```compile_fail,E0451
@@ -113,7 +120,18 @@ impl InjectedEndpoint {
         super::check_webrtc_key(bound, &webrtc)?;
         #[cfg(feature = "multihop")]
         super::check_hop_key(bound, transports.multihop.as_ref())?;
+        if let Some(nostr) = &transports.nostr {
+            anyhow::ensure!(
+                nostr.handle().app_id() == bound,
+                "injected endpoint binds {bound} but its Nostr transport serves {}; they must share one key",
+                nostr.handle().app_id()
+            );
+        }
         let admission = transport::SignalAdmission::new(max_direct);
+        // The table keeps the transport and opens its lane once the mesh knows its topic.
+        if let Some(nostr) = &transports.nostr {
+            admission.set_nostr(nostr.clone());
+        }
         transports.admission = Some(admission.clone());
         #[cfg(all(feature = "multihop", feature = "host"))]
         let multihop = transports.multihop.clone();

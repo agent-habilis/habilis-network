@@ -48,6 +48,53 @@ mod tests {
         );
     }
 
+    /// A pair whose other paths are gone needs the Nostr address in its dial: iroh learns the
+    /// address of a custom transport only from an address that names it. A healthy pair, and a
+    /// mesh that does not list Nostr, name none: the first flight of a dial rides what the pair has.
+    #[test]
+    fn a_dial_names_the_nostr_address_only_for_a_pair_the_engine_wants_it_for() {
+        use crate::transport::SignalAdmission;
+        use habilis_network_iroh_gossip_transport::{NOSTR_TRANSPORT_ID, transport_addr};
+        use habilis_network_iroh_nostr_transport::NostrTransport;
+        let _guard = ::habilis_network_test_tracing::init();
+        let (me, bob) = (testing::endpoint_id(1), testing::endpoint_id(2));
+        let nostr = iroh::TransportAddr::Custom(transport_addr(NOSTR_TRANSPORT_ID, bob));
+        let pool = super::UnicastPool::disconnected();
+        pool.note_addr(&iroh::EndpointAddr::new(bob));
+        let table = SignalAdmission::new(8);
+        pool.set_admission(table.clone());
+        pool.set_nostr_transport(true);
+
+        assert!(
+            !pool.dial_address(bob).addrs.contains(&nostr),
+            "a pair that nobody wants Nostr for dials without its address"
+        );
+        table.want_nostr(bob);
+        assert!(
+            !pool.dial_address(bob).addrs.contains(&nostr),
+            "a table with no Nostr transport (an injected endpoint without one) never wants it"
+        );
+        table.set_nostr(NostrTransport::new(me));
+        table.want_nostr(bob);
+        let dialed = pool.dial_address(bob);
+        assert!(
+            dialed.addrs.contains(&nostr),
+            "a pair that the engine wants Nostr for dials with its address"
+        );
+        assert_eq!(dialed.id, bob, "it is still the dial of the same peer");
+        let other = testing::endpoint_id(3);
+        assert!(
+            !pool
+                .dial_address(other)
+                .addrs
+                .contains(&iroh::TransportAddr::Custom(transport_addr(
+                    NOSTR_TRANSPORT_ID,
+                    other
+                ))),
+            "another peer is not affected"
+        );
+    }
+
     #[test]
     fn an_expired_failure_allows_the_dial_and_is_pruned() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -1050,6 +1097,91 @@ mod tests {
                 router.shutdown().await.expect("shutdown");
                 node.close().await;
                 server.close().await;
+            },
+        );
+    }
+
+    /// A cold send whose dial lands on a Nostr path is refused where the mesh lists the relay and
+    /// not Nostr, and goes through where the mesh lists Nostr: the relay being listed does not
+    /// let a payload ride a path that the policy does not list.
+    #[test]
+    fn a_send_that_dials_onto_a_nostr_path_follows_the_payload_policy() {
+        use crate::transport::{RELAY_REFUSED, UNICAST_ALPN};
+        use gossip_transport::hub::Hub;
+        use habilis_network_iroh_gossip_transport as gossip_transport;
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+        use iroh::{EndpointAddr, SecretKey};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, connection: endpoint::Connection) -> Result<(), AcceptError> {
+                connection.closed().await;
+                Ok(())
+            }
+        }
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (alice_key, bob_key) = (
+                    SecretKey::from_bytes(&[81; 32]),
+                    SecretKey::from_bytes(&[82; 32]),
+                );
+                let hub = Hub::new();
+                let handles = (
+                    gossip_transport::GossipHandle::with_transport_id(
+                        alice_key.public(),
+                        gossip_transport::NOSTR_TRANSPORT_ID,
+                    ),
+                    gossip_transport::GossipHandle::with_transport_id(
+                        bob_key.public(),
+                        gossip_transport::NOSTR_TRANSPORT_ID,
+                    ),
+                );
+                hub.join(&handles.0);
+                hub.join(&handles.1);
+                let bind = |key: SecretKey, handle: gossip_transport::GossipHandle| async move {
+                    let builder = iroh::Endpoint::builder(presets::Minimal);
+                    let builder = builder.secret_key(key);
+                    let builder = builder.relay_mode(iroh::RelayMode::Disabled);
+                    let builder = builder.add_custom_transport(handle.custom_transport());
+                    let builder = builder.clear_ip_transports();
+                    let builder = builder.clear_relay_transports();
+                    builder.bind().await.expect("bind a Nostr-only endpoint")
+                };
+                let alice = bind(alice_key, handles.0).await;
+                let bob = bind(bob_key, handles.1).await;
+                let router = Router::builder(bob.clone())
+                    .accept(UNICAST_ALPN, Hold)
+                    .spawn();
+                let target = EndpointAddr::from_parts(
+                    bob.id(),
+                    [iroh::TransportAddr::Custom(
+                        gossip_transport::transport_addr(
+                            gossip_transport::NOSTR_TRANSPORT_ID,
+                            bob.id(),
+                        ),
+                    )],
+                );
+                // The mesh lists the relay, and not Nostr.
+                let pool = super::UnicastPool::new(alice.clone(), true);
+                pool.note_addr(&target);
+                let refused = pool
+                    .dial_and_send(bob.id(), bytes::Bytes::from_static(b"one"))
+                    .await
+                    .expect_err("a payload on a Nostr path is refused when Nostr is not listed");
+                assert!(
+                    refused.to_string().contains(RELAY_REFUSED),
+                    "the refusal names the path policy: {refused}"
+                );
+                // The mesh lists Nostr too.
+                pool.set_nostr_transport(true);
+                pool.dial_and_send(bob.id(), bytes::Bytes::from_static(b"two"))
+                    .await
+                    .expect("a payload on a Nostr path goes through when Nostr is listed");
+                router.shutdown().await.expect("shutdown");
+                alice.close().await;
             },
         );
     }

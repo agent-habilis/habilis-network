@@ -38,6 +38,7 @@ pub(crate) mod dial_signal;
 pub(crate) mod ice_profile;
 pub(crate) mod lane_needs;
 pub(crate) mod negotiate_session;
+pub(crate) mod nostr_signal;
 pub(crate) mod nudge_acceptor;
 pub(crate) mod offer;
 pub(crate) mod rendezvous;
@@ -247,6 +248,29 @@ mod tests {
                 "{kind:?}"
             );
         }
+    }
+
+    // Nostr is the last rung: a proven pair that falls to it has lost its direct path, and a
+    // session replaces it as it replaces the relay.
+    #[test]
+    fn a_proven_pair_on_nostr_is_demoted_and_offered_a_session() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            session_policy::proof_is_stale(Some(PathKind::Nostr), true),
+            "the proof of a pair on Nostr is stale"
+        );
+        assert!(
+            session_policy::reads_below_a_session(Some(PathKind::Nostr), true),
+            "a proven pair on Nostr reads below a session"
+        );
+        assert!(
+            !session_policy::reads_below_a_session(Some(PathKind::Nostr), false),
+            "a pair on Nostr that was never proven is not demoted"
+        );
+        assert!(
+            session_policy::wants_session(false, Some(PathKind::Nostr), true),
+            "a pair on Nostr is offered a session even when proven direct"
+        );
     }
 
     // A pair on gossip is below a session as a pair on multihop is: its proof of a direct path is
@@ -2473,6 +2497,107 @@ mod tests {
         );
     }
 
+    /// One pair on Nostr, proven, with a frame held, on a mesh with `payload`: whether
+    /// `negotiate_session` demotes it to `RelayOnly`. Each call has its own endpoint and handle.
+    async fn demoted_on_nostr(payload: PayloadPath) -> bool {
+        use crate::daemon::state::DirectState;
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::Identity;
+        use crate::transport::probe::PathKind;
+
+        let (endpoint, handle) = endpoint().await;
+        let nudge_router = Router::builder(endpoint.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
+            .spawn();
+        let key = (1u16..=u16::MAX)
+            .map(|seed| {
+                let mut bytes = [0u8; 32];
+                bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                SecretKey::from_bytes(&bytes)
+            })
+            .find(|key| key.public() < endpoint.id())
+            .expect("a key below ours");
+        let (server, server_hub) = endpoint_with(key).await;
+        let server_admission = SignalAdmission::new(8);
+        let router = serve(&server, &server_hub, &server_admission);
+
+        let gossip = irohgossip_Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(proto::TopicId::from_bytes([8u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = transport::MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = identity.author_key();
+        let author = testing::nick("alice");
+        let sink = event::SilentSink;
+        let context = handler_ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey,
+            max_peers: 16,
+            rendezvous_id: testing::endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let bob = server.id();
+        let address = server.addr();
+        let mut state = testing::fresh_state();
+        state.webrtc = Some(handle.clone());
+        state.local_udp_transport = UdpTransport::Present;
+        state.relay_transport = payload;
+        state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
+        state
+            .peer_endpoints
+            .insert(testing::nick("bob"), address.clone());
+        // The pair is proven, and a connection reads Nostr. A frame is held, so that the
+        // pair is not left alone for want of a send.
+        state.want_lane_session(bob, clock::Instant::now());
+        state.direct.insert(bob, DirectState::Direct);
+        state.path_kinds.insert(bob, PathKind::Nostr);
+        state.unicast_pool.note_dial_failure(bob).await;
+
+        negotiate_session::negotiate_session(&mut state, &context, bob, address.clone());
+
+        let demoted = state.direct.get(&bob) == Some(&DirectState::RelayOnly);
+
+        router.shutdown().await.expect("shutdown");
+        server.close().await;
+        nudge_router
+            .shutdown()
+            .await
+            .expect("shutdown the nudge router");
+        endpoint.close().await;
+        demoted
+    }
+
+    /// A pair that Nostr carries keeps its proof where the mesh lists Nostr: the offer of a session
+    /// is a climb, and a demotion to `RelayOnly` would hold the frames of a pair that Nostr serves.
+    /// Where the mesh does not list Nostr, the pair reads as below a session and is demoted. Each
+    /// policy runs on its own endpoint and its own handle, so that one row leaves nothing to the other.
+    #[test]
+    fn a_pair_on_nostr_is_not_demoted_while_the_mesh_lists_nostr() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                assert!(
+                    !Box::pin(demoted_on_nostr(PayloadPath::DirectOrNostr)).await,
+                    "a pair on Nostr keeps its proof where the mesh lists Nostr"
+                );
+                assert!(
+                    Box::pin(demoted_on_nostr(PayloadPath::DirectOnly)).await,
+                    "a pair on Nostr is demoted where the mesh does not list Nostr"
+                );
+            },
+        );
+    }
+
     /// **UDP returns on a pair that only gossips.** Such a pair has no path watcher, so the session
     /// that the race attached would stay until the backstop. The reading of the admission table
     /// detaches it, on the fast ticker: a relay reading keeps it, an IP reading drops it.
@@ -2973,6 +3098,53 @@ mod tests {
         assert!(
             !rendezvous::rendezvous_graftable(&state),
             "the rendezvous is not graftable while the fallback holds"
+        );
+    }
+
+    /// The pacing of the lane offers counts a peer that said it needs the lane, though its address
+    /// is empty: otherwise a node with IP would offer to every such peer at once.
+    #[test]
+    fn a_signed_lane_peer_with_an_empty_address_is_paced_as_a_lane_pair() {
+        let peer = SecretKey::from_bytes(&[8u8; 32]).public();
+        let empty = EndpointAddr::new(peer);
+        let mut state = testing::fresh_state();
+
+        assert!(
+            !retry::lane_pair(&state, false, &empty),
+            "an empty address reads as unknown"
+        );
+
+        state.lane_peers.insert(peer);
+        assert!(
+            retry::lane_pair(&state, false, &empty),
+            "the peer's own word puts it in the paced lane set"
+        );
+    }
+
+    /// With no relay and no IP, a peer's address is empty, and the shape rule
+    /// reads it as unknown. Its own word in `PeerInfo` is what says "browser".
+    #[test]
+    fn a_peer_that_says_it_needs_the_lane_gets_it_with_an_empty_address() {
+        let peer = SecretKey::from_bytes(&[8u8; 32]).public();
+        let empty = EndpointAddr::new(peer);
+        let mut state = testing::fresh_state();
+        state.local_udp_transport = UdpTransport::Present;
+        assert!(
+            !session_policy::peer_needs_lane(&state, peer, &empty),
+            "unknown stays unknown"
+        );
+
+        state.lane_peers.insert(peer);
+        assert!(
+            session_policy::peer_needs_lane(&state, peer, &empty),
+            "its word decides"
+        );
+
+        state.lane_peers.clear();
+        state.local_udp_transport = UdpTransport::Absent;
+        assert!(
+            session_policy::peer_needs_lane(&state, peer, &empty),
+            "a node with no IP needs the lane with everyone"
         );
     }
 }

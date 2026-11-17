@@ -45,6 +45,7 @@ use habilis_network_chunks::{Root, chunk_count};
 use habilis_network_doc::{ChunkPointer, SliceError, SliceIngest, SliceLimits, SliceStore};
 use habilis_network_protocol::ContentHash;
 use habilis_network_protocol::digest::{DigestPage, DigestRoot};
+use n0_future::time::Instant as TokioInstant;
 
 use crate::util::tuning::{
     KNOWN_ENDPOINTS_CAP, LANE_WANTED, PENDING_OUTBOUND_CAP, QUIET_CAP, REASSEMBLED_GROUPS_CAP,
@@ -712,6 +713,32 @@ pub struct EventLoopState {
     /// Feeds only the derived `reach` boolean in `roster_snapshot` — the node
     /// id never leaves this layer.
     pub(crate) peer_endpoints: HashMap<Nickname, EndpointAddr>,
+    /// Peers whose `PeerInfo` said they need a data channel. The shape of a
+    /// peer's address says the same only when it carries a relay.
+    pub(crate) lane_peers: HashSet<EndpointId>,
+    /// Whether anything can reach the rendezvous (`RendezvousParams`). Without
+    /// one, the signal ALPN has nothing to ride and offers go over Nostr.
+    pub(crate) has_rendezvous: bool,
+    /// The Nostr carrier, on a mesh with the Nostr lookup.
+    pub(crate) nostr: Option<transport::webrtc::nostr_signal::NostrSignal>,
+    /// When each peer was last heard over Nostr.
+    pub(crate) nostr_seen: HashMap<EndpointId, Instant>,
+    /// The relay policy of this mesh for the selectors of its endpoint. Dropped with the state.
+    pub(crate) relay_policy: Option<Arc<habilis_network_iroh_transport_util::RelayPolicy>>,
+    /// The peers that a probe proved over Nostr. The proof outlives the probe connection, so that
+    /// a graft is not dialed for a pair that only Nostr carries: the hook would close the link at
+    /// once. A report of another path takes it back. Bounded by the peers that are probed.
+    pub(crate) nostr_proven: HashSet<EndpointId>,
+    /// When each peer was last woken with a `Hello` on its own tag.
+    pub(crate) nostr_poked: HashMap<EndpointId, Instant>,
+    /// When the next `Hello` goes out; `None` without the carrier.
+    pub(crate) next_hello: Option<TokioInstant>,
+    pub(crate) hellos_sent: u32,
+    /// How many relays the carrier holds now.
+    pub(crate) nostr_width: usize,
+    /// Hold the wide relay set until then: the end of the last offer round,
+    /// plus a cooldown.
+    pub(crate) nostr_wide_until: Option<Instant>,
     /// The mesh's rendezvous endpoint id, once known. Paired with
     /// `rendezvous_linked` so `reach_of` can count the rendezvous link as a
     /// live link to the beacon: the beacon gossips *as* the rendezvous, so a
@@ -1133,6 +1160,17 @@ impl EventLoopState {
             peers: HashSet::new(),
             last_seen: HashMap::new(),
             peer_endpoints: HashMap::new(),
+            lane_peers: HashSet::new(),
+            has_rendezvous: true,
+            nostr: None,
+            nostr_seen: HashMap::new(),
+            relay_policy: None,
+            nostr_proven: HashSet::new(),
+            nostr_poked: HashMap::new(),
+            next_hello: None,
+            hellos_sent: 0,
+            nostr_width: 0,
+            nostr_wide_until: None,
             rendezvous_id: None,
             owed_backfill: HashMap::new(),
             quiet: BoundedFifoSet::new(QUIET_CAP),
@@ -1435,7 +1473,7 @@ impl EventLoopState {
         if self.direct.get(&peer) != Some(&DirectState::Direct)
             || !matches!(
                 self.pair_path_kind(peer),
-                Some(PathKind::Relay | PathKind::Gossip)
+                Some(PathKind::Relay | PathKind::Gossip | PathKind::Nostr)
             )
         {
             return None;
@@ -1460,7 +1498,10 @@ impl EventLoopState {
         spread: f64,
     ) -> bool {
         if self.direct.get(&peer) != Some(&DirectState::Direct)
-            || self.pair_path_kind(peer) == Some(probe::PathKind::Relay)
+            || matches!(
+                self.pair_path_kind(peer),
+                Some(probe::PathKind::Relay | probe::PathKind::Nostr)
+            )
             || self.rides_gossip_rung(peer)
             || self.relink_on_cooldown(peer, now)
         {
@@ -1612,6 +1653,8 @@ impl EventLoopState {
     /// connection, which outlives a gossip link but not the peer.
     pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
         let address = self.peer_endpoints.remove(nick)?;
+        self.nostr_seen.remove(&address.id);
+        self.nostr_poked.remove(&address.id);
         self.hint_owner.remove(nick);
         // Another nickname can bind the same endpoint (a node that restarted under a new name).
         // A linked endpoint keeps its proof for the regraft after a link loss.
@@ -1719,6 +1762,10 @@ impl EventLoopState {
         self.path_watchers.remove(&endpoint);
         self.path_kinds.remove(&endpoint);
         self.unicast_pool.forget_addr(endpoint);
+        // The lane flag belongs to the endpoint: it goes when the last name of the endpoint goes.
+        self.lane_peers.remove(&endpoint);
+        // So does its proof over Nostr.
+        self.nostr_proven.remove(&endpoint);
     }
 
     /// Drop everything the roster keeps about `key`, which left: its place in the roster, its
@@ -2576,6 +2623,56 @@ impl EventLoopState {
                 .webrtc
                 .as_ref()
                 .is_some_and(|handle| handle.has_session(&peer))
+    }
+
+    /// A new endpoint is known: remember it and tell the Nostr transport at once, so that a newcomer
+    /// that dials first gets its reply without waiting for the alive tick. Returns whether the
+    /// endpoint is new.
+    pub(crate) fn note_known_endpoint(&mut self, peer: EndpointId) -> bool {
+        let first = self.known_endpoints.insert(peer);
+        if first {
+            self.feed_nostr_members();
+        }
+        first
+    }
+
+    /// The members that the Nostr transport answers: the roster, and the sighted endpoints that
+    /// are not on it yet. The list of sightings is bounded and evicts the oldest when it is full,
+    /// so it is the bounded set of pending newcomers, and a live member does not depend on it: the
+    /// roster holds the member.
+    pub(crate) fn nostr_member_ids(&self) -> HashSet<EndpointId> {
+        let addresses = self.member_addresses();
+        let mut members: HashSet<EndpointId> = addresses.iter().map(|address| address.id).collect();
+        members.extend(self.known_endpoints.iter().copied());
+        members
+    }
+
+    /// Tell the Nostr transport its members. A newcomer that was just sighted is in the list of
+    /// sightings already, and it gets its reply at once.
+    pub(crate) fn feed_nostr_members(&self) {
+        self.webrtc_admission
+            .set_known_peers(self.nostr_member_ids());
+    }
+
+    /// A probe proved `peer` over Nostr: see [`Self::rides_nostr`].
+    pub(crate) fn note_proven_over_nostr(&mut self, peer: EndpointId) {
+        self.nostr_proven.insert(peer);
+    }
+
+    /// A path other than Nostr carries `peer`: the proof over Nostr is void.
+    pub(crate) fn forget_nostr_proof(&mut self, peer: EndpointId) {
+        self.nostr_proven.remove(&peer);
+    }
+
+    /// Whether the selected path of `peer` is Nostr. A gossip link never rides it (the hook closes
+    /// the connection), so a graft only makes the gossip layer dial a link that dies at once. Not
+    /// while a session is attached: it carries the pair, and the link rides it once iroh moves
+    /// the connection.
+    pub(crate) fn rides_nostr(&self, peer: EndpointId) -> bool {
+        let on_nostr = self.pair_path_kind(peer) == Some(probe::PathKind::Nostr)
+            || self.nostr_proven.contains(&peer);
+        let session = self.webrtc.as_ref();
+        on_nostr && !session.is_some_and(|handle| handle.has_session(&peer))
     }
 
     /// Record a peer's endpoint address, learned from its published card.

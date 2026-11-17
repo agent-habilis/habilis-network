@@ -10,6 +10,7 @@ use crate::daemon::shutdown::{Owner, OwnerPidError};
 use crate::transport::{ChunkAsk, UdpTransport, UnicastFrame};
 #[cfg(feature = "host")]
 use crate::util::process;
+use habilis_network_iroh_transport_util::RelayPolicy;
 use std::path::PathBuf;
 
 use iroh::Endpoint;
@@ -120,9 +121,14 @@ pub(crate) struct TransportSet {
     /// See `EventLoopState::local_udp_transport`. With `relay_transport` it
     /// also decides `EventLoopState::rendezvous_graft_needs_session`.
     pub(crate) local_udp_transport: UdpTransport,
+    /// The Nostr carrier's keys and relays, on a mesh with the Nostr lookup.
+    pub(crate) nostr: Option<transport::webrtc::nostr_signal::NostrParams>,
     /// `TransportPolicy::relay`, read from the mesh config — never from a
     /// per-node option, so every member agrees.
     pub(crate) relay_transport: transport::PayloadPath,
+    /// The relay policy of this mesh for the selectors of its endpoint, from setup. The loop moves
+    /// it into `EventLoopState::relay_policy`, and the policy ends with the mesh.
+    pub(crate) relay_policy: Option<sync::Arc<RelayPolicy>>,
     /// The multi-hop transport handle when the mesh policy registered it on the
     /// peer endpoint; `run()` moves it into `EventLoopState::multihop`.
     /// `None` when multihop is off. Built in `setup_mesh`.

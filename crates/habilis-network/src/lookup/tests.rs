@@ -608,6 +608,61 @@ fn the_mesh_policy_decides_gossip_for_the_opts() {
     );
 }
 
+// Nostr is a choice of the mesh as gossip is: the opts follow the policy, and nothing else turns
+// it on.
+#[test]
+fn the_mesh_policy_decides_nostr_for_the_opts() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let within = |mesh: TransportPolicy| TransportOpts::default().within(&mesh).nostr.is_on();
+    assert!(
+        !TransportOpts::default().nostr.is_on(),
+        "off until the mesh asks"
+    );
+    assert!(
+        within(TransportPolicy::default().nostr_transport(true)),
+        "the mesh that lists Nostr turns it on"
+    );
+    assert!(
+        !within(TransportPolicy::default()),
+        "the default policy does not list Nostr"
+    );
+}
+
+// The plan of the Nostr transport needs a custom list: the pinned public relays carry lookup and
+// signalling only, so a mesh on them has no payload relay, and the plan is empty.
+#[test]
+fn the_nostr_plan_ranks_the_custom_list_and_ignores_the_pinned_relays() {
+    use crate::protocol::TopicId;
+    use crate::protocol::meshes::NostrChoice;
+    use crate::protocol::nostr::NostrKeys;
+    let _guard = ::habilis_network_test_tracing::init();
+    let keys = NostrKeys::derive(&TopicId::from_bytes([3u8; 32]));
+    let relay = |name: &str| -> url::Url {
+        format!("wss://{name}.example")
+            .parse()
+            .expect("a relay URL")
+    };
+    let custom: Vec<url::Url> = vec![relay("a"), relay("b"), relay("c")];
+    let ranked: Vec<url::Url> = keys
+        .ranked_relays(&NostrChoice::Custom(custom.clone()))
+        .collect();
+    let plan = super::NostrPlan::for_mesh(&keys, &NostrChoice::Custom(custom))
+        .expect("a custom list has a plan");
+    assert_eq!(
+        plan.ranking(),
+        ranked,
+        "the plan keeps the order every member computes"
+    );
+    assert!(
+        super::NostrPlan::for_mesh(&keys, &NostrChoice::Pinned).is_none(),
+        "the pinned relays carry no payload"
+    );
+    assert!(
+        super::NostrPlan::for_mesh(&keys, &NostrChoice::Disabled).is_none(),
+        "no Nostr, no plan"
+    );
+}
+
 // The gossip transport is on the member endpoint and nowhere else: not on the multihop
 // underlay. iroh does not list the address of a custom transport in `Endpoint::addr` (the
 // `WebRTC` one is not there either), so the reading is the admission table, which keeps the
@@ -655,6 +710,105 @@ fn only_the_member_endpoint_has_the_gossip_handle() {
         assert!(
             super::TransportHandles::default().gossip.is_none(),
             "a default handles value has no gossip handle"
+        );
+    });
+}
+
+// The Nostr transport is on the member endpoint and nowhere else, and only when the mesh lists it.
+// The table keeps it inactive until the mesh knows its topic; `activate_nostr` opens the lane once,
+// and only for a mesh with a custom relay list.
+#[cfg(feature = "host")]
+#[test]
+fn only_a_member_of_a_mesh_that_lists_nostr_has_the_transport_and_it_activates_once() {
+    use crate::protocol::TopicId;
+    use crate::protocol::meshes::NostrChoice;
+    use crate::protocol::nostr::NostrKeys;
+    use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay as NostrRelay;
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let relay = NostrRelay::spawn().await.expect("spawn a Nostr relay");
+        let keys = NostrKeys::derive(&TopicId::from_bytes([6u8; 32]));
+        let plan = || {
+            super::NostrPlan::for_mesh(&keys, &NostrChoice::Custom(vec![relay.url()]))
+                .expect("a custom list has a plan")
+        };
+        let build = |nostr: bool| async move {
+            let table = transport::SignalAdmission::new(8);
+            let (endpoint, _webrtc, _mdns) = super::build_peer_webrtc_with(
+                &LookupOpts::loopback(),
+                TransportOpts::default().nostr(nostr),
+                Some(&table),
+            )
+            .await
+            .expect("a peer binds");
+            endpoint.close().await;
+            table
+        };
+
+        let member = build(true).await;
+        assert!(
+            member.has_nostr(),
+            "the member of a mesh that lists Nostr has it"
+        );
+        assert!(
+            member.activate_nostr(plan()).expect("a fresh transport"),
+            "the first activation opens the lane"
+        );
+        assert!(
+            !member.activate_nostr(plan()).expect("the same plan"),
+            "a second activation with the same plan does nothing"
+        );
+        let other = NostrKeys::derive(&TopicId::from_bytes([7u8; 32]));
+        let other_plan =
+            super::NostrPlan::for_mesh(&other, &NostrChoice::Custom(vec![relay.url()]))
+                .expect("a custom list has a plan");
+        assert!(
+            member.activate_nostr(other_plan).is_err(),
+            "a transport that is active for another mesh is refused"
+        );
+        let without = build(false).await;
+        assert!(
+            !without.has_nostr(),
+            "a mesh that does not list Nostr has none"
+        );
+        assert!(
+            !without
+                .activate_nostr(plan())
+                .expect("nothing to conflict with"),
+            "a table with no Nostr transport has nothing to activate"
+        );
+        assert!(
+            super::TransportHandles::default().nostr.is_none(),
+            "a default handles value has no Nostr transport"
+        );
+    });
+}
+
+// The Nostr transport is on the member endpoint and not on the multihop underlay: a multihop
+// link never rides a Nostr path, because the underlay endpoint has no Nostr transport to carry it.
+#[cfg(all(feature = "host", feature = "multihop"))]
+#[test]
+fn the_multihop_underlay_has_no_nostr_transport() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let table = transport::SignalAdmission::new(8);
+        let (endpoint, handle, _webrtc, leg, _mdns) = super::build_peer_multihop_with(
+            &LookupOpts::loopback(),
+            TransportOpts::default().nostr(true),
+            Some(&table),
+            super::multihop_handle_config(PayloadPath::DirectOnly),
+            Some(5),
+        )
+        .await
+        .expect("a multihop peer binds");
+        handle.close().await;
+        endpoint.close().await;
+        let leg = leg.expect("a leg when a cap is given");
+        assert!(
+            table.has_nostr(),
+            "the member endpoint has the Nostr transport"
+        );
+        assert!(
+            !leg.admission.has_nostr(),
+            "the multihop underlay does not, so a link of it never rides Nostr"
         );
     });
 }

@@ -27,6 +27,8 @@ export const USAGE = `usage: bun src/main.ts <how to reach the mesh> [options]
                           same list; relay needs relay in --lookup)
     --relay-url <url>     custom relay ladder, repeatable (which relay, nothing
                           more; part of the mesh id like --transport)
+    --nostr-url <url>     custom Nostr relay (ws:// or wss://), repeatable;
+                          replaces the pinned public list. Part of the mesh id
     --max-peers <n>       active-view cap (G, default 32)
     --max-direct <n>      ceiling of direct connections (C, default 64)
     --json                automation mode: NDJSON events out, commands in
@@ -52,6 +54,7 @@ export function parseChatArgs(argv: string[]): ChatArgs {
       lookup: { type: 'string' },
       transport: { type: 'string' },
       'relay-url': { type: 'string', multiple: true },
+      'nostr-url': { type: 'string', multiple: true },
       name: { type: 'string' },
       nick: { type: 'string' },
       'max-peers': { type: 'string' },
@@ -73,9 +76,18 @@ export function parseChatArgs(argv: string[]): ChatArgs {
   // create, mixed into a topic derivation, but already fixed inside an id
   // someone hands you.
   const relayUrls = values['relay-url']
+  const nostrUrls = values['nostr-url']
+  // Each list crosses the FFI as one comma-separated string, which the engine
+  // splits again: a comma inside a URL would become two relays.
+  if (nostrUrls?.some((url) => url.includes(',')) === true) {
+    throw new Error('--nostr-url takes one URL per flag: repeat the flag, do not use a comma')
+  }
+  if (relayUrls?.some((url) => url.includes(',')) === true) {
+    throw new Error('--relay-url takes one URL per flag: repeat the flag, do not use a comma')
+  }
   const transport = values.transport?.split(',') as Transport[] | undefined
-  if ((relayUrls !== undefined || transport !== undefined) && values.id !== undefined) {
-    throw new Error('--relay-url and --transport apply to --topic and --create; an id already carries them')
+  if ((relayUrls !== undefined || nostrUrls !== undefined || transport !== undefined) && values.id !== undefined) {
+    throw new Error('--relay-url, --nostr-url and --transport apply to --topic and --create; an id already carries them')
   }
   // Typed by the cast, checked by the engine: a name that is not a lookup or
   // a transport is refused at open with a message that lists the choices.
@@ -113,6 +125,7 @@ export function parseChatArgs(argv: string[]): ChatArgs {
         ...(lookup === undefined ? {} : { lookup }),
         ...(transport === undefined ? {} : { transport }),
         ...(relayUrls === undefined ? {} : { relayUrls }),
+        ...(nostrUrls === undefined ? {} : { nostrUrls }),
       },
     }
   } else if (values.topic !== undefined) {
@@ -123,6 +136,7 @@ export function parseChatArgs(argv: string[]): ChatArgs {
         topic: values.topic,
         ...(transport === undefined ? {} : { transport }),
         ...(relayUrls === undefined ? {} : { relayUrls }),
+        ...(nostrUrls === undefined ? {} : { nostrUrls }),
       },
     }
   } else {

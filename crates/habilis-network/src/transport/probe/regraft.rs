@@ -170,7 +170,9 @@ pub(crate) fn retry_candidates_at(
     };
     let direct_ok = candidates.filter(|address| {
         state.direct.get(&address.id) != Some(&DirectState::Pending)
-            || (webrtc::lane_needs::needs_webrtc_lane(address) && webrtc_session(address))
+            || ((state.lane_peers.contains(&address.id)
+                || webrtc::lane_needs::needs_webrtc_lane(address))
+                && webrtc_session(address))
     });
     let cooled = direct_ok.filter(|address| !state.relink_on_cooldown(address.id, now));
     let mut peers: Vec<iroh::EndpointAddr> = cooled

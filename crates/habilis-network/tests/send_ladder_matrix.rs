@@ -237,7 +237,7 @@ impl Cell {
             Rung::Multihop => Some(Transport::Multihop),
             Rung::Gossip => Some(Transport::Gossip),
             Rung::Relay => Some(Transport::Relay),
-            Rung::Other | _ => None,
+            Rung::Nostr | Rung::Other | _ => None,
         };
         transport.is_some_and(|transport| self.has(transport))
     }
@@ -254,7 +254,7 @@ impl Cell {
                 Rung::Multihop => self.blocked < Blocked::IpWebRtcMultihop,
                 Rung::Gossip => self.blocked < Blocked::IpWebRtcMultihopGossip,
                 Rung::Relay => true,
-                Rung::Other | _ => false,
+                Rung::Nostr | Rung::Other | _ => false,
             },
         )
     }
@@ -267,6 +267,7 @@ fn rung_name(rung: Rung) -> &'static str {
         Rung::Multihop => "multihop",
         Rung::Gossip => "gossip",
         Rung::Relay => "relay",
+        Rung::Nostr => "nostr",
         Rung::Other => "other",
         _ => "unknown",
     }

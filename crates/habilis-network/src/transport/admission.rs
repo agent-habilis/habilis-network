@@ -60,6 +60,7 @@ mod admission_guard;
 mod busy_guard;
 mod connection_hook;
 mod inner;
+mod nostr_name;
 mod refusal;
 mod refusal_backoff;
 mod round;
@@ -1462,6 +1463,109 @@ mod tests {
         );
     }
 
+    /// A gossip connection whose selected path is Nostr is closed by the hook, with its own code,
+    /// and the other end reads that code: a graft never rides the Nostr path, whatever the mesh
+    /// policy says. Nostr is rate limited, and the relay that carries it sees every datagram.
+    #[test]
+    fn a_gossip_connection_on_the_nostr_path_is_closed_by_the_hook() {
+        use iroh::endpoint::presets;
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use habilis_network_iroh_gossip_transport::hub::Hub;
+                use habilis_network_iroh_gossip_transport::{
+                    GossipHandle, NOSTR_TRANSPORT_ID, transport_addr,
+                };
+                use iroh::endpoint::ConnectionError;
+                use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+                use iroh::{EndpointAddr, RelayMode, SecretKey, TransportAddr};
+
+                #[derive(Debug, Clone)]
+                // the report is shared with the hook, which sends through it
+                struct Report(Arc<Mutex<Option<oneshot::Sender<ConnectionError>>>>);
+                impl ProtocolHandler for Report {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        let reason = connection.closed().await;
+                        if let Some(tx) = self.0.lock().expect("report lock").take() {
+                            let _ = tx.send(reason);
+                        }
+                        Ok(())
+                    }
+                }
+
+                let (alice_key, bob_key) = (
+                    SecretKey::from_bytes(&[11; 32]),
+                    SecretKey::from_bytes(&[12; 32]),
+                );
+                let hub = Hub::new();
+                let (alice_handle, bob_handle) = (
+                    GossipHandle::with_transport_id(alice_key.public(), NOSTR_TRANSPORT_ID),
+                    GossipHandle::with_transport_id(bob_key.public(), NOSTR_TRANSPORT_ID),
+                );
+                hub.join(&alice_handle);
+                hub.join(&bob_handle);
+                let bind = |key: SecretKey,
+                            handle: GossipHandle,
+                            admission: Option<SignalAdmission>| async move {
+                    let builder = iroh::Endpoint::builder(presets::Minimal);
+                    let builder = builder.secret_key(key);
+                    let builder = builder.relay_mode(RelayMode::Disabled);
+                    let builder = builder.add_custom_transport(handle.custom_transport());
+                    let builder = builder.clear_ip_transports();
+                    let builder = builder.clear_relay_transports();
+                    let builder = match admission {
+                        Some(admission) => builder.hooks(admission.connection_hook()),
+                        None => builder,
+                    };
+                    builder.bind().await.expect("bind a gossip-only endpoint")
+                };
+                let admission = SignalAdmission::new(8);
+                let alice = bind(alice_key, alice_handle, Some(admission.clone())).await;
+                let bob = bind(bob_key, bob_handle, None).await;
+                let (tx, rx) = oneshot::channel();
+                let router = Router::builder(bob.clone())
+                    .accept(
+                        net::GOSSIP_ALPN,
+                        // the report is shared with the hook, which sends through it
+                        Report(Arc::new(Mutex::new(Some(tx)))),
+                    )
+                    .spawn();
+
+                let target = EndpointAddr::from_parts(
+                    bob.id(),
+                    [TransportAddr::Custom(transport_addr(
+                        NOSTR_TRANSPORT_ID,
+                        bob.id(),
+                    ))],
+                );
+                let connection = alice
+                    .connect(target, net::GOSSIP_ALPN)
+                    .await
+                    .expect("connect over the nostr path");
+
+                let at_alice = time::timeout(Duration::from_secs(5), connection.closed())
+                    .await
+                    .expect("the dialed end was not closed");
+                let at_bob = time::timeout(Duration::from_secs(5), rx)
+                    .await
+                    .expect("the accepted end was not closed")
+                    .expect("the probe reported");
+                let code = u64::from(payload_path::GOSSIP_NOSTR_REFUSED_CODE);
+                assert!(
+                    matches!(at_alice, ConnectionError::LocallyClosed),
+                    "the dialer closed itself: {at_alice:?}"
+                );
+                assert!(
+                    matches!(&at_bob, ConnectionError::ApplicationClosed(close) if u64::from(close.error_code) == code),
+                    "the accepted end reads the code: {at_bob:?}"
+                );
+                router.shutdown().await.expect("shutdown");
+                alice.close().await;
+            },
+        );
+    }
+
     /// What the table tells the gossip transport about a peer: established when it has a live
     /// connection, allowed unless a higher rung carries the pair, on the best of its connections.
     #[test]
@@ -1507,6 +1611,217 @@ mod tests {
             sampler::gossip_view(&[Relay, Ip]),
             (true, false),
             "the best connection stands for the pair"
+        );
+    }
+
+    /// What the table tells the Nostr transport about a peer: established when it has a live
+    /// connection, and allowed only when no other usable path serves the pair.
+    #[test]
+    fn the_table_tells_the_nostr_transport_to_carry_only_a_pair_with_no_other_path() {
+        use super::super::probe::PathKind::{self, Gossip, Ip, Nostr, Relay};
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            sampler::nostr_view(&[], true, false),
+            (false, false),
+            "no connection, and no want: the pair rides what it has"
+        );
+        assert_eq!(
+            sampler::nostr_view(&[], true, true),
+            (false, true),
+            "no connection, and the engine wants Nostr for it"
+        );
+        assert_eq!(
+            sampler::nostr_view(&[PathKind::None], true, false),
+            (true, true),
+            "a connection with no path yet"
+        );
+        assert_eq!(
+            sampler::nostr_view(&[Nostr], true, false),
+            (true, true),
+            "a pair that Nostr already carries"
+        );
+        for other in [Ip, Gossip] {
+            assert_eq!(
+                sampler::nostr_view(&[other], false, true),
+                (true, false),
+                "a pair on {other:?} does not need Nostr"
+            );
+        }
+        assert_eq!(
+            sampler::nostr_view(&[Relay], true, false),
+            (true, false),
+            "a relay that carries payload serves the pair"
+        );
+        assert_eq!(
+            sampler::nostr_view(&[Relay], false, false),
+            (true, true),
+            "a lookup-only relay carries no payload"
+        );
+    }
+
+    /// A peer with no connection and no want gets no refusal by name: the peer may dial first, and
+    /// its handshake needs the reply. A peer with a usable path is stopped, and a peer with no
+    /// usable path or a want is allowed.
+    #[test]
+    fn a_peer_with_no_connection_and_no_want_is_forgotten_and_not_stopped() {
+        use super::super::probe::PathKind::{Ip, Nostr};
+        use super::nostr_name::NostrName;
+        use super::sampler::nostr_name;
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            nostr_name(&[], true, false, false),
+            NostrName::Forget,
+            "no connection, no want"
+        );
+        assert_eq!(
+            nostr_name(&[], true, true, false),
+            NostrName::Allow,
+            "a want"
+        );
+        assert_eq!(
+            nostr_name(&[], true, false, true),
+            NostrName::Stop,
+            "a session carries it"
+        );
+        assert_eq!(
+            nostr_name(&[Ip], true, false, false),
+            NostrName::Stop,
+            "a usable path"
+        );
+        assert_eq!(
+            nostr_name(&[Nostr], true, false, false),
+            NostrName::Allow,
+            "Nostr carries it"
+        );
+    }
+
+    /// The seam that broke: the sweep reads a slot with no connection, no want and no session
+    /// against a real Nostr transport. The refusal by name that an earlier reading left must not
+    /// stand, or the peer that dials first is refused its reply.
+    #[test]
+    fn the_sweep_of_an_idle_slot_leaves_a_reply_to_its_peer_allowed() {
+        use habilis_network_iroh_nostr_transport::NostrTransport;
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = iroh::SecretKey::from_bytes(&[71; 32]).public();
+        let peer = iroh::SecretKey::from_bytes(&[72; 32]).public();
+        let table = SignalAdmission::new(8);
+        let transport = NostrTransport::new(me);
+        table.set_nostr(transport.clone());
+        // An earlier reading stopped the peer by name, and its connection is gone since.
+        transport.handle().allow(peer, false);
+        table.lock().slot(peer);
+
+        table.sync_nostr();
+
+        transport.handle().allow_reply(peer);
+        assert!(
+            transport.handle().is_allowed(peer),
+            "a reply to the peer of an idle slot is accepted"
+        );
+    }
+
+    /// Two setups that race to activate one injected transport with two plans: exactly one wins, and
+    /// the other gets the error of the active transport. The check and the activation are one step,
+    /// so no round ends with both setups sure that their plan is the one that runs.
+    #[test]
+    fn two_setups_racing_on_one_nostr_transport_leave_one_winner_and_one_error() {
+        use crate::lookup::NostrPlan;
+        use crate::protocol::TopicId;
+        use crate::protocol::meshes::NostrChoice;
+        use crate::protocol::nostr::NostrKeys;
+        use habilis_network_iroh_nostr_transport::NostrTransport;
+        use std::sync::Barrier;
+        use std::thread;
+        use tokio::runtime;
+
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut builder = runtime::Builder::new_multi_thread();
+        builder.worker_threads(2).enable_all();
+        let runtime = builder.build().expect("a runtime");
+        let me = iroh::SecretKey::from_bytes(&[77; 32]).public();
+        let relay: url::Url = "ws://127.0.0.1:9".parse().expect("a relay URL");
+        let plan = |seed: u8| {
+            let keys = NostrKeys::derive(&TopicId::from_bytes([seed; 32]));
+            NostrPlan::for_mesh(&keys, &NostrChoice::Custom(vec![relay.clone()]))
+                .expect("a custom list has a plan")
+        };
+        for round in 0..300 {
+            let table = SignalAdmission::new(8);
+            table.set_nostr(NostrTransport::new(me));
+            let barrier = Barrier::new(2);
+            let wins = thread::scope(|scope| {
+                let mut racers = Vec::new();
+                for seed in [1u8, 2u8] {
+                    let (table, barrier, runtime) = (&table, &barrier, &runtime);
+                    let plan = plan(seed);
+                    racers.push(scope.spawn(move || {
+                        let _entered = runtime.enter();
+                        barrier.wait();
+                        table.activate_nostr(plan).is_ok()
+                    }));
+                }
+                let mut won = 0;
+                for racer in racers {
+                    won += usize::from(racer.join().expect("a racer"));
+                }
+                won
+            });
+            assert_eq!(
+                wins, 1,
+                "round {round}: two plans on one transport leave one winner and one error"
+            );
+        }
+    }
+
+    /// A failed dial records the want, and the next dial names the Nostr address at once: the
+    /// closed handle must already allow the destination, with no connection noted and no sweep.
+    #[test]
+    fn a_want_allows_its_destination_at_once() {
+        use habilis_network_iroh_nostr_transport::NostrTransport;
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = iroh::SecretKey::from_bytes(&[75; 32]).public();
+        let peer = iroh::SecretKey::from_bytes(&[76; 32]).public();
+        let table = SignalAdmission::new(8);
+        let transport = NostrTransport::new(me);
+        table.set_nostr(transport.clone());
+        assert!(
+            !transport.handle().is_allowed(peer),
+            "a closed handle before the want"
+        );
+
+        table.want_nostr(peer);
+
+        assert!(
+            transport.handle().is_allowed(peer),
+            "the want allows the destination, so the next dial sends its first flight"
+        );
+    }
+
+    /// A peer that the engine wants Nostr for but that has no slot (the dial that failed left no
+    /// connection) is allowed by the sweep: the next dial must be able to send its frames.
+    #[test]
+    fn the_sweep_allows_a_wanted_peer_that_has_no_slot() {
+        use habilis_network_iroh_nostr_transport::NostrTransport;
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = iroh::SecretKey::from_bytes(&[73; 32]).public();
+        let peer = iroh::SecretKey::from_bytes(&[74; 32]).public();
+        let table = SignalAdmission::new(8);
+        let transport = NostrTransport::new(me);
+        table.set_nostr(transport.clone());
+        table.want_nostr(peer);
+        // The want itself allows the peer (`a_want_allows_its_destination_at_once`). Close the handle
+        // again, so that this test keeps asking one thing: that the sweep reaches a wanted peer.
+        transport.handle().allow(peer, false);
+        assert!(
+            !transport.handle().is_allowed(peer),
+            "a closed handle before the sweep"
+        );
+
+        table.sync_nostr();
+
+        assert!(
+            transport.handle().is_allowed(peer),
+            "the sweep allows a wanted peer with no slot"
         );
     }
 

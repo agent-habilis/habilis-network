@@ -33,6 +33,8 @@ pub mod meshes;
 pub mod messages;
 /// Nicknames: display labels for members. A nickname is not an identity.
 pub mod nickname_error;
+pub mod nostr;
+pub mod nostr_error;
 pub mod peer_addr_error;
 pub mod reassembly;
 /// A join token: a literal mesh id, or a creator-minted invite ticket.
@@ -64,8 +66,8 @@ pub use identity::{Identity, encode_pubkey};
 pub use meshes::{
     AdvertiseRequiresReachable, ChoiceError, ConfigError, DEFAULT_DIRECTORY, DirectorySelection,
     LockedMesh, Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName,
-    NameError, OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,
-    TransportPolicy, UnlockError, resolve_lookups, validate_advertise,
+    NameError, NostrChoice, OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection,
+    Transport, TransportPolicy, UnlockError, resolve_lookups, validate_advertise,
 };
 pub use messages::{
     AppFrameParams, AppTag, AppTagError, Authored, BodyError, Channel, CorrId, CorrIdError,

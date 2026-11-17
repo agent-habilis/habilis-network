@@ -1,0 +1,42 @@
+[package]
+name = "habilis-network-iroh-nostr-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "Nostr as an iroh custom transport: QUIC datagrams carried in ephemeral Nostr events on the relays of a custom list."
+license = "MIT"
+repository = "https://github.com/agent-habilis/habilis-network"
+readme = "README.md"
+keywords = ["iroh", "transport", "p2p", "quic", "nostr"]
+categories = ["network-programming"]
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "habilis_network_iroh_nostr_transport"
+path = "src/lib.rs"
+
+[dependencies]
+iroh.workspace = true
+# The frame codec, the budget, the counters and the receive path are the ones of the gossip
+# transport: this crate gives them a transport id and a sink, and copies nothing.
+habilis-network-iroh-gossip-transport = { workspace = true }
+# The data lane of the relay client: batches, the pacer and the bounded write path.
+habilis-network-iroh-nostr-address-lookup = { path = "../habilis-network-iroh-nostr-address-lookup" }
+# The tag of a destination is a derivation of the mesh topic.
+habilis-network-protocol = { path = "../habilis-network-protocol", default-features = false }
+bytes.workspace = true
+n0-future.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+# A test builds a frame outside the gossip transport crate.
+habilis-network-iroh-gossip-transport = { workspace = true, features = ["test-fixtures"] }
+habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
+# The block hooks: a test takes the IP rung away from one endpoint and gives it back.
+habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transport-util", features = ["test-hooks"] }
+habilis-network-iroh-nostr-address-lookup = { path = "../habilis-network-iroh-nostr-address-lookup", features = ["test-relay"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "io-util"] }

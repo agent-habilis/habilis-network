@@ -154,6 +154,11 @@ jobs:
           # and keeps the feature from rotting.
           cargo check --target wasm32-unknown-unknown -p habilis-network-chunks --all-targets --features wasm-simd
           cargo check --target wasm32-unknown-unknown -p habilis-network-iroh-webrtc-transport --features web,bench
+          # The Nostr relay client and its browser socket (`ws_web.rs`). The
+          # engine's row below reaches it today as a path dependency; this row
+          # names it so it stays checked if the engine stops pulling it in.
+          cargo check --target wasm32-unknown-unknown -p habilis-network-iroh-nostr-address-lookup
+          cargo check --target wasm32-unknown-unknown -p habilis-network-iroh-nostr-transport
           # The engine itself must reach the browser, not merely be avoidable
           # from it. `--no-default-features` is the portable half: no `host`,
           # so no IPC listener, no state file, no process helpers. Without this
@@ -185,6 +190,7 @@ jobs:
         run: |
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-chunks --all-targets --features wasm-simd -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-webrtc-transport --features web,bench -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-nostr-address-lookup -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-multihop-transport -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network --no-default-features -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-netplay --no-default-features -- -D warnings -D clippy::disallowed_methods
@@ -195,6 +201,7 @@ jobs:
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-util --no-default-features -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-transport-util -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-gossip-transport -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-nostr-transport -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-doc --no-default-features -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-logging --no-default-features -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-test-tracing -- -D warnings -D clippy::disallowed_methods
@@ -447,16 +454,20 @@ jobs:
         run: bun run typecheck
 
   # The IndexedDB backend in a real browser: the cases of idb_browser/cases.rs.
+  # The Nostr data lane in a real browser too: two pools on a relay that runs beside the page.
   # `Check` only compiles them. Chrome and its chromedriver come from one Chrome
   # for Testing release (the Stable channel, as tasks/src/util/cdp.rs reads it),
   # so the two versions match by construction.
   idb-browser:
-    name: IdbStore (browser)
+    name: Browser tests (IdbStore, Nostr data lane)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v6
+
+      # The script that runs the relay beside the browser test is TypeScript.
+      - uses: oven-sh/setup-bun@v2
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
@@ -488,3 +499,13 @@ jobs:
         env:
           WASM_BINDGEN_USE_BROWSER: "1"
         run: cargo test --target wasm32-unknown-unknown -p habilis-network-chunks --test idb_browser
+
+      - name: Build the test relay
+        run: cargo build -p habilis-network-iroh-nostr-address-lookup --features test-relay --example serve_relay
+
+      # The script starts the relay, waits at most 30 s for its `listening` line, runs the test against it,
+      # and fails the step if the test printed `skipped:`, so a missing address never passes silently.
+      - name: Nostr data lane in Chrome
+        run: |
+          bun test scripts/nostr-browser-test/nostr-browser-test.test.ts
+          bun scripts/nostr-browser-test/nostr-browser-test.ts

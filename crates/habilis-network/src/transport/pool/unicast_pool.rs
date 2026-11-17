@@ -8,22 +8,25 @@ use super::timeouts::{
 };
 use super::warm_send::WarmSend;
 use crate::transport::admission::{BusyGuard, SignalAdmission};
-use crate::transport::payload_path;
+use crate::transport::payload_path::{self, PathWait};
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use bytes::Bytes;
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use n0_future::time::Instant as PoolInstant;
 use tokio::sync::{Mutex, watch};
 
+#[cfg(feature = "iroh-test-utils")]
+use crate::transport::probe;
 use crate::transport::webrtc::close_code::IDLE;
-use crate::transport::{LOG_TARGET, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
+use crate::transport::{LOG_TARGET, PayloadPath, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
+use habilis_network_iroh_gossip_transport::{NOSTR_TRANSPORT_ID, transport_addr};
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
@@ -132,6 +135,9 @@ pub(in crate::transport::pool) struct PoolInner {
     /// path is the relay is refused; the connection stays pooled, since iroh
     /// may still punch a direct path on it.
     pub(in crate::transport::pool) relay_transport: bool,
+    /// `TransportPolicy::nostr_transport`. Off, a send on a connection whose selected path is
+    /// Nostr is refused. Set once by the loop that owns the pool, like the admission table.
+    pub(in crate::transport::pool) nostr_transport: AtomicBool,
     /// The table whose ceiling the connections of this pool count against. Set once the
     /// table exists, which is after the pool.
     pub(in crate::transport::pool) admission: std_OnceLock<SignalAdmission>,
@@ -184,10 +190,25 @@ impl UnicastPool {
                 #[cfg(test)]
                 dial_gate: std_Mutex::new(None),
                 relay_transport,
+                nostr_transport: AtomicBool::new(false),
                 admission: std_OnceLock::new(),
                 tally: std_OnceLock::new(),
             }),
         }
+    }
+
+    /// Let a payload ride a Nostr path: the mesh lists the Nostr transport.
+    pub(crate) fn set_nostr_transport(&self, allowed: bool) {
+        self.inner.nostr_transport.store(allowed, Ordering::Relaxed);
+    }
+
+    /// The transports that this pool lets a payload ride: the relay, as the policy sets it, and
+    /// Nostr, as [`Self::set_nostr_transport`] sets it.
+    pub(crate) fn payload_path(&self) -> PayloadPath {
+        PayloadPath::from_policy(
+            self.inner.relay_transport,
+            self.inner.nostr_transport.load(Ordering::Relaxed),
+        )
     }
 
     /// Report the sends of this pool to `admission`, so that a connection with a send in
@@ -253,6 +274,7 @@ impl UnicastPool {
                 #[cfg(test)]
                 dial_gate: std_Mutex::new(None),
                 relay_transport: false,
+                nostr_transport: AtomicBool::new(false),
                 admission: OnceLock::new(),
                 tally: std_OnceLock::new(),
             }),
@@ -273,7 +295,7 @@ impl UnicastPool {
         let Some(connection) = self.warm(eid).await else {
             return WarmSend::Cold;
         };
-        if !payload_allowed_on(&connection, self.inner.relay_transport) {
+        if !payload_allowed_on(&connection, self.payload_path()) {
             return WarmSend::Refused;
         }
         let pool = self.clone();
@@ -301,6 +323,45 @@ impl UnicastPool {
         };
         self.probe_done(eid).await;
         won
+    }
+
+    /// The address that a dial to `eid` names: the one remembered for the peer, or its bare id,
+    /// and the Nostr address of the peer when the mesh lists Nostr and the engine wants Nostr for
+    /// the pair (no other usable path served it at the last reading, or a dial to it failed).
+    /// iroh learns the address of a custom transport only from an address that names it, and a
+    /// connection that was dialed without it has no Nostr path to fall to. A pair that is served
+    /// names none, so the first flight of a dial on a healthy mesh never rides Nostr.
+    pub(crate) fn dial_address(&self, eid: EndpointId) -> EndpointAddr {
+        let mut address: EndpointAddr = {
+            let addrs = self.inner.addrs.lock().ok();
+            addrs
+                .and_then(|addrs| addrs.get(&eid).cloned())
+                .unwrap_or_else(|| EndpointAddr::new(eid))
+        };
+        // A path that a test took away from this node is not dialed: its selector refuses it, and
+        // iroh would select it as soon as it validates (the test hooks block nothing without the
+        // `test-hooks` feature, so a product build keeps every address).
+        #[cfg(feature = "iroh-test-utils")]
+        if let Some(endpoint) = &self.inner.endpoint {
+            let local = endpoint.id();
+            address
+                .addrs
+                .retain(|path| !probe::path_is_blocked(local, eid, path));
+        }
+        let wanted = self
+            .inner
+            .admission
+            .get()
+            .is_some_and(|table| table.nostr_wanted(eid));
+        if wanted && self.inner.nostr_transport.load(Ordering::Relaxed) {
+            address
+                .addrs
+                .insert(iroh::TransportAddr::Custom(transport_addr(
+                    NOSTR_TRANSPORT_ID,
+                    eid,
+                )));
+        }
+        address
     }
 
     /// Remember `addr` as the address to dial its peer at.
@@ -395,7 +456,7 @@ impl UnicastPool {
         let conns = self.inner.conns.lock().await;
         conns.get(&eid).is_some_and(|pooled| {
             pooled.connection.close_reason().is_none()
-                && payload_allowed_on(&pooled.connection, self.inner.relay_transport)
+                && payload_allowed_on(&pooled.connection, self.payload_path())
         })
     }
 
@@ -555,23 +616,47 @@ impl UnicastPool {
     /// fails/times out, or a stream write error.
     pub(crate) async fn dial_and_send(&self, eid: EndpointId, bytes: Bytes) -> Result<()> {
         self.inner.dial_attempts.fetch_add(1, Ordering::Relaxed);
-        let connection = self.warm_or_dial(eid).await?;
-        // A connection this call just dialed is milliseconds old: its
-        // non-relay path (the punch, or a WebRTC path opened right after
-        // `AddConnection`) is still forming, and the synchronous check read
-        // "no path selected yet" as relay — refusing the *first* directed
-        // frame to every peer without a warm connection. Wait like the
-        // accept side does, on a dial-sized budget.
-        if !self.inner.relay_transport
-            && !payload_path::wait_direct(&connection, PATH_SELECT_TIMEOUT).await
-        {
-            bail!("{RELAY_REFUSED}");
-        }
+        let connection = self.connection_with_payload_path(eid).await?;
         if let Err(error) = self.send_marked(eid, &connection, &bytes).await {
             self.evict_if_same(eid, &connection).await;
             return Err(error);
         }
         Ok(())
+    }
+
+    /// The connection to `eid` that a payload may ride, dialed if none is warm. A connection that
+    /// this call just dialed is milliseconds old: its non-relay path (the punch, or a `WebRTC` path
+    /// opened right after `AddConnection`) is still forming, and the synchronous check read "no path
+    /// selected yet" as relay, which refused the *first* directed frame to every peer without a warm
+    /// connection. So a mesh that does not list the relay waits on a dial-sized budget, like the
+    /// accept side. A connection that closes during the wait is not a refusal: a pooled one can be
+    /// closed by the hold of a probe, or by the peer, between the read of the pool and the wait. The
+    /// call dials once more, and a second close is an error that names the close.
+    async fn connection_with_payload_path(&self, eid: EndpointId) -> Result<Connection> {
+        for _ in 0..2 {
+            let connection = self.warm_or_dial(eid).await?;
+            if self.payload_path().relay_allowed() {
+                // The policy applies to the selected path whatever the relay allows: a mesh that
+                // lists the relay and not Nostr refuses a payload on a Nostr path.
+                ensure!(
+                    payload_allowed_on(&connection, self.payload_path()),
+                    "{RELAY_REFUSED}"
+                );
+                return Ok(connection);
+            }
+            match payload_path::payload_path_wait(
+                &connection,
+                PATH_SELECT_TIMEOUT,
+                self.payload_path(),
+            )
+            .await
+            {
+                PathWait::Selected => return Ok(connection),
+                PathWait::TimedOut => bail!("{RELAY_REFUSED}"),
+                PathWait::Closed => self.evict_if_same(eid, &connection).await,
+            }
+        }
+        bail!("the connection closed twice while the path was awaited")
     }
 
     /// Send `bytes` to `eid`, and dial a peer once, not once for each frame. A warm connection takes
@@ -760,12 +845,7 @@ impl UnicastPool {
         {
             bail!("{COOLDOWN_REFUSED}");
         }
-        let address: EndpointAddr = {
-            let addrs = self.inner.addrs.lock().ok();
-            addrs
-                .and_then(|addrs| addrs.get(&eid).cloned())
-                .unwrap_or_else(|| EndpointAddr::new(eid))
-        };
+        let address: EndpointAddr = self.dial_address(eid);
         #[cfg(test)]
         {
             let gate = {
@@ -778,6 +858,8 @@ impl UnicastPool {
         }
         #[cfg(test)]
         self.inner.dials_started.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "iroh-test-utils")]
+        forget_blocked_addresses(&endpoint, eid).await;
         match dial(&endpoint, address).await {
             Ok(connection) => {
                 self.inner.dial_failures.lock().await.forget(&eid);
@@ -806,6 +888,11 @@ impl UnicastPool {
                     .lock()
                     .await
                     .note(eid, Instant::now());
+                // A pair that no path reaches is one that the engine wants Nostr for: the next
+                // dial names its Nostr address (a table with no Nostr transport ignores it).
+                if let Some(table) = self.inner.admission.get() {
+                    table.want_nostr(eid);
+                }
                 Err(error)
             }
         }
@@ -891,6 +978,30 @@ async fn wait_for_dial(mut outcome: watch::Receiver<DialOutcome>) -> result::Res
 /// Dial `eid` on the unicast ALPN within [`DIAL_TIMEOUT`]. The endpoint already
 /// knows the peer's address (registered via `add_peer_addr`), so a bare-id
 /// `EndpointAddr` resolves through the endpoint's address book + lookups.
+/// Tests only: take from iroh the addresses of `peer` that the block hooks took away from this
+/// node. The selector refuses a blocked path, but iroh keeps the address and validates the path
+/// at once, so a new connection would select it before any lower rung could open. A real outage
+/// leaves no such path. A product build has no hooks, and nothing is blocked.
+#[cfg(feature = "iroh-test-utils")]
+async fn forget_blocked_addresses(endpoint: &Endpoint, peer: EndpointId) {
+    let local = endpoint.id();
+    let Some(info) = endpoint.remote_info(peer).await else {
+        return;
+    };
+    let mut blocked: Vec<iroh::TransportAddr> = Vec::new();
+    for known in info.addrs() {
+        let path = known.addr();
+        if probe::path_is_blocked(local, peer, path) {
+            blocked.push(path.clone());
+        }
+    }
+    if !blocked.is_empty() {
+        endpoint
+            .remove_endpoint_addr(EndpointAddr::from_parts(peer, blocked))
+            .await;
+    }
+}
+
 async fn dial(endpoint: &Endpoint, address: EndpointAddr) -> Result<Connection> {
     match time::timeout(DIAL_TIMEOUT, endpoint.connect(address, UNICAST_ALPN)).await {
         Ok(Ok(connection)) => Ok(connection),

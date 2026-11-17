@@ -257,21 +257,23 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             return ptr::null_mut();
         };
         // SAFETY: NUL-terminated or NULL, per the header contract, for each
-        // of the three comma lists.
+        // of the four comma lists.
         let lists = unsafe {
             (
                 optional_str(options.lookup),
                 optional_str(options.transport),
                 optional_str(options.relay_urls),
+                optional_str(options.nostr_urls),
             )
         };
-        let (Ok(lookup), Ok(transport), Ok(relay_urls)) = lists else {
+        let (Ok(lookup), Ok(transport), Ok(relay_urls), Ok(nostr_urls)) = lists else {
             return ptr::null_mut();
         };
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
             return ptr::null_mut();
         };
         let relay_urls: Vec<String> = relay_urls.map(url_list).unwrap_or_default();
+        let nostr_urls: Vec<String> = nostr_urls.map(url_list).unwrap_or_default();
         let mesh_name = mesh.map(str::to_owned);
         let topic_name = topic.map(str::to_owned);
         let nick_name = nick.map(str::to_owned);
@@ -281,10 +283,11 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             .topic(topic_name)
             .nick(nick_name)
             .name(display_name);
-        let limited = base
+        let limited: JoinOptions = base
             .lookup(lookup)
             .transport(transport)
-            .relay_urls(relay_urls);
+            .relay_urls(relay_urls)
+            .nostr_urls(nostr_urls);
         let parsed: JoinOptions = limited
             .max_peers(options.max_peers)
             .max_direct(options.max_direct);

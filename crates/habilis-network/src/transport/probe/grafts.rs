@@ -2,13 +2,14 @@
 
 use super::direct_outcome::DirectOutcome;
 use super::graft_request::{GraftRequest, GraftTarget};
+use super::path_kind::PathKind;
 use super::{graft_request, lanes, regraft};
 
 use iroh::EndpointId;
 
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState};
-use crate::transport::payload_path::{PROBE_DEADLINE, wait_direct};
+use crate::transport::payload_path::{PROBE_DEADLINE, wait_payload_path};
 use crate::transport::webrtc;
 use crate::util::clock::Instant;
 
@@ -37,8 +38,7 @@ pub(crate) fn ensure_direct(
     if state.relay_transport.relay_allowed() {
         return true;
     }
-    let needs_webrtc = webrtc::lane_needs::needs_webrtc_lane(peer_addr)
-        || webrtc::lane_needs::needs_webrtc_lane(&context.endpoint.addr());
+    let needs_webrtc = webrtc::session_policy::peer_needs_lane(state, peer, peer_addr);
     let has_session = state
         .webrtc
         .as_ref()
@@ -67,9 +67,13 @@ pub(crate) fn ensure_direct(
     state.direct.insert(peer, DirectState::Pending);
     let pool = state.unicast_pool.clone();
     let tx = state.direct_proven.clone();
+    // A pair that only Nostr serves is proven for payload when the mesh lists Nostr: the probe
+    // waits for a direct path or for that rung. Nothing grafts a gossip link onto it
+    // (`request_graft`).
+    let payload = state.relay_transport;
     task::spawn(async move {
         let direct = match pool.probe_connection(peer).await {
-            Ok(connection) => wait_direct(&connection, PROBE_DEADLINE).await,
+            Ok(connection) => wait_payload_path(&connection, PROBE_DEADLINE, payload).await,
             Err(error) => {
                 tracing::debug!(target: transport::LOG_TARGET, %peer, %error, "direct-path probe could not connect");
                 false
@@ -100,6 +104,11 @@ pub(crate) async fn on_outcome(
     }
     let DirectOutcome { peer, direct, .. } = outcome;
     if direct {
+        // A pair that Nostr carries is proven for payload, and no graft follows it: remember it
+        // while the probe connection is still read, because it goes after the probe.
+        if state.pair_path_kind(peer) == Some(PathKind::Nostr) {
+            state.note_proven_over_nostr(peer);
+        }
         graft_proven(state, context, peer).await;
     } else if state.demote_unproven(peer) {
         tracing::info!(target: transport::LOG_TARGET, %peer, "no direct path within the probe deadline; peer stays relay-only");
@@ -117,6 +126,11 @@ pub(crate) async fn request_graft(
 ) -> Result<(), api::ApiError> {
     if peer != context.rendezvous_id && state.rides_gossip_rung(peer) {
         tracing::debug!(target: transport::LOG_TARGET, %peer, "graft skipped: the pair rides the gossip rung");
+        return Ok(());
+    }
+    // A gossip link never rides Nostr: the hook closes it, and the graft would dial it again.
+    if peer != context.rendezvous_id && state.rides_nostr(peer) {
+        tracing::debug!(target: transport::LOG_TARGET, %peer, "graft skipped: the pair rides Nostr");
         return Ok(());
     }
     match graft_request(
@@ -149,10 +163,17 @@ pub(crate) async fn graft_proven(
     if peer == context.rendezvous_id && !state.rendezvous_wanted() {
         return;
     }
-    if !state.linked_endpoints.contains(&peer) && state.linked_endpoints.len() < context.max_peers {
+    let linked = state.linked_endpoints.contains(&peer);
+    let full = state.linked_endpoints.len() >= context.max_peers;
+    if linked || full {
+        tracing::debug!(target: transport::LOG_TARGET, %peer, linked, full, "graft skipped");
+    } else {
         state.note_relink(peer, Instant::now());
-        if let Err(error) = request_graft(state, context, peer, true).await {
-            tracing::warn!(target: transport::LOG_TARGET, %peer, %error, "graft request failed");
+        match request_graft(state, context, peer, true).await {
+            Ok(()) => tracing::debug!(target: transport::LOG_TARGET, %peer, "graft requested"),
+            Err(error) => {
+                tracing::warn!(target: transport::LOG_TARGET, %peer, %error, "graft request failed");
+            }
         }
     }
 }
@@ -177,6 +198,8 @@ pub(crate) async fn retry_direct(
     let now = Instant::now();
     state.note_link_count(state.linked_endpoints.len(), context.max_peers, now);
     state.settle_graft_backoff(now);
+    // The Nostr transport opens replies only to the members that this node knows.
+    state.feed_nostr_members();
     if state.relay_transport.relay_allowed() {
         regraft::fill_active_view(state, context).await;
         return;

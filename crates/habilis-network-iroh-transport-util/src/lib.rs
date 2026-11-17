@@ -27,9 +27,10 @@ mod rung;
 pub use protocol_set::ProtocolSet;
 
 pub use rung::{
-    GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID, best_of, blocked, climb,
-    custom_rung, datagrams, expected_rung, ip_remote, remote_id, remote_id_of, rung_of,
-    split_segments,
+    GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, MixedRelayPolicy, NOSTR_TRANSPORT_ID, RelayPolicy,
+    Rung, WEBRTC_TRANSPORT_ID, best_of, blocked, climb, custom_rung, datagrams, expected_rung,
+    expected_rung_for, ip_remote, register_relay_policy, relay_carries, remote_id, remote_id_of,
+    rung_of, split_segments,
 };
 #[cfg(feature = "test-hooks")]
 pub use rung::{block_ip_paths, block_ip_to, block_rung, block_rung_to, is_blocked, is_blocked_to};
@@ -39,8 +40,9 @@ pub use rung::{is_blocked, is_blocked_to};
 #[cfg(test)]
 mod tests {
     use super::{
-        GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID, custom_rung,
-        expected_rung, remote_id_of, split_segments,
+        GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, NOSTR_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID,
+        custom_rung, expected_rung, expected_rung_for, register_relay_policy, relay_carries,
+        remote_id_of, split_segments,
     };
     #[cfg(feature = "test-hooks")]
     use super::{block_ip_to, block_rung, block_rung_to, is_blocked, is_blocked_to};
@@ -61,7 +63,11 @@ mod tests {
         assert!(Rung::WebRtc < Rung::Multihop, "multihop is below WebRTC");
         assert!(Rung::Multihop < Rung::Gossip, "gossip is below multihop");
         assert!(Rung::Gossip < Rung::Relay, "the relay is below gossip");
-        assert!(Rung::Relay < Rung::Other, "a foreign transport is last");
+        assert!(
+            Rung::Relay < Rung::Nostr,
+            "the nostr rung is below the relay"
+        );
+        assert!(Rung::Nostr < Rung::Other, "a foreign transport is last");
     }
 
     /// The pure ladder: over every set of allowed rungs and every set of
@@ -70,29 +76,132 @@ mod tests {
     /// `LADDER` fails this test.
     #[test]
     fn the_expected_rung_is_the_best_rung_that_is_allowed_and_available() {
-        const ORDER: [Rung; 6] = [
+        const ORDER: [Rung; 7] = [
             Rung::Ip,
             Rung::WebRtc,
             Rung::Multihop,
             Rung::Gossip,
             Rung::Relay,
+            Rung::Nostr,
             Rung::Other,
         ];
         let set = |mask: u8| move |rung: Rung| mask >> (rung as u8) & 1 == 1;
-        for allowed in 0..64u8 {
-            for available in 0..64u8 {
+        for allowed in 0..128u8 {
+            for available in 0..128u8 {
                 let expected = ORDER
                     .into_iter()
                     .find(|&rung| set(allowed)(rung) && set(available)(rung));
                 assert_eq!(
                     expected_rung(set(allowed), set(available)),
                     expected,
-                    "allowed {allowed:#08b}, available {available:#08b}"
+                    "allowed {allowed:#09b}, available {available:#09b}"
                 );
             }
         }
 
         let _guard = ::habilis_network_test_tracing::init();
+    }
+
+    /// Where the relay carries no payload (a mesh that uses it for lookup alone), a pair with a
+    /// Nostr path takes it over the relay path: the relay path would be selected and refused.
+    /// Where the relay carries payload the ladder is the user's: the relay above Nostr.
+    #[test]
+    fn nostr_ranks_above_the_relay_only_where_the_relay_carries_no_payload() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let place = |ladder: [Rung; 7], rung: Rung| {
+            ladder
+                .iter()
+                .position(|&candidate| candidate == rung)
+                .expect("on the ladder")
+        };
+        assert_eq!(
+            Rung::ladder_for(true),
+            Rung::LADDER,
+            "the relay carries: the plain ladder"
+        );
+        let lookup_only = Rung::ladder_for(false);
+        assert!(
+            place(lookup_only, Rung::Nostr) < place(lookup_only, Rung::Relay),
+            "Nostr is above the relay"
+        );
+        assert!(
+            place(lookup_only, Rung::Gossip) < place(lookup_only, Rung::Nostr),
+            "every other rung keeps its place above Nostr"
+        );
+        assert_eq!(lookup_only.len(), Rung::LADDER.len(), "no rung is lost");
+        let both = |rung: Rung| matches!(rung, Rung::Relay | Rung::Nostr);
+        assert_eq!(
+            expected_rung_for(false, |_| true, both),
+            Some(Rung::Nostr),
+            "a lookup-only relay yields to Nostr"
+        );
+        assert_eq!(
+            expected_rung_for(true, |_| true, both),
+            Some(Rung::Relay),
+            "a relay that carries payload keeps its place"
+        );
+        assert_eq!(
+            expected_rung_for(false, |_| true, |rung| rung == Rung::Relay),
+            Some(Rung::Relay),
+            "with no Nostr path the relay is still the path"
+        );
+    }
+
+    /// The mesh policy reaches the selector of an endpoint through its id. Two meshes may share one
+    /// endpoint: the ladder is the lookup-only one while any of them has a relay that carries no
+    /// payload, and the plain one again when the last of them ends.
+    #[test]
+    fn the_relay_policy_of_an_endpoint_counts_its_meshes() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let local = iroh::SecretKey::from_bytes(&[61; 32]).public();
+        let other = iroh::SecretKey::from_bytes(&[62; 32]).public();
+        assert!(
+            relay_carries(local),
+            "an endpoint with no policy keeps the plain ladder"
+        );
+        let lookup_only = register_relay_policy(local, false, false).expect("a first mesh");
+        assert!(!relay_carries(local), "a lookup-only relay");
+        assert!(relay_carries(other), "another endpoint is not affected");
+        let carrying = register_relay_policy(local, true, false).expect("no Nostr listed");
+        assert!(
+            !relay_carries(local),
+            "a second mesh whose relay carries does not undo the first"
+        );
+        drop(carrying);
+        assert!(!relay_carries(local), "the lookup-only mesh is still there");
+        drop(lookup_only);
+        assert!(
+            relay_carries(local),
+            "the last mesh ended: the plain ladder"
+        );
+    }
+
+    /// Two meshes on one endpoint that the one path ordering cannot serve are refused, and the
+    /// refusal names both policies. Meshes that the ordering serves, and a refused mesh, leave the
+    /// table as it was.
+    #[test]
+    fn a_mesh_whose_relay_policy_the_endpoint_ordering_cannot_serve_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let local = iroh::SecretKey::from_bytes(&[63; 32]).public();
+        let lookup_only_with_nostr =
+            register_relay_policy(local, false, true).expect("a first mesh");
+        let refused = register_relay_policy(local, true, false)
+            .expect_err("a relay that carries, beside Nostr above a lookup-only relay");
+        let message = refused.to_string();
+        assert!(
+            message.contains("relay carries payload, does not list Nostr")
+                && message.contains("relay is lookup only, lists Nostr"),
+            "the error names both policies: {message}"
+        );
+        assert!(!relay_carries(local), "the refused mesh changed nothing");
+        let same = register_relay_policy(local, false, true).expect("the same policy is fine");
+        drop(lookup_only_with_nostr);
+        drop(same);
+        assert!(relay_carries(local), "no mesh left: the plain ladder");
+        // With Nostr listed by neither, the two orderings are the same for every mesh.
+        let first = register_relay_policy(local, false, false).expect("no Nostr");
+        let second = register_relay_policy(local, true, false).expect("no Nostr listed by either");
+        drop((first, second));
     }
 
     /// One function names the rung of a custom transport id, for every selector.
@@ -113,6 +222,11 @@ mod tests {
             custom_rung(GOSSIP_TRANSPORT_ID),
             Rung::Gossip,
             "the gossip transport id names the gossip rung"
+        );
+        assert_eq!(
+            custom_rung(NOSTR_TRANSPORT_ID),
+            Rung::Nostr,
+            "the nostr transport id names the nostr rung"
         );
         assert_eq!(custom_rung(0x1234), Rung::Other, "a foreign id is last");
     }

@@ -3,8 +3,9 @@
 https://habilis.network
 
 A portable, serverless gossip-network engine that runs on the web and on
-native. Peers find each other, form a mesh, and exchange signed messages and
-shared state, with no server in the middle. It is built on
+native. Peers find each other over mDNS, the mainline DHT, a relay or public
+Nostr relays, form a mesh, and exchange signed messages and shared state, with
+no server in the middle. It is built on
 [iroh](https://github.com/n0-computer/iroh) for transport, and
 signed per-author slices for shared state.
 
