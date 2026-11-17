@@ -151,7 +151,8 @@ impl ChunkClient {
                 }
             }
             // A holder gave the map, so an absent chunk is its serve budget, which comes back with the next window.
-            if last != FetchError::Absent {
+            // Only the holders that gave the absent answer are still eligible.
+            if holders.iter().all(|holder| holder.failed) {
                 break;
             }
         }
@@ -407,6 +408,32 @@ mod tests {
         );
         client.close().await;
         holder.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_busy_holder_is_asked_again_when_another_holder_failed_in_the_same_round() {
+        let value = value();
+        let (chunks, pointer, client) = asker_side(&value).await;
+        let busy_node = serve_with(busy(&value, 1)).await;
+        let corrupt = serve_with(honest(&value, |mut answer| {
+            let last = answer.len() - 1;
+            answer[last] ^= 1;
+            answer
+        }))
+        .await;
+        let sources: [EndpointAddr; 2] = [busy_node.address.clone(), corrupt.address.clone()];
+        let fetched: Result<Vec<u8>, FetchError> = ChunkClient::new(client.clone())
+            .busy_wait(Duration::from_millis(20))
+            .fetch(&sources, pointer, chunks.stored_size(pointer))
+            .await;
+        assert_eq!(
+            fetched,
+            Ok(value),
+            "the busy holder can still give the chunk, so the failure of the other holder must not end the fetch"
+        );
+        client.close().await;
+        busy_node.close().await;
+        corrupt.close().await;
     }
 
     #[tokio::test]
