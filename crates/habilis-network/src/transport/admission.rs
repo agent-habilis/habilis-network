@@ -1756,6 +1756,9 @@ mod tests {
         let transport = NostrTransport::new(me);
         table.set_nostr(transport.clone());
         table.want_nostr(peer);
+        // The want itself allows the peer (`a_want_allows_its_destination_at_once`). Close the handle
+        // again, so that this test keeps asking one thing: that the sweep reaches a wanted peer.
+        transport.handle().allow(peer, false);
         assert!(
             !transport.handle().is_allowed(peer),
             "a closed handle before the sweep"
