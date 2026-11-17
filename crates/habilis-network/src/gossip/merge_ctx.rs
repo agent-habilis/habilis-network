@@ -893,7 +893,6 @@ mod tests {
     use crate::protocol::peer_addr_error;
     #[cfg(feature = "host")]
     use crate::testing;
-    #[cfg(feature = "host")]
     use crate::util::clock;
     /// The mirror dials the hint of a live peer whose key made it. It skips a hint from a card (no
     /// verified key, even when a key is admitted under the nickname later), a hint of a quiet key,
