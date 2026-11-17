@@ -1,4 +1,4 @@
-use super::MeshSecrets;
+use super::{MeshChunks, MeshSecrets};
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -64,6 +64,8 @@ pub(crate) struct StateInit {
     pub(crate) keys: RunKeys,
     /// The overheads of this session, which set the body caps and the page rows.
     pub(crate) overheads: FrameOverheads,
+    /// The chunk store of this run, empty at the start.
+    pub(crate) chunks: MeshChunks,
     pub secrets: MeshSecrets,
     /// The negotiation-slot table the Router's signal acceptor was built with.
     ///

@@ -22,6 +22,7 @@
 use tokio::sync::oneshot;
 mod admission;
 pub(crate) mod ceiling;
+mod chunk_acceptor;
 mod direct_only_gossip;
 pub(crate) mod graft_backoff;
 #[cfg(feature = "host")]
@@ -56,6 +57,7 @@ mod mesh_sender;
 mod send;
 
 pub use admission::SignalAdmission;
+pub(crate) use chunk_acceptor::{CHUNKS_ALPN, ChunkAcceptor, ChunkAsk};
 pub(crate) use direct_only_gossip::DirectOnlyGossip;
 pub use mesh_sender::MeshSender;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]

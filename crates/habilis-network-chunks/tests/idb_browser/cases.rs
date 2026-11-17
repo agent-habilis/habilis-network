@@ -116,6 +116,40 @@ async fn maps_round_trip() {
     );
 }
 
+#[wasm_bindgen_test]
+async fn a_dropped_map_is_absent_and_a_sweep_still_frees_its_chunks() {
+    let store = fresh("drop-map").await;
+    let bytes = body(1024, 13);
+    let map = ChunkMap::build(&bytes);
+    store.put_map(&map).await.expect("put_map");
+    store
+        .put(map.leaf(0).expect("one"), &bytes)
+        .await
+        .expect("put");
+
+    store.drop_map(map.root()).await.expect("drop_map");
+    assert_eq!(
+        store.map(map.root()).await.expect("map"),
+        None,
+        "a dropped map is absent from the store"
+    );
+    assert!(
+        store.has(map.leaf(0).expect("one")).await.expect("has"),
+        "dropping a map must keep its chunks until a sweep"
+    );
+    store
+        .drop_map(map.root())
+        .await
+        .expect("a second drop of the same root is not an error");
+
+    store.start_marking().await.expect("start");
+    let dropped = store.sweep().await.expect("sweep");
+    assert_eq!(
+        dropped, 1,
+        "a sweep with no mark frees the chunk of the dropped map"
+    );
+}
+
 /// Partial holdings are first-class: coverage grows chunk by chunk, and a tab
 /// that stopped halfway still helps everyone else.
 #[wasm_bindgen_test]
