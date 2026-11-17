@@ -5,4 +5,7 @@ ignore = [
     # 0.8.1, through netdev 0.45 and the netwatch fork of net-tools. A newer netlink-packet-core
     # that drops paste is being checked in the fork.
     { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained, no fixed version, no known vulnerability; via netlink-packet-core 0.8.1 (netdev 0.45, netwatch fork)" },
+    # Unmaintained, with no fixed version and no known vulnerability. Path: tokio-rustls-acme
+    # 0.9.1, through iroh-relay.
+    { id = "RUSTSEC-2026-0543", reason = "chrono: unmaintained, no fixed version, no known vulnerability; via tokio-rustls-acme 0.9.1 (iroh-relay)" },
 ]
