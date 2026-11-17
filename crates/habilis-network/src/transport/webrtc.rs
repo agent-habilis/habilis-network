@@ -2497,6 +2497,107 @@ mod tests {
         );
     }
 
+    /// A pair that Nostr carries keeps its proof where the mesh lists Nostr: the offer of a session
+    /// is a climb, and a demotion to `RelayOnly` would hold the frames of a pair that Nostr serves.
+    /// Where the mesh does not list Nostr, the pair reads as below a session and is demoted.
+    #[test]
+    fn a_pair_on_nostr_is_not_demoted_while_the_mesh_lists_nostr() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::daemon::state::DirectState;
+                use crate::protocol::MeshId;
+                use crate::protocol::identity::Identity;
+                use crate::transport::probe::PathKind;
+
+                let (endpoint, handle) = endpoint().await;
+                let nudge_router = Router::builder(endpoint.clone())
+                    .accept(NUDGE_ALPN, NudgeAcceptor)
+                    .spawn();
+                let key = (1u16..=u16::MAX)
+                    .map(|seed| {
+                        let mut bytes = [0u8; 32];
+                        bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                        SecretKey::from_bytes(&bytes)
+                    })
+                    .find(|key| key.public() < endpoint.id())
+                    .expect("a key below ours");
+                let (server, server_hub) = endpoint_with(key).await;
+                let server_admission = SignalAdmission::new(8);
+                let router = serve(&server, &server_hub, &server_admission);
+
+                let gossip = irohgossip_Gossip::builder().spawn(endpoint.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([8u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = transport::MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let identity = Identity::generate();
+                let our_pubkey = identity.author_key();
+                let author = testing::nick("alice");
+                let sink = event::SilentSink;
+                let context = handler_ctx::HandlerCtx {
+                    sender: &sender,
+                    endpoint: &endpoint,
+                    mesh: &mesh,
+                    author: &author,
+                    identity: &identity,
+                    our_pubkey,
+                    max_peers: 16,
+                    rendezvous_id: testing::endpoint_id(9),
+                    external_msg_tx: None,
+                    sink: &sink,
+                };
+                let bob = server.id();
+                let address = server.addr();
+                for (payload, demoted) in [
+                    (PayloadPath::DirectOrNostr, false),
+                    (PayloadPath::DirectOnly, true),
+                ] {
+                    let mut state = testing::fresh_state();
+                    state.webrtc = Some(handle.clone());
+                    state.local_udp_transport = UdpTransport::Present;
+                    state.relay_transport = payload;
+                    state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
+                    state
+                        .peer_endpoints
+                        .insert(testing::nick("bob"), address.clone());
+                    // The pair is proven, and a connection reads Nostr. A frame is held, so that the
+                    // pair is not left alone for want of a send.
+                    state.want_lane_session(bob, clock::Instant::now());
+                    state.direct.insert(bob, DirectState::Direct);
+                    state.path_kinds.insert(bob, PathKind::Nostr);
+                    state.unicast_pool.note_dial_failure(bob).await;
+
+                    negotiate_session::negotiate_session(
+                        &mut state,
+                        &context,
+                        bob,
+                        address.clone(),
+                    );
+
+                    assert_eq!(
+                        state.direct.get(&bob) == Some(&DirectState::RelayOnly),
+                        demoted,
+                        "a pair on Nostr is demoted only where the mesh does not list Nostr \
+                         ({payload:?})"
+                    );
+                }
+
+                router.shutdown().await.expect("shutdown");
+                server.close().await;
+                nudge_router
+                    .shutdown()
+                    .await
+                    .expect("shutdown the nudge router");
+                endpoint.close().await;
+            },
+        );
+    }
+
     /// **UDP returns on a pair that only gossips.** Such a pair has no path watcher, so the session
     /// that the race attached would stay until the backstop. The reading of the admission table
     /// detaches it, on the fast ticker: a relay reading keeps it, an IP reading drops it.
