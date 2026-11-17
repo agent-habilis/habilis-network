@@ -1720,6 +1720,31 @@ mod tests {
         );
     }
 
+    /// A peer that the engine wants Nostr for but that has no slot (the dial that failed left no
+    /// connection) is allowed by the sweep: the next dial must be able to send its frames.
+    #[test]
+    fn the_sweep_allows_a_wanted_peer_that_has_no_slot() {
+        use habilis_network_iroh_nostr_transport::NostrTransport;
+        let _guard = ::habilis_network_test_tracing::init();
+        let me = iroh::SecretKey::from_bytes(&[73; 32]).public();
+        let peer = iroh::SecretKey::from_bytes(&[74; 32]).public();
+        let table = SignalAdmission::new(8);
+        let transport = NostrTransport::new(me);
+        table.set_nostr(transport.clone());
+        table.want_nostr(peer);
+        assert!(
+            !transport.handle().is_allowed(peer),
+            "a closed handle before the sweep"
+        );
+
+        table.sync_nostr();
+
+        assert!(
+            transport.handle().is_allowed(peer),
+            "the sweep allows a wanted peer with no slot"
+        );
+    }
+
     /// An endpoint with a loopback UDP socket and the gossip transport, whose connections are
     /// reported to its own table, which keeps the gossip handle.
     async fn ip_and_gossip_node(

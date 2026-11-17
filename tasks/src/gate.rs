@@ -97,6 +97,11 @@ pub(crate) const STEPS: &[Step] = &[
     // `wasm-simd` only changes blake3's codegen, so checking with it on costs
     // nothing and keeps the feature from rotting.
     Step {
+        kind: Kind::OmittedPatterns,
+        scope: Scope::Workspace,
+        args: &["--all-targets"],
+    },
+    Step {
         kind: Kind::WasmCheck,
         scope: Scope::Crate("habilis-network-chunks"),
         args: &["--all-targets", "--features", "wasm-simd"],

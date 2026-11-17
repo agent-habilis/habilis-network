@@ -614,6 +614,8 @@ pub struct EventLoopState {
     pub(crate) nostr: Option<transport::webrtc::nostr_signal::NostrSignal>,
     /// When each peer was last heard over Nostr.
     pub(crate) nostr_seen: HashMap<EndpointId, Instant>,
+    /// The relay policy of this mesh for the selectors of its endpoint. Dropped with the state.
+    pub(crate) relay_policy: Option<habilis_network_iroh_transport_util::RelayPolicy>,
     /// The peers that a probe proved over Nostr. The proof outlives the probe connection, so that
     /// a graft is not dialed for a pair that only Nostr carries: the hook would close the link at
     /// once. A report of another path takes it back. Bounded by the peers that are probed.
@@ -995,6 +997,7 @@ impl EventLoopState {
             has_rendezvous: true,
             nostr: None,
             nostr_seen: HashMap::new(),
+            relay_policy: None,
             nostr_proven: HashSet::new(),
             nostr_poked: HashMap::new(),
             next_hello: None,
@@ -1585,6 +1588,8 @@ impl EventLoopState {
         self.unicast_pool.forget_addr(endpoint);
         // The lane flag belongs to the endpoint: it goes when the last name of the endpoint goes.
         self.lane_peers.remove(&endpoint);
+        // So does its proof over Nostr.
+        self.nostr_proven.remove(&endpoint);
     }
 
     /// Drop everything the roster keeps about `key`, which left: its place in the roster, its
@@ -2450,10 +2455,24 @@ impl EventLoopState {
     pub(crate) fn note_known_endpoint(&mut self, peer: EndpointId) -> bool {
         let first = self.known_endpoints.insert(peer);
         if first {
-            self.webrtc_admission
-                .set_known_peers(self.known_endpoints.iter().copied());
+            self.feed_nostr_members(Some(peer));
         }
         first
+    }
+
+    /// The members that the Nostr transport answers: the roster. The list of sighted endpoints is
+    /// bounded and evicts a live member when it is full, and the member would lose its replies.
+    pub(crate) fn nostr_member_ids(&self) -> HashSet<EndpointId> {
+        let addresses = self.member_addresses();
+        addresses.iter().map(|address| address.id).collect()
+    }
+
+    /// Tell the Nostr transport its members, and `newcomer` too: an endpoint that was just sighted
+    /// is not on the roster yet, and it must get its reply at once.
+    pub(crate) fn feed_nostr_members(&self, newcomer: Option<EndpointId>) {
+        let mut members = self.nostr_member_ids();
+        members.extend(newcomer);
+        self.webrtc_admission.set_known_peers(members);
     }
 
     /// A probe proved `peer` over Nostr: see [`Self::rides_nostr`].

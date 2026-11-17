@@ -65,6 +65,7 @@ pub(crate) fn ci(sh: &Shell, scope: &Scope) -> TaskOutcome {
     lint(sh, scope)?;
     doc(sh, scope)?;
     check(sh, scope)?;
+    run(sh, Kind::OmittedPatterns, scope)?;
     wasm::run(sh, scope)?;
     test(sh, scope)?;
     output::status("Finished", "the gate is green");
@@ -88,7 +89,11 @@ pub(crate) fn run(sh: &Shell, kind: Kind, scope: &Scope) -> TaskOutcome {
         let (verb, subject) = step.describe(packages);
         output::status(verb, &subject);
         let argv = step.command(packages);
-        cmd!(sh, "cargo {argv...}").quiet().run()?;
+        let command = cmd!(sh, "cargo {argv...}").quiet();
+        match kind.rustflags() {
+            Some(flags) => command.env("RUSTFLAGS", flags).run()?,
+            None => command.run()?,
+        }
     }
     Ok(())
 }

@@ -486,10 +486,12 @@ fn wire_transports(
         .webrtc_admission
         .set_relay_carries(transports.relay_transport.relay_allowed());
     // The selectors of the endpoint rank Nostr above a relay that carries no payload.
-    habilis_network_iroh_transport_util::set_relay_carries(
+    // The guard lives with the state: the policy ends with the mesh, and a second mesh on the same
+    // endpoint adds its own.
+    state.relay_policy = Some(habilis_network_iroh_transport_util::register_relay_policy(
         endpoint.id(),
         transports.relay_transport.relay_allowed(),
-    );
+    ));
     state
         .unicast_pool
         .set_admission(state.webrtc_admission.clone());

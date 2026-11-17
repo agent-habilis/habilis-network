@@ -81,7 +81,10 @@ pub(crate) fn negotiate_session(
         let endpoint = context.endpoint.clone();
         task::spawn(async move { nudge_acceptor::nudge_session(&endpoint, peer).await });
     }
-    let demoted = reads_as_relay && !has_session;
+    // A pair that Nostr carries keeps its proof where the mesh lists Nostr: the offer of a session
+    // is a climb, not a loss of the pair. It stays out of `RelayOnly`, which would hold its frames.
+    let on_nostr = kind == Some(probe::PathKind::Nostr) && state.relay_transport.nostr_allowed();
+    let demoted = reads_as_relay && !has_session && !on_nostr;
     if demoted {
         state.direct.insert(peer, DirectState::RelayOnly);
         tracing::info!(

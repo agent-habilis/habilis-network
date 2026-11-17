@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use habilis_network_iroh_gossip_transport::{NOSTR_TRANSPORT_ID, transport_addr};
+use habilis_network_iroh_gossip_transport::{Frame, NOSTR_TRANSPORT_ID, transport_addr};
 use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay;
 use habilis_network_iroh_nostr_transport::NostrTransport;
 use habilis_network_protocol::TopicId;
@@ -237,8 +237,13 @@ fn a_datagram_opens_replies_only_to_a_known_member_that_the_engine_did_not_stop(
                     *claimed.as_bytes(),
                     keys.self_tag(&claimed),
                 );
+                // A real frame for alice: only a frame that the core queues opens replies.
+                let datagram = [3u8; 20];
+                let frame = Frame::fixture(alice_key.public(), claimed, &datagram)
+                    .encode()
+                    .expect("a frame");
                 for _ in 0..30 {
-                    pool.send(&alice_tag, b"not a frame".to_vec());
+                    pool.send(&alice_tag, frame.to_vec());
                     time::sleep(Duration::from_millis(100)).await;
                     if alice.handle().is_allowed(known) {
                         break;
@@ -246,7 +251,11 @@ fn a_datagram_opens_replies_only_to_a_known_member_that_the_engine_did_not_stop(
                 }
                 drop(pool);
             }
-            sender.send(&alice_tag, b"not a frame".to_vec());
+            let datagram = [3u8; 20];
+            let from_stranger = Frame::fixture(alice_key.public(), stranger, &datagram)
+                .encode()
+                .expect("a frame");
+            sender.send(&alice_tag, from_stranger.to_vec());
             time::sleep(Duration::from_secs(1)).await;
 
             assert!(
@@ -260,6 +269,37 @@ fn a_datagram_opens_replies_only_to_a_known_member_that_the_engine_did_not_stop(
             assert!(
                 !alice.handle().is_allowed(stranger),
                 "a stranger gets no reply and no entry in the tables"
+            );
+        },
+    );
+}
+
+/// A datagram that the core does not queue opens no replies, even from a known member: a forged or
+/// malformed batch of a member must not open the handle.
+#[test]
+fn a_malformed_datagram_from_a_known_member_opens_no_replies() {
+    use habilis_network_iroh_nostr_address_lookup::DataPool;
+
+    ::habilis_network_test_tracing::run_multi_thread(
+        ::habilis_network_test_tracing::init(),
+        2,
+        async {
+            let relay = TestRelay::spawn().await.expect("spawn a relay");
+            let keys = NostrKeys::derive(&TopicId::from_bytes([7u8; 32]));
+            let alice_key = SecretKey::from_bytes(&[21; 32]);
+            let known = SecretKey::from_bytes(&[22; 32]).public();
+            let alice = NostrTransport::open(alice_key.public(), keys.clone(), vec![relay.url()]);
+            alice.set_known_peers([known]);
+            let (pool, _rx) =
+                DataPool::open(vec![relay.url()], *known.as_bytes(), keys.self_tag(&known));
+            let alice_tag = keys.self_tag(&alice_key.public());
+            for _ in 0..15 {
+                pool.send(&alice_tag, b"not a frame".to_vec());
+                time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(
+                !alice.handle().is_allowed(known),
+                "a datagram that is no frame opens no reply"
             );
         },
     );

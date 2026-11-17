@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use habilis_network_iroh_gossip_transport::{GossipHandle, NOSTR_TRANSPORT_ID};
+use habilis_network_iroh_gossip_transport::{Delivery, GossipHandle, NOSTR_TRANSPORT_ID};
 use habilis_network_iroh_nostr_address_lookup::DataPool;
 use habilis_network_protocol::nostr::NostrKeys;
 use iroh::EndpointId;
@@ -39,6 +39,8 @@ pub struct NostrTransport {
     receive: Arc<OnceLock<task::AbortOnDropHandle<()>>>,
     // the engine writes the members that it knows, and the receive task reads them
     known: Arc<Mutex<HashSet<EndpointId>>>,
+    // the plan that the transport was activated with: the tag of its endpoint and the relays
+    plan: Arc<OnceLock<([u8; 32], Vec<Url>)>>,
 }
 
 /// The core budget of the transport, in bytes of frame each second: below what the data lane lets
@@ -65,6 +67,8 @@ impl NostrTransport {
             receive: Arc::new(OnceLock::new()),
             // the clones of the transport share the members
             known: Arc::new(Mutex::new(HashSet::new())),
+            // the clones of the transport share the plan
+            plan: Arc::new(OnceLock::new()),
         }
     }
 
@@ -94,6 +98,7 @@ impl NostrTransport {
         let mut opened = false;
         self.receive.get_or_init(|| {
             opened = true;
+            let _ = self.plan.set((keys.self_tag(&app_id), ranking.clone()));
             let tag = keys.self_tag(&app_id);
             let (pool, mut datagrams) = DataPool::open(ranking, *app_id.as_bytes(), tag);
             // the handle keeps the sink to send frames, and the sink owns the pool
@@ -103,17 +108,32 @@ impl NostrTransport {
             let known = Arc::clone(&self.known);
             task::AbortOnDropHandle::new(task::spawn(async move {
                 while let Some(datagram) = datagrams.recv().await {
+                    // Only a frame that the core queues for this endpoint opens replies: a
+                    // malformed batch, or one for another member, shows no path.
+                    let delivery = receiving.deliver(&datagram.bytes);
+                    if delivery != Delivery::Queued {
+                        continue;
+                    }
                     if let Ok(sender) = EndpointId::from_bytes(&datagram.from) {
                         let member = known.lock().expect("the known members").contains(&sender);
                         if member {
                             receiving.allow_reply(sender);
                         }
                     }
-                    let _ = receiving.deliver(&datagram.bytes);
                 }
             }))
         });
         opened
+    }
+
+    /// Whether an active transport serves the plan `keys` and `ranking`: `None` when it is not
+    /// active, `Some(true)` for the same plan, and `Some(false)` for other keys or another relay
+    /// list. A caller that hands one transport to a mesh refuses the second answer: the transport
+    /// serves one mesh for its life.
+    #[must_use]
+    pub fn serves(&self, keys: &NostrKeys, ranking: &[Url]) -> Option<bool> {
+        let (tag, relays) = self.plan.get()?;
+        Some(*tag == keys.self_tag(&self.handle.app_id()) && relays.as_slice() == ranking)
     }
 
     /// [`new`](Self::new) and [`activate`](Self::activate) in one call, for a caller that knows
@@ -134,7 +154,9 @@ impl NostrTransport {
 
 #[cfg(test)]
 mod tests {
-    use super::NOSTR_BUDGET_BYTES_PER_SEC;
+    use super::{NOSTR_BUDGET_BYTES_PER_SEC, NostrTransport};
+    use habilis_network_protocol::TopicId;
+    use habilis_network_protocol::nostr::NostrKeys;
 
     /// A flow at the budget must not exceed what the data lane lets out: it paces one mebibyte each second
     /// of event text, and a frame is about 73 % of its event text (base64 and the batch header).
@@ -146,5 +168,40 @@ mod tests {
             NOSTR_BUDGET_BYTES_PER_SEC <= lane_raw_rate,
             "the budget {NOSTR_BUDGET_BYTES_PER_SEC} B/s is above the lane's {lane_raw_rate} B/s"
         );
+    }
+
+    /// A transport that serves one mesh must not be activated for another: an injected transport
+    /// that is active with other keys or another relay list is a conflict. The same plan is fine.
+    #[test]
+    fn an_active_transport_tells_whether_it_serves_a_plan() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let id = iroh::SecretKey::from_bytes(&[5; 32]).public();
+            let keys = NostrKeys::derive(&TopicId::from_bytes([1u8; 32]));
+            let other_keys = NostrKeys::derive(&TopicId::from_bytes([2u8; 32]));
+            let relays: Vec<url::Url> = vec!["ws://127.0.0.1:9".parse().expect("a relay URL")];
+            let other_relays: Vec<url::Url> =
+                vec!["ws://127.0.0.1:10".parse().expect("a relay URL")];
+            let transport = NostrTransport::new(id);
+            assert_eq!(transport.serves(&keys, &relays), None, "not active yet");
+            assert!(
+                transport.activate(keys.clone(), relays.clone()),
+                "the first activation opens the lane"
+            );
+            assert_eq!(
+                transport.serves(&keys, &relays),
+                Some(true),
+                "the same plan"
+            );
+            assert_eq!(
+                transport.serves(&other_keys, &relays),
+                Some(false),
+                "other keys"
+            );
+            assert_eq!(
+                transport.serves(&keys, &other_relays),
+                Some(false),
+                "another list"
+            );
+        });
     }
 }

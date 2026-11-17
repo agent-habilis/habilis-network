@@ -230,6 +230,20 @@ impl Inner {
                 }
             }
         }
+        // A wanted peer with no slot (the dial that failed left no connection) has no reading, and
+        // the next dial must be able to send: the want alone allows it, unless a session carries it.
+        for peer in &self.nostr_wanted {
+            if self.slots.contains_key(peer) {
+                continue;
+            }
+            let session_hub = self.hub.as_ref();
+            let carried = session_hub.is_some_and(|hub| hub.has_session(peer));
+            match sampler::nostr_name(&[], self.relay_carries, true, carried) {
+                NostrName::Allow => nostr.allow(*peer, true),
+                NostrName::Stop => nostr.allow(*peer, false),
+                NostrName::Forget => nostr.forget_destination(*peer),
+            }
+        }
         self.nostr_wanted.extend(wanted_now);
         for peer in unwanted {
             self.nostr_wanted.remove(&peer);

@@ -297,8 +297,12 @@ impl PayloadPath {
     pub(crate) fn carries(self, selected: Option<&iroh::TransportAddr>) -> bool {
         match selected {
             None | Some(iroh::TransportAddr::Relay(_)) => self.relay_allowed(),
-            Some(address) if is_nostr(address) => self.nostr_allowed(),
-            Some(_) => true,
+            Some(address @ iroh::TransportAddr::Custom(_)) if is_nostr(address) => {
+                self.nostr_allowed()
+            }
+            // Direct UDP and any other custom transport are peer to peer. An address kind that
+            // iroh has not today is taken for peer to peer as far as we know.
+            Some(iroh::TransportAddr::Ip(_) | iroh::TransportAddr::Custom(_) | _) => true,
         }
     }
 
@@ -387,7 +391,9 @@ pub async fn refuse_unless_direct(
     deadline: Duration,
     close_code: u32,
 ) -> bool {
-    let outcome = if relay.relay_allowed() {
+    // Only a mesh that lists both the relay and Nostr takes every path: for any other policy the
+    // selected path is read, so a gossip accept gate that dropped Nostr (`without_nostr`) refuses it.
+    let outcome = if relay == PayloadPath::RelayOrNostr {
         PathWait::Selected
     } else {
         wait_selected_outcome(connection, deadline, |connection| {
@@ -604,6 +610,28 @@ mod tests {
                     )
                     .await,
                     "the wait times out on a Nostr path that the mesh does not list"
+                );
+                // The accept gate applies the policy to the selected path too: a mesh that lists
+                // the relay and not Nostr refuses a Nostr path, and one that lists Nostr takes it.
+                assert!(
+                    super::refuse_unless_direct(
+                        &connection,
+                        PayloadPath::DirectOrNostr,
+                        Duration::from_millis(300),
+                        0,
+                    )
+                    .await,
+                    "a mesh that lists Nostr admits a Nostr path"
+                );
+                assert!(
+                    !super::refuse_unless_direct(
+                        &connection,
+                        PayloadPath::RelayAllowed,
+                        Duration::from_millis(300),
+                        0,
+                    )
+                    .await,
+                    "a relay-allowed mesh without Nostr refuses a Nostr path"
                 );
                 connection.close(0u32.into(), b"done");
                 router.shutdown().await.expect("shutdown");

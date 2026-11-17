@@ -27,9 +27,10 @@ mod rung;
 pub use protocol_set::ProtocolSet;
 
 pub use rung::{
-    GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, NOSTR_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID,
-    best_of, blocked, climb, custom_rung, datagrams, expected_rung, expected_rung_for, ip_remote,
-    relay_carries, remote_id, remote_id_of, rung_of, set_relay_carries, split_segments,
+    GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, NOSTR_TRANSPORT_ID, RelayPolicy, Rung,
+    WEBRTC_TRANSPORT_ID, best_of, blocked, climb, custom_rung, datagrams, expected_rung,
+    expected_rung_for, ip_remote, register_relay_policy, relay_carries, remote_id, remote_id_of,
+    rung_of, split_segments,
 };
 #[cfg(feature = "test-hooks")]
 pub use rung::{block_ip_paths, block_ip_to, block_rung, block_rung_to, is_blocked, is_blocked_to};
@@ -40,8 +41,8 @@ pub use rung::{is_blocked, is_blocked_to};
 mod tests {
     use super::{
         GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, NOSTR_TRANSPORT_ID, Rung, WEBRTC_TRANSPORT_ID,
-        custom_rung, expected_rung, expected_rung_for, relay_carries, remote_id_of,
-        set_relay_carries, split_segments,
+        custom_rung, expected_rung, expected_rung_for, register_relay_policy, relay_carries,
+        remote_id_of, split_segments,
     };
     #[cfg(feature = "test-hooks")]
     use super::{block_ip_to, block_rung, block_rung_to, is_blocked, is_blocked_to};
@@ -146,9 +147,11 @@ mod tests {
         );
     }
 
-    /// The mesh policy reaches the selector of an endpoint through its id.
+    /// The mesh policy reaches the selector of an endpoint through its id. Two meshes may share one
+    /// endpoint: the ladder is the lookup-only one while any of them has a relay that carries no
+    /// payload, and the plain one again when the last of them ends.
     #[test]
-    fn the_relay_policy_of_an_endpoint_is_kept_by_its_id() {
+    fn the_relay_policy_of_an_endpoint_counts_its_meshes() {
         let _guard = ::habilis_network_test_tracing::init();
         let local = iroh::SecretKey::from_bytes(&[61; 32]).public();
         let other = iroh::SecretKey::from_bytes(&[62; 32]).public();
@@ -156,11 +159,21 @@ mod tests {
             relay_carries(local),
             "an endpoint with no policy keeps the plain ladder"
         );
-        set_relay_carries(local, false);
+        let lookup_only = register_relay_policy(local, false);
         assert!(!relay_carries(local), "a lookup-only relay");
         assert!(relay_carries(other), "another endpoint is not affected");
-        set_relay_carries(local, true);
-        assert!(relay_carries(local), "the policy can be lifted");
+        let carrying = register_relay_policy(local, true);
+        assert!(
+            !relay_carries(local),
+            "a second mesh whose relay carries does not undo the first"
+        );
+        drop(carrying);
+        assert!(!relay_carries(local), "the lookup-only mesh is still there");
+        drop(lookup_only);
+        assert!(
+            relay_carries(local),
+            "the last mesh ended: the plain ladder"
+        );
     }
 
     /// One function names the rung of a custom transport id, for every selector.

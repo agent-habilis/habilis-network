@@ -394,14 +394,19 @@ async fn build_member_endpoint(
 
 /// Open the data lane of the Nostr transport of the member endpoint, once the mesh knows its topic.
 /// A mesh with no custom relay list has no plan, and its transport stays inactive.
+///
+/// # Errors
+///
+/// An injected transport is active already for another mesh.
 fn activate_nostr(
     build: &SetupBuild<'_>,
     admission: &transport::SignalAdmission,
     topic: &proto::TopicId,
-) {
+) -> Result<()> {
     if let Some(plan) = nostr_plan(build, topic) {
-        admission.activate_nostr(plan);
+        admission.activate_nostr(plan)?;
     }
+    Ok(())
 }
 
 /// The Nostr plan of this mesh: the keys of its topic and the custom relay list, or `None` when the
@@ -1859,7 +1864,7 @@ async fn setup_create(
     // Keeping the conversion here is what lets habilis-network-protocol build
     // without iroh-gossip at all (see habilis_network_protocol::topic).
     let topic_id = proto::TopicId::from_bytes(mesh.topic_id().to_bytes());
-    activate_nostr(build, &admission, &topic_id);
+    activate_nostr(build, &admission, &topic_id)?;
     let lan_contacts = lookup::lan_contacts(&endpoint, mdns, &topic_id).await?;
     lifecycle::log_ready(
         topic_id,
@@ -1942,7 +1947,7 @@ async fn setup_join(
     let (endpoint, multihop, webrtc, admission, underlay_webrtc, mdns) =
         build_member_endpoint(build, injected).await?;
 
-    activate_nostr(build, &admission, &topic_id);
+    activate_nostr(build, &admission, &topic_id)?;
     let lan_contacts = lookup::lan_contacts(&endpoint, mdns, &topic_id).await?;
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
     let (gossip, router, webrtc_admission, address_book, webrtc_ice) =

@@ -1,5 +1,5 @@
-#[cfg(feature = "test-hooks")]
 use std::collections::HashMap;
+#[cfg(feature = "test-hooks")]
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -224,50 +224,85 @@ pub fn expected_rung_for(
         .find(|&rung| allowed(rung) && available(rung))
 }
 
-/// The endpoints whose mesh uses the relay for lookup alone. The selector of an endpoint reads its
-/// ladder from here, because it holds the id of its endpoint and not its mesh policy.
-static LOOKUP_ONLY_RELAY: sync::Mutex<Option<HashSet<iroh::EndpointId>>> = sync::Mutex::new(None);
+/// How many meshes with a lookup-only relay each endpoint carries. The selector of an endpoint
+/// reads its ladder from here, because it holds the id of its endpoint and not its mesh policy.
+static LOOKUP_ONLY_MESHES: sync::Mutex<Option<HashMap<iroh::EndpointId, usize>>> =
+    sync::Mutex::new(None);
 
-/// Tell the selectors of the endpoint `local` whether its mesh lets the relay carry payload.
-/// Every endpoint carries by default. A selector reads it at each selection, so the call may come
-/// after the endpoint is bound.
-///
-/// # Panics
-///
-/// Panics if another thread panicked while it held the table.
-///
-/// # Examples
-///
-/// A lookup-only relay ranks below Nostr for that endpoint.
-///
-/// ```
-/// use habilis_network_iroh_transport_util::{relay_carries, set_relay_carries};
-///
-/// let local = iroh::SecretKey::from_bytes(&[1u8; 32]).public();
-/// set_relay_carries(local, false);
-/// assert!(!relay_carries(local));
-/// # set_relay_carries(local, true);
-/// ```
-pub fn set_relay_carries(
+/// A mesh of an endpoint that told the selectors whether its relay carries payload. Dropping it
+/// ends the mesh: see [`register_relay_policy`].
+#[derive(Debug)]
+#[must_use = "the policy ends when the guard is dropped"]
+pub struct RelayPolicy {
     local: iroh::EndpointId,
-    // false when the mesh uses the relay for lookup alone
-    carries: bool,
-) {
-    let mut table = LOOKUP_ONLY_RELAY.lock().expect("relay policy table");
-    let table = table.get_or_insert_with(HashSet::new);
-    if carries {
-        table.remove(&local);
-    } else {
-        table.insert(local);
+    lookup_only: bool,
+}
+
+impl Drop for RelayPolicy {
+    fn drop(&mut self) {
+        if !self.lookup_only {
+            return;
+        }
+        let mut table = LOOKUP_ONLY_MESHES.lock().expect("relay policy table");
+        let Some(table) = table.as_mut() else {
+            return;
+        };
+        if let Some(count) = table.get_mut(&self.local) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                table.remove(&self.local);
+            }
+        }
     }
 }
 
-/// Whether the mesh of the endpoint `local` lets the relay carry payload: see
-/// [`set_relay_carries`].
+/// Tell the selectors of the endpoint `local` that a mesh runs on it, and whether the relay of that
+/// mesh carries payload. Two meshes may share one endpoint (an injected one): the ladder is the
+/// lookup-only one (Nostr above the relay) while any mesh on the endpoint has a relay that carries
+/// no payload, and each mesh keeps its own payload gate. The policy ends when the guard is dropped.
+/// A selector reads it at each selection, so the call may come after the endpoint is bound.
 ///
 /// # Panics
 ///
-/// Panics if another thread panicked while it held the table.
+/// Panics if another thread panicked while it held the policy table.
+///
+/// # Examples
+///
+/// A lookup-only relay ranks below Nostr for that endpoint, until its mesh ends.
+///
+/// ```
+/// use habilis_network_iroh_transport_util::{register_relay_policy, relay_carries};
+///
+/// let local = iroh::SecretKey::from_bytes(&[1u8; 32]).public();
+/// let mesh = register_relay_policy(local, false);
+/// assert!(!relay_carries(local));
+/// drop(mesh);
+/// assert!(relay_carries(local));
+/// ```
+pub fn register_relay_policy(
+    local: iroh::EndpointId,
+    // false when the mesh uses the relay for lookup alone
+    carries: bool,
+) -> RelayPolicy {
+    if !carries {
+        let mut table = LOOKUP_ONLY_MESHES.lock().expect("relay policy table");
+        *table
+            .get_or_insert_with(HashMap::new)
+            .entry(local)
+            .or_insert(0) += 1;
+    }
+    RelayPolicy {
+        local,
+        lookup_only: !carries,
+    }
+}
+
+/// Whether the ladder of the endpoint `local` keeps the relay above Nostr: no mesh on it uses the
+/// relay for lookup alone. See [`register_relay_policy`].
+///
+/// # Panics
+///
+/// Panics if another thread panicked while it held the policy table.
 ///
 /// # Examples
 ///
@@ -281,8 +316,10 @@ pub fn set_relay_carries(
 /// ```
 #[must_use]
 pub fn relay_carries(local: iroh::EndpointId) -> bool {
-    let table = LOOKUP_ONLY_RELAY.lock().expect("relay policy table");
-    !table.as_ref().is_some_and(|table| table.contains(&local))
+    let table = LOOKUP_ONLY_MESHES.lock().expect("relay policy table");
+    !table
+        .as_ref()
+        .is_some_and(|table| table.contains_key(&local))
 }
 
 /// The best path of the rung that [`expected_rung`] picks among the rungs that

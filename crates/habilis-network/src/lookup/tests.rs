@@ -750,12 +750,20 @@ fn only_a_member_of_a_mesh_that_lists_nostr_has_the_transport_and_it_activates_o
             "the member of a mesh that lists Nostr has it"
         );
         assert!(
-            member.activate_nostr(plan()),
+            member.activate_nostr(plan()).expect("a fresh transport"),
             "the first activation opens the lane"
         );
         assert!(
-            !member.activate_nostr(plan()),
-            "a second activation does nothing"
+            !member.activate_nostr(plan()).expect("the same plan"),
+            "a second activation with the same plan does nothing"
+        );
+        let other = NostrKeys::derive(&TopicId::from_bytes([7u8; 32]));
+        let other_plan =
+            super::NostrPlan::for_mesh(&other, &NostrChoice::Custom(vec![relay.url()]))
+                .expect("a custom list has a plan");
+        assert!(
+            member.activate_nostr(other_plan).is_err(),
+            "a transport that is active for another mesh is refused"
         );
         let without = build(false).await;
         assert!(
@@ -763,7 +771,9 @@ fn only_a_member_of_a_mesh_that_lists_nostr_has_the_transport_and_it_activates_o
             "a mesh that does not list Nostr has none"
         );
         assert!(
-            !without.activate_nostr(plan()),
+            !without
+                .activate_nostr(plan())
+                .expect("nothing to conflict with"),
             "a table with no Nostr transport has nothing to activate"
         );
         assert!(

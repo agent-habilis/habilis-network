@@ -613,10 +613,22 @@ impl SignalAdmission {
     /// Open the data lane of the Nostr transport that [`set_nostr`](Self::set_nostr) set, now that
     /// the mesh knows its topic. Returns whether it opened the lane: `false` for a table with no
     /// Nostr transport, and for one that is active already. Call it inside a runtime.
-    pub(crate) fn activate_nostr(&self, plan: NostrPlan) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// The transport is active already for another mesh: other keys or another relay list. An
+    /// injected transport serves one mesh for its life.
+    pub(crate) fn activate_nostr(&self, plan: NostrPlan) -> anyhow::Result<bool> {
         let transport = self.lock().nostr.clone();
         let (keys, ranking) = plan.into_parts();
-        transport.is_some_and(|transport| transport.activate(keys, ranking))
+        let Some(transport) = transport else {
+            return Ok(false);
+        };
+        anyhow::ensure!(
+            transport.serves(&keys, &ranking) != Some(false),
+            "the Nostr transport is active for another mesh: it serves one mesh for its life"
+        );
+        Ok(transport.activate(keys, ranking))
     }
 
     /// Whether the mesh lets the relay carry payload: a relay path serves a pair only then, and

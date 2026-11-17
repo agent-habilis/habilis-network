@@ -2313,6 +2313,25 @@ mod tests {
         );
     }
 
+    /// The members that the Nostr transport answers are the roster, not the bounded list of
+    /// sighted endpoints: the cap of that list evicts a live member, and the member would then lose
+    /// its replies. Dropping an endpoint forgets its Nostr proof too.
+    #[test]
+    fn the_nostr_members_are_the_roster_and_a_dropped_endpoint_loses_its_proof() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let bob = endpoint_id(1);
+        let mut node = fresh_state();
+        node.names.insert(test_key("bob"), nick("bob"));
+        node.bind_peer_endpoint(test_key("bob"), nick("bob"), iroh::EndpointAddr::new(bob));
+        assert!(
+            node.nostr_member_ids().contains(&bob),
+            "a member of the roster is known to the transport"
+        );
+        node.note_proven_over_nostr(bob);
+        node.forget_peer_endpoint("bob");
+        assert!(!node.rides_nostr(bob), "the proof goes with the endpoint");
+    }
+
     /// A pair that a probe proved over Nostr is remembered: when the probe connection is gone the
     /// selected kind reads as none, and a graft would dial a gossip link that the hook closes at
     /// once. A report of another path takes the proof back.

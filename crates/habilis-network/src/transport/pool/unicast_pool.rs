@@ -633,6 +633,11 @@ impl UnicastPool {
         {
             bail!("{RELAY_REFUSED}");
         }
+        // The policy applies to the selected path whatever the relay allows: a mesh that lists the
+        // relay and not Nostr refuses a payload on a Nostr path.
+        if !payload_allowed_on(&connection, self.payload_path()) {
+            bail!("{RELAY_REFUSED}");
+        }
         if let Err(error) = self.send_marked(eid, &connection, &bytes).await {
             self.evict_if_same(eid, &connection).await;
             return Err(error);

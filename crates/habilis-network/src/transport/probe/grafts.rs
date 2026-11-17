@@ -199,9 +199,7 @@ pub(crate) async fn retry_direct(
     state.note_link_count(state.linked_endpoints.len(), context.max_peers, now);
     state.settle_graft_backoff(now);
     // The Nostr transport opens replies only to the members that this node knows.
-    state
-        .webrtc_admission
-        .set_known_peers(state.known_endpoints.iter().copied());
+    state.feed_nostr_members(None);
     if state.relay_transport.relay_allowed() {
         regraft::fill_active_view(state, context).await;
         return;
