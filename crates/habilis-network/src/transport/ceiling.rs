@@ -92,27 +92,41 @@ enum Quic {
     Extra,
 }
 
+/// The `WebRTC` session of a peer.
+#[derive(Debug, Clone, Default, Copy, PartialEq, Eq)]
+enum Session {
+    #[default]
+    Absent,
+    /// A direct unit of the ceiling.
+    Unit,
+    /// No direct unit: no unit was free and no peer could go. It counts toward `2C` only.
+    Extra,
+}
+
 #[derive(Debug, Clone, Default, Copy)]
 struct Entry {
     opened_at: Option<Instant>,
     last_use: Option<Instant>,
     quic: Quic,
-    session: bool,
-    /// The session took no unit: no unit was free and no peer could go. It counts toward `2C` only.
-    session_extra: bool,
+    session: Session,
     neighbor: bool,
+    /// The peer is the rendezvous of the mesh: whatever it holds takes no unit.
+    rendezvous: bool,
     busy: u32,
 }
 
 impl Entry {
-    /// Whether the peer is one direct unit of the ceiling.
+    /// Whether the peer is one direct unit of the ceiling. The rendezvous never is.
     fn counted(&self) -> bool {
-        self.quic == Quic::Unit || (self.session && !self.session_extra) || self.neighbor
+        !self.rendezvous
+            && (self.quic == Quic::Unit || self.session == Session::Unit || self.neighbor)
     }
 
     /// Whether the peer holds a connection or a session that took no unit.
     fn extra(&self) -> bool {
-        self.quic == Quic::Extra || self.session_extra
+        (self.rendezvous && self.held())
+            || self.quic == Quic::Extra
+            || self.session == Session::Extra
     }
 
     /// The extra connection and the extra session of the peer take a unit.
@@ -120,7 +134,9 @@ impl Entry {
         if self.quic == Quic::Extra {
             self.quic = Quic::Unit;
         }
-        self.session_extra = false;
+        if self.session == Session::Extra {
+            self.session = Session::Unit;
+        }
     }
 
     /// The connection and the session of the peer give up their unit: they count toward `2C` only.
@@ -128,12 +144,14 @@ impl Entry {
         if self.quic == Quic::Unit {
             self.quic = Quic::Extra;
         }
-        self.session_extra = self.session;
+        if self.session == Session::Unit {
+            self.session = Session::Extra;
+        }
     }
 
     /// Whether the peer holds a connection of any kind, which counts toward twice the ceiling.
     fn held(&self) -> bool {
-        self.quic != Quic::Absent || self.session || self.neighbor
+        self.quic != Quic::Absent || self.session != Session::Absent || self.neighbor
     }
 }
 
@@ -183,6 +201,9 @@ pub(crate) struct Ceiling {
     pinned: HashSet<EndpointId>,
     /// The peers whose direct dial holds a unit that no connection holds yet.
     reserved: HashSet<EndpointId>,
+    /// The rendezvous of the mesh. A member at its ceiling may still return to it and hold it: the
+    /// link takes no unit, and no admission evicts it.
+    rendezvous: Option<EndpointId>,
     /// The pinned peers whose dial has not opened its connection yet. An inbound connection of such
     /// a peer that closes does not take the pin, because the dial still needs it.
     awaiting: HashSet<EndpointId>,
@@ -198,6 +219,7 @@ impl Ceiling {
             neighbors: HashSet::new(),
             pinned: HashSet::new(),
             reserved: HashSet::new(),
+            rendezvous: None,
             awaiting: HashSet::new(),
             last_batch: None,
         }
@@ -214,6 +236,20 @@ impl Ceiling {
     /// Whether the table refuses a newcomer at the cap, and evicts nobody.
     pub(crate) fn refuses(&self) -> bool {
         !self.evicts
+    }
+
+    /// `peer` is the rendezvous of the mesh: it takes no unit, whatever it holds, and no admission
+    /// evicts it.
+    pub(crate) fn set_rendezvous(&mut self, peer: EndpointId) {
+        if let Some(entry) = self.entries.get_mut(&peer) {
+            entry.rendezvous = true;
+        }
+        if let Some(previous) = self.rendezvous.replace(peer).filter(|old| *old != peer)
+            && let Some(entry) = self.entries.get_mut(&previous)
+        {
+            entry.rendezvous = false;
+        }
+        self.promote_extras();
     }
 
     /// Whether `peer` already counts against the ceiling.
@@ -247,7 +283,7 @@ impl Ceiling {
     pub(crate) fn session_peers(&self) -> Vec<EndpointId> {
         self.entries
             .iter()
-            .filter(|(_, entry)| entry.session)
+            .filter(|(_, entry)| entry.session != Session::Absent)
             .map(|(peer, _)| *peer)
             .collect()
     }
@@ -272,8 +308,10 @@ impl Ceiling {
 
     fn entry(&mut self, peer: EndpointId, now: Instant) -> &mut Entry {
         let neighbor = self.neighbors.contains(&peer);
+        let rendezvous = self.rendezvous == Some(peer);
         let entry = self.entries.entry(peer).or_insert_with(|| Entry {
             neighbor,
+            rendezvous,
             ..Entry::default()
         });
         entry.opened_at.get_or_insert(now);
@@ -291,7 +329,11 @@ impl Ceiling {
 
     /// A session to `peer` is open.
     pub(crate) fn register_session(&mut self, peer: EndpointId, now: Instant) -> Admission {
-        self.register_with(peer, now, |entry| entry.session = true)
+        self.register_with(peer, now, |entry| {
+            if entry.session == Session::Absent {
+                entry.session = Session::Unit;
+            }
+        })
     }
 
     /// What a new dial to `peer` does to the ledger, decided under one lock so that parallel dials
@@ -303,7 +345,7 @@ impl Ceiling {
         self.pinned.remove(&peer);
         self.awaiting.remove(&peer);
         self.reserved.remove(&peer);
-        if self.holds(peer) || !self.evicts {
+        if self.holds(peer) || !self.evicts || self.rendezvous == Some(peer) {
             return DialPlan::Direct;
         }
         if self.units() + self.reserved.len() < self.cap {
@@ -323,7 +365,10 @@ impl Ceiling {
     /// a send reaches the peer through multihop when it needs to, and no connection is evicted for
     /// a dial that nobody waits on.
     pub(crate) fn has_room(&self, peer: EndpointId) -> bool {
-        self.holds(peer) || !self.evicts || self.units() + self.reserved.len() < self.cap
+        self.holds(peer)
+            || !self.evicts
+            || self.rendezvous == Some(peer)
+            || self.units() + self.reserved.len() < self.cap
     }
 
     /// [`Self::has_room`], and a free unit is reserved for the dial, under the same lock, so that
@@ -333,7 +378,7 @@ impl Ceiling {
         if !self.has_room(peer) {
             return false;
         }
-        if !self.holds(peer) && self.evicts {
+        if !self.holds(peer) && self.evicts && self.rendezvous != Some(peer) {
             self.reserved.insert(peer);
         }
         true
@@ -481,8 +526,7 @@ impl Ceiling {
 
     pub(crate) fn unregister_session(&mut self, peer: EndpointId) {
         self.unregister(peer, |entry| {
-            entry.session = false;
-            entry.session_extra = false;
+            entry.session = Session::Absent;
         });
     }
 
@@ -505,7 +549,9 @@ impl Ceiling {
         while self.units() + self.reserved.len() < self.cap {
             let pinned = &self.pinned;
             let entries = self.entries.iter();
-            let extras = entries.filter(|(peer, entry)| entry.extra() && !pinned.contains(*peer));
+            let extras = entries.filter(|(peer, entry)| {
+                entry.extra() && !entry.rendezvous && !pinned.contains(*peer)
+            });
             let hottest: Option<(&EndpointId, &Entry)> =
                 extras.max_by_key(|(_, entry)| entry.last_use);
             let Some((peer, _)) = hottest else {
@@ -551,8 +597,9 @@ impl Ceiling {
         let mut newly_counted = Vec::new();
         for peer in neighbors {
             let was_counted = self.entries.get(peer).is_some_and(Entry::counted);
-            self.entry(*peer, now).neighbor = true;
-            if !was_counted {
+            let entry = self.entry(*peer, now);
+            entry.neighbor = true;
+            if !was_counted && entry.counted() {
                 newly_counted.push(*peer);
             }
         }
@@ -1291,6 +1338,85 @@ mod tests {
         let mut expected: Vec<EndpointId> = neighbors.into_iter().collect();
         expected.sort_unstable();
         assert_eq!(named, expected, "the new neighbors are the newcomers");
+    }
+
+    #[test]
+    fn the_rendezvous_takes_no_unit_at_the_ceiling_and_evicts_nobody() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        let rendezvous = testing::endpoint_id(9);
+        ceiling.set_rendezvous(rendezvous);
+        ceiling.set_neighbors(
+            &HashSet::from([testing::endpoint_id(1), testing::endpoint_id(2)]),
+            start,
+        );
+        assert!(
+            ceiling.has_room(rendezvous) && !ceiling.has_room(testing::endpoint_id(3)),
+            "a full ceiling has room for the rendezvous and for nobody else"
+        );
+        assert!(
+            ceiling.reserve_proactive(rendezvous),
+            "a visit to the rendezvous is allowed at the ceiling"
+        );
+        assert_eq!(
+            ceiling.plan_dial(rendezvous, false),
+            DialPlan::Direct,
+            "a dial to the rendezvous plans no eviction and reserves no unit"
+        );
+        let admission = ceiling.register_session(rendezvous, at(start, 100));
+        assert!(
+            admission.evict.is_empty(),
+            "the rendezvous session evicts nobody"
+        );
+        assert_eq!(ceiling.units(), 2, "the rendezvous takes no unit");
+        assert!(
+            ceiling.is_extra(rendezvous),
+            "the rendezvous session is an extra"
+        );
+        assert_eq!(
+            ceiling.connections(),
+            3,
+            "the rendezvous counts toward twice the ceiling"
+        );
+    }
+
+    #[test]
+    fn the_rendezvous_is_never_the_victim_of_an_admission() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        let (rendezvous, cached) = (testing::endpoint_id(9), testing::endpoint_id(2));
+        ceiling.set_rendezvous(rendezvous);
+        ceiling.register_session(rendezvous, start);
+        ceiling.set_neighbors(&HashSet::from([testing::endpoint_id(1)]), start);
+        ceiling.register_quic(cached, at(start, 10));
+        let admission = ceiling.set_neighbors(
+            &HashSet::from([testing::endpoint_id(1), testing::endpoint_id(3)]),
+            at(start, 200),
+        );
+        assert_eq!(
+            admission.evict,
+            vec![cached],
+            "the cached peer goes, and the rendezvous stays: it holds no unit to take"
+        );
+        assert!(
+            ceiling.is_extra(rendezvous),
+            "the rendezvous session is still held"
+        );
+    }
+
+    #[test]
+    fn a_rendezvous_that_became_known_after_its_entry_holds_no_unit() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(1);
+        let rendezvous = testing::endpoint_id(9);
+        ceiling.register_quic(rendezvous, start);
+        assert_eq!(ceiling.units(), 1, "before it is known it is a unit");
+        ceiling.set_rendezvous(rendezvous);
+        assert_eq!(ceiling.units(), 0, "once known it takes no unit");
+        assert!(ceiling.is_extra(rendezvous), "it is an extra");
     }
 
     #[test]

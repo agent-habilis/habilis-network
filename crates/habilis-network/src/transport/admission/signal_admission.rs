@@ -524,6 +524,13 @@ impl SignalAdmission {
         self.lock().ceiling.pinned_connected()
     }
 
+    /// `peer` is the rendezvous of the mesh: a member at its ceiling may still return to it and hold
+    /// it. The link takes no unit, no admission evicts it, and a visit is never refused for the
+    /// ceiling (see [`ceiling::Ceiling::set_rendezvous`]).
+    pub(crate) fn set_rendezvous(&self, peer: EndpointId) {
+        self.lock().ceiling.set_rendezvous(peer);
+    }
+
     /// The endpoint that this table serves. The pin of a peer reaches its path selector.
     pub(crate) fn set_local(&self, local: EndpointId) {
         self.lock().local = Some(local);

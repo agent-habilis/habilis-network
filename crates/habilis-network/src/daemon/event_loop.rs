@@ -1593,6 +1593,8 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
     } = loop_state;
 
     log_daemon_start(&author);
+    // The rendezvous takes no unit of the ceiling: a member at its ceiling may still return to it.
+    state.webrtc_admission.set_rendezvous(rendezvous_params.id);
     let slot_freed = state.webrtc_admission.slot_freed();
     let underlay_slot_freed = underlay_slot_freed_of(&state);
     let route_wake = route_wake_of(&state);
