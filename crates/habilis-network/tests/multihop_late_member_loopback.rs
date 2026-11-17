@@ -16,7 +16,6 @@
 //!   multihop path.
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
@@ -41,8 +40,6 @@ const STUCK_TEXT: &str =
 const NEIGHBOR_CAUSE: &str = "cause=\"a gossip neighbor\"";
 /// The line that an eviction at the ceiling logs, on the transport target.
 const EVICTION_LINE: &str = "evicting a direct connection at the ceiling";
-/// The WARN of a forwarder that gets a cell over the relay: a cut pair still has its relay path.
-const RELAY_CELL_TEXT: &str = "multihop forwarder refusing cells";
 
 struct Member {
     membership: Membership,
@@ -283,50 +280,51 @@ async fn dials_made(alice: &Member) -> Vec<(&'static str, u64)> {
     dials
 }
 
-/// The members that `now` shows more dials to than `at_the_cap` did, and that alice never held as a
-/// gossip neighbor or as a pinned peer. A dial to a neighbor is a link of the view, and a dial to a
-/// pinned peer is the dial of a send, on a multihop route (the engine's own unicast frames are
-/// sends too, and one comes about 10 s after a join). Any other dial is a direct dial for a member
-/// that no send asked for.
+/// The members that `now` shows more dials to than `at_the_cap` did, and that alice holds now
+/// as a `loose` connection: neither a gossip neighbor nor a pinned peer. A dial to a neighbor is a
+/// link of the view, and a dial to a pinned peer is the dial of a send on a multihop route (the
+/// engine's own unicast frames are sends too, and one comes about 10 s after a join). A dial that
+/// ends in a connection of neither kind is a direct dial for a member that no send asked for. A dial
+/// that has not connected yet, or that failed, holds nothing and is not counted.
 fn dialed_strangers<'a>(
     now: &[(&'a str, u64)],
     at_the_cap: &[(&str, u64)],
-    held_seen: &BTreeSet<String>,
+    loose: &[&str],
 ) -> Vec<&'a str> {
     let pairs = now.iter().zip(at_the_cap);
     let grown = pairs.filter(|(after, before)| after.1 > before.1);
     let nicks = grown.map(|(after, _)| after.0);
-    nicks.filter(|nick| !held_seen.contains(*nick)).collect()
+    nicks.filter(|nick| loose.contains(nick)).collect()
 }
 
-/// The dials of alice now, and the members among them that she never held as a neighbor or as a
-/// pinned peer. The flag of a dial that has just begun comes with its connection, so a stranger gets
-/// 5 s, and each read adds the peers that she holds to `held_seen`.
+/// The dials of alice now, and the members among them that she holds as a loose connection. A
+/// pinned dial under load can take seconds to connect and show its flag, and a gossip link shows
+/// after its connection, so a member must stay loose for 10 s to count.
 async fn dialed_without_a_hold(
     alice: &Member,
     at_the_cap: &[(&str, u64)],
-    held_seen: &mut BTreeSet<String>,
 ) -> (Vec<(&'static str, u64)>, Vec<&'static str>) {
     let started = Instant::now();
     loop {
         let dials = dials_made(alice).await;
-        let strangers = dialed_strangers(&dials, at_the_cap, held_seen);
-        if strangers.is_empty() || started.elapsed() >= Duration::from_secs(5) {
+        let snapshot = alice.snapshot().await;
+        let loose = loose_nicks(&snapshot);
+        let strangers = dialed_strangers(&dials, at_the_cap, &loose);
+        if strangers.is_empty() || started.elapsed() >= Duration::from_secs(10) {
             return (dials, strangers);
         }
-        let snapshot = alice.snapshot().await;
-        held_seen.extend(held_nicks(&snapshot).iter().map(|nick| (*nick).to_owned()));
         time::sleep(Duration::from_millis(250)).await;
     }
 }
 
-/// The nicknames in `snapshot` that alice holds as a gossip neighbor or as a pinned peer.
-fn held_nicks(snapshot: &TopologySnapshot) -> Vec<&str> {
-    let held = snapshot
+/// The nicknames in `snapshot` that alice holds as a connection that is neither a gossip neighbor
+/// nor a pinned peer.
+fn loose_nicks(snapshot: &TopologySnapshot) -> Vec<&str> {
+    let loose = snapshot
         .peers
         .iter()
-        .filter(|link| link.neighbor || link.pinned);
-    held.filter_map(|link| link.nickname.as_deref()).collect()
+        .filter(|link| !link.neighbor && !link.pinned);
+    loose.filter_map(|link| link.nickname.as_deref()).collect()
 }
 
 /// Why the ledger of a node at its cap of 2 took a unit for the new member, or `None` when it did
@@ -379,7 +377,6 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
         }
         habilis_network_test_tracing::clear_captured_logs();
         let dials_at_the_cap = dials_made(&alice).await;
-        let mut held_seen: BTreeSet<String> = BTreeSet::new();
 
         // The new member comes after the ceiling of alice is full.
         let dave = Member::join("dave", &alice).await;
@@ -388,7 +385,7 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
             "the four members never formed a mesh"
         );
         habilis_network_test_tracing::allow_warn(STUCK_TARGET, STUCK_TEXT);
-        habilis_network_test_tracing::allow_warn(STUCK_TARGET, RELAY_CELL_TEXT);
+        habilis_network_test_tracing::allow_relay_cell_refusal();
 
         // The state to wait for is the one in which alice has done all that she does for the new
         // member: her gossip view holds 2 of the 3 others, and her topology holds a route to the
@@ -400,7 +397,6 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
             if let Some(why) = took_a_unit(&snapshot) {
                 panic!("alice took a unit for the new member: {why}");
             }
-            held_seen.extend(held_nicks(&snapshot).iter().map(|nick| (*nick).to_owned()));
             if let Some(only) = the_third_member(&snapshot)
                 && alice.has_route(only).await
             {
@@ -419,14 +415,12 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
             if let Some(why) = took_a_unit(&snapshot) {
                 panic!("alice took a unit for the new member: {why}");
             }
-            held_seen.extend(held_nicks(&snapshot).iter().map(|nick| (*nick).to_owned()));
             time::sleep(Duration::from_millis(500)).await;
         }
-        let (dials_now, strangers) =
-            dialed_without_a_hold(&alice, &dials_at_the_cap, &mut held_seen).await;
+        let (dials_now, strangers) = dialed_without_a_hold(&alice, &dials_at_the_cap).await;
         assert!(
             strangers.is_empty(),
-            "alice dialed members that she never held as a neighbor or a pinned peer: {strangers:?}; dials {dials_now:?}, at the cap {dials_at_the_cap:?}"
+            "alice dialed members that she holds as neither a neighbor nor a pinned peer: {strangers:?}; dials {dials_now:?}, at the cap {dials_at_the_cap:?}"
         );
         // The random view can change while alice is watched: the peer of the send is the one that is
         // no neighbor now.
@@ -485,24 +479,22 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
 }
 
 #[test]
-fn a_dial_to_a_member_that_was_never_held_is_a_stranger() {
+fn a_dial_that_ends_in_a_loose_connection_is_a_stranger() {
     let at_the_cap = [("bob", 1), ("carol", 1), ("dave", 0)];
     let now = [("bob", 1), ("carol", 1), ("dave", 1)];
-    let held: BTreeSet<String> = ["bob", "carol"].map(str::to_owned).into();
     assert_eq!(
-        dialed_strangers(&now, &at_the_cap, &held),
+        dialed_strangers(&now, &at_the_cap, &["dave"]),
         ["dave"],
-        "a dial to dave, whom she never held, is a direct dial that no send asked for"
+        "a dial to dave that left a connection of neither kind is a direct dial that no send asked for"
     );
 }
 
 #[test]
-fn a_dial_to_a_neighbor_or_a_pinned_peer_is_not_a_stranger() {
+fn a_dial_that_holds_nothing_loose_is_not_a_stranger() {
     let at_the_cap = [("bob", 1), ("carol", 1), ("dave", 0)];
     let now = [("bob", 1), ("carol", 2), ("dave", 1)];
-    let held: BTreeSet<String> = ["bob", "carol", "dave"].map(str::to_owned).into();
     assert!(
-        dialed_strangers(&now, &at_the_cap, &held).is_empty(),
-        "a link of the view and the dial of a send are both allowed"
+        dialed_strangers(&now, &at_the_cap, &[]).is_empty(),
+        "a link of the view, the dial of a send and a dial that has not connected yet are allowed"
     );
 }
