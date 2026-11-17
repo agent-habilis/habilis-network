@@ -293,7 +293,7 @@ fn tab_console(page: &Page) -> String {
 fn census_units(log: &str) -> Vec<(usize, usize)> {
     let field = |line: &str, name: &str| -> Option<usize> {
         let (_, rest) = line.split_once(name)?;
-        rest.split(|c: char| !c.is_ascii_digit())
+        rest.split(|character: char| !character.is_ascii_digit())
             .next()?
             .parse()
             .ok()
