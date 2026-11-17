@@ -154,8 +154,11 @@ pub(crate) async fn graft_proven(
     if peer == context.rendezvous_id && !state.rendezvous_wanted() {
         return;
     }
+    // The rendezvous is asked for at the cap too: a member at its cap may return to it and hold it,
+    // and the link takes no unit (see `Ceiling::set_rendezvous`). Without it, once every member
+    // let go of the rendezvous, nobody could return and a late joiner saw an empty mesh.
     if !state.linked_endpoints.contains(&peer)
-        && state.linked_endpoints.len() < context.max_connections
+        && (peer == context.rendezvous_id || state.linked_endpoints.len() < context.max_connections)
     {
         state.note_relink(peer, Instant::now());
         if let Err(error) = request_graft(state, context, peer, true).await {
