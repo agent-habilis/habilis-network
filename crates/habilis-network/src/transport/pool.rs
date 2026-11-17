@@ -1101,6 +1101,91 @@ mod tests {
         );
     }
 
+    /// A cold send whose dial lands on a Nostr path is refused where the mesh lists the relay and
+    /// not Nostr, and goes through where the mesh lists Nostr: the relay being listed does not
+    /// let a payload ride a path that the policy does not list.
+    #[test]
+    fn a_send_that_dials_onto_a_nostr_path_follows_the_payload_policy() {
+        use crate::transport::{RELAY_REFUSED, UNICAST_ALPN};
+        use gossip_transport::hub::Hub;
+        use habilis_network_iroh_gossip_transport as gossip_transport;
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+        use iroh::{EndpointAddr, SecretKey};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, connection: endpoint::Connection) -> Result<(), AcceptError> {
+                connection.closed().await;
+                Ok(())
+            }
+        }
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (alice_key, bob_key) = (
+                    SecretKey::from_bytes(&[81; 32]),
+                    SecretKey::from_bytes(&[82; 32]),
+                );
+                let hub = Hub::new();
+                let handles = (
+                    gossip_transport::GossipHandle::with_transport_id(
+                        alice_key.public(),
+                        gossip_transport::NOSTR_TRANSPORT_ID,
+                    ),
+                    gossip_transport::GossipHandle::with_transport_id(
+                        bob_key.public(),
+                        gossip_transport::NOSTR_TRANSPORT_ID,
+                    ),
+                );
+                hub.join(&handles.0);
+                hub.join(&handles.1);
+                let bind = |key: SecretKey, handle: gossip_transport::GossipHandle| async move {
+                    let builder = iroh::Endpoint::builder(presets::Minimal);
+                    let builder = builder.secret_key(key);
+                    let builder = builder.relay_mode(iroh::RelayMode::Disabled);
+                    let builder = builder.add_custom_transport(handle.custom_transport());
+                    let builder = builder.clear_ip_transports();
+                    let builder = builder.clear_relay_transports();
+                    builder.bind().await.expect("bind a Nostr-only endpoint")
+                };
+                let alice = bind(alice_key, handles.0).await;
+                let bob = bind(bob_key, handles.1).await;
+                let router = Router::builder(bob.clone())
+                    .accept(UNICAST_ALPN, Hold)
+                    .spawn();
+                let target = EndpointAddr::from_parts(
+                    bob.id(),
+                    [iroh::TransportAddr::Custom(
+                        gossip_transport::transport_addr(
+                            gossip_transport::NOSTR_TRANSPORT_ID,
+                            bob.id(),
+                        ),
+                    )],
+                );
+                // The mesh lists the relay, and not Nostr.
+                let pool = super::UnicastPool::new(alice.clone(), true);
+                pool.note_addr(&target);
+                let refused = pool
+                    .dial_and_send(bob.id(), bytes::Bytes::from_static(b"one"))
+                    .await
+                    .expect_err("a payload on a Nostr path is refused when Nostr is not listed");
+                assert!(
+                    refused.to_string().contains(RELAY_REFUSED),
+                    "the refusal names the path policy: {refused}"
+                );
+                // The mesh lists Nostr too.
+                pool.set_nostr_transport(true);
+                pool.dial_and_send(bob.id(), bytes::Bytes::from_static(b"two"))
+                    .await
+                    .expect("a payload on a Nostr path goes through when Nostr is listed");
+                router.shutdown().await.expect("shutdown");
+                alice.close().await;
+            },
+        );
+    }
+
     /// A dial that is cancelled leaves no lock behind: the lock of the peer goes when the dial future is dropped, not
     /// only when the dial ends.
     #[test]
