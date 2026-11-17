@@ -2015,8 +2015,9 @@ mod tests {
             "a higher version with the same pointer must apply"
         );
         assert_eq!(store.version(&key(1)), Some(2), "the new version is held");
+        let held: Vec<ChunkPointer> = store.resolved_pointers().copied().collect();
         assert_eq!(
-            store.resolved_pointers().copied().collect::<Vec<_>>(),
+            held,
             vec![pointer],
             "the root must stay held, so a sweep keeps its chunks"
         );
