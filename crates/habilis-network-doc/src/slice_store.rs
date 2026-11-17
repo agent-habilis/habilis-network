@@ -880,7 +880,8 @@ impl SliceStore {
     ///
     /// # Errors
     ///
-    /// [`SliceError::Malformed`] when the body does not build,  when the encoded value is past the value cap, [`SliceError::Seal`] when the
+    /// [`SliceError::Malformed`] when the body does not build, [`SliceError::ValueTooLarge`] when the encoded value is
+    /// past the value cap, [`SliceError::Seal`] when the
     /// channel key does not seal it, [`SliceError::TooLarge`] when the body is past the cap, and
     /// [`SliceError::RateLimited`] when `own` has no token left.
     pub fn prepare_local(
@@ -899,6 +900,7 @@ impl SliceStore {
     /// # Errors
     ///
     /// [`SliceError::ValueTooLarge`] when the pointer names more bytes than the value cap,
+    /// [`SliceError::Reserved`] when `value` holds the `$chunks` key,
     /// [`SliceError::Seal`] when the channel key does not seal the body, and
     /// [`SliceError::RateLimited`] when `own` has no token left.
     pub fn prepare_pointer(
@@ -909,6 +911,9 @@ impl SliceStore {
         now: Instant,
     ) -> Result<LocalDraft, SliceError> {
         self.check_pointer(pointer)?;
+        if value.contains_key(CHUNKS_KEY) {
+            return Err(SliceError::Reserved);
+        }
         let (version, body, _) = self.seal_body(own, pointer.to_value())?;
         if !self.take_token(own, now, self.limits.burst) {
             return Err(SliceError::RateLimited);
@@ -1652,6 +1657,33 @@ mod tests {
                 .map(|_| ()),
             Err(SliceError::Reserved),
             "a write with the chunks key must be refused as reserved"
+        );
+    }
+
+    #[test]
+    fn prepare_pointer_refuses_a_value_with_the_reserved_chunks_key_and_spends_no_token() {
+        let mut store = small_store(SliceLimits {
+            burst: 1,
+            ..SliceLimits::default()
+        });
+        let (pointer, _) = pointer_value();
+        assert_eq!(
+            store
+                .prepare_pointer(
+                    &key(1),
+                    pointer,
+                    object(json!({"$chunks": 1})),
+                    Instant::now()
+                )
+                .map(|_| ()),
+            Err(SliceError::Reserved),
+            "a receiver refuses this value, so the author must not show it"
+        );
+        assert!(
+            store
+                .prepare_pointer(&key(1), pointer, Map::new(), Instant::now())
+                .is_ok(),
+            "the refused write must leave the one token"
         );
     }
 
