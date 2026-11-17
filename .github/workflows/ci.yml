@@ -454,16 +454,20 @@ jobs:
         run: bun run typecheck
 
   # The IndexedDB backend in a real browser: the cases of idb_browser/cases.rs.
+  # The Nostr data lane in a real browser too: two pools on a relay that runs beside the page.
   # `Check` only compiles them. Chrome and its chromedriver come from one Chrome
   # for Testing release (the Stable channel, as tasks/src/util/cdp.rs reads it),
   # so the two versions match by construction.
   idb-browser:
-    name: IdbStore (browser)
+    name: Browser tests (IdbStore, Nostr data lane)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v6
+
+      # The script that runs the relay beside the browser test is TypeScript.
+      - uses: oven-sh/setup-bun@v2
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
@@ -495,3 +499,13 @@ jobs:
         env:
           WASM_BINDGEN_USE_BROWSER: "1"
         run: cargo test --target wasm32-unknown-unknown -p habilis-network-chunks --test idb_browser
+
+      - name: Build the test relay
+        run: cargo build -p habilis-network-iroh-nostr-address-lookup --features test-relay --example serve_relay
+
+      # The script starts the relay, waits at most 30 s for its `listening` line, runs the test against it,
+      # and fails the step if the test printed `skipped:`, so a missing address never passes silently.
+      - name: Nostr data lane in Chrome
+        run: |
+          bun test scripts/nostr-browser-test/nostr-browser-test.test.ts
+          bun scripts/nostr-browser-test/nostr-browser-test.ts
