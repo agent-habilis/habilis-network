@@ -168,6 +168,12 @@ impl InMemoryStore {
         Ok(())
     }
 
+    fn drop_map_now(&self, root: Root) -> Result<(), ChunkError> {
+        let mut maps = self.maps.lock().map_err(|_| ChunkError::Poisoned("map"))?;
+        maps.remove(&root);
+        Ok(())
+    }
+
     fn start_marking_now(&self) -> Result<(), ChunkError> {
         *self
             .marks
@@ -255,6 +261,10 @@ impl ChunkStore for InMemoryStore {
 
     fn put_map(&self, map: &ChunkMap) -> impl Future<Output = Result<(), ChunkError>> {
         future::ready(self.put_map_now(map))
+    }
+
+    fn drop_map(&self, root: Root) -> impl Future<Output = Result<(), ChunkError>> {
+        future::ready(self.drop_map_now(root))
     }
 
     fn set_bind(&self, file: &FileId, root: Root) -> impl Future<Output = Result<(), ChunkError>> {

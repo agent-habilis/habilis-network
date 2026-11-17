@@ -12,3 +12,7 @@ its own bytes, plus an ordered list of those addresses that names the file.
 
 No transport, no discovery, no scheduler, no manifests. It takes a hash, some
 bytes and a chunk map. See `tests/isolation.rs`.
+
+The engine keeps the chunked values of the shared state here. A store can
+forget the chunk map of a root (`drop_map`), and a sweep frees the chunks that
+no mark names.

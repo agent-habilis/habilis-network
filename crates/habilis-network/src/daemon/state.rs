@@ -5,6 +5,7 @@ mod gossip_msgs;
 mod idle_counters;
 mod key_of_error;
 mod latch;
+mod mesh_chunks;
 mod mesh_secrets;
 mod ping_round;
 mod proof_book;
@@ -25,6 +26,7 @@ mod rival_flag;
 mod roster_entry;
 mod roster_snapshot;
 mod standing;
+mod syncing;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 mod test_drop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -49,6 +51,7 @@ pub(crate) use gossip_msgs::{GossipMsgs, by_variant, gossip_msgs_delta};
 pub(crate) use idle_counters::note_ppid_wake;
 pub(crate) use idle_counters::{IdleCounters, note_sampler_wake};
 pub(crate) use latch::Latch;
+pub(crate) use mesh_chunks::MeshChunks;
 pub(crate) use mesh_secrets::MeshSecrets;
 pub(crate) use ping_round::PingRound;
 pub(crate) use socket_bytes::{GossipPathBytes, SocketBytes, gossip_path_delta, socket_delta};
@@ -72,6 +75,7 @@ pub(crate) use rival_flag::RivalFlag;
 pub use roster_entry::RosterEntry;
 pub use roster_snapshot::RosterSnapshot;
 pub(crate) use standing::Standing;
+pub use syncing::Syncing;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use test_drop::TestDrop;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
