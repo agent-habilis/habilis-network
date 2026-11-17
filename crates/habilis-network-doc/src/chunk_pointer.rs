@@ -24,7 +24,7 @@ pub(crate) const CHUNKS_KEY: &str = "$chunks";
 /// let pointer = ChunkPointer::new(Root::from_bytes([7; 32]), 100_000, 9);
 /// assert_eq!(ChunkPointer::parse(&pointer.to_value()), Some(pointer));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[must_use]
 pub struct ChunkPointer {
     root: Root,

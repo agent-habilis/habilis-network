@@ -1079,7 +1079,7 @@ impl EventLoopState {
         in_channel.map(move |(_, author, pointer)| {
             let key = String::from_utf8_lossy(&author.hex()).into_owned();
             let chunks = chunk_count(self.chunks.stored_size(pointer));
-            let refused = self.fetches.refusal(channel, &author, pointer.root());
+            let refused = self.fetches.refusal(channel, &author, pointer);
             Syncing::new(key, pointer.root().to_hex(), 0, chunks).refused(refused)
         })
     }
