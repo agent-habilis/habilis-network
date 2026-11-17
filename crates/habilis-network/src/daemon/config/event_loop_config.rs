@@ -10,6 +10,7 @@ use crate::daemon::shutdown::{Owner, OwnerPidError};
 use crate::transport::{UdpTransport, UnicastFrame};
 #[cfg(feature = "host")]
 use crate::util::process;
+use habilis_network_iroh_transport_util::RelayPolicy;
 use std::path::PathBuf;
 
 use iroh::Endpoint;
@@ -125,6 +126,9 @@ pub(crate) struct TransportSet {
     /// `TransportPolicy::relay`, read from the mesh config — never from a
     /// per-node option, so every member agrees.
     pub(crate) relay_transport: transport::PayloadPath,
+    /// The relay policy of this mesh for the selectors of its endpoint, from setup. The loop moves
+    /// it into `EventLoopState::relay_policy`, and the policy ends with the mesh.
+    pub(crate) relay_policy: Option<sync::Arc<RelayPolicy>>,
     /// The multi-hop transport handle when the mesh policy registered it on the
     /// peer endpoint; `run()` moves it into `EventLoopState::multihop`.
     /// `None` when multihop is off. Built in `setup_mesh`.

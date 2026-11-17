@@ -1564,6 +1564,20 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         mesh_config.transport.allows(Transport::Relay),
         mesh_config.transport.allows(Transport::Nostr),
     );
+    // The selectors of an endpoint rank Nostr above a relay that carries no payload, one ordering
+    // for every mesh on it. An injected endpoint can carry several meshes, so a mesh that the
+    // ordering cannot serve is refused before anything of it is built. A bound endpoint is the
+    // mesh's own and registers once it exists.
+    let early_policy: Option<habilis_network_iroh_transport_util::RelayPolicy> = injected
+        .as_ref()
+        .map(|shared| {
+            habilis_network_iroh_transport_util::register_relay_policy(
+                shared.endpoint.id(),
+                relay_transport.relay_allowed(),
+                relay_transport.nostr_allowed(),
+            )
+        })
+        .transpose()?;
     let transports = member_transports(&lookups, transports, &mesh_config.transport)?;
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the
@@ -1626,6 +1640,14 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         key_lock,
     )
     .await?;
+    let relay_policy = match early_policy {
+        Some(policy) => policy,
+        None => habilis_network_iroh_transport_util::register_relay_policy(
+            endpoint.id(),
+            relay_transport.relay_allowed(),
+            relay_transport.nostr_allowed(),
+        )?,
+    };
     Ok(EventLoopConfig {
         mesh: MeshSpec {
             mesh: mesh_id,
@@ -1647,6 +1669,8 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             local_udp_transport: UdpTransport::from(transports.udp),
             nostr: NostrParams::for_mesh(&lookups, rdv.topic_id.as_bytes()),
             relay_transport,
+            // shared by the config and the loop state, so that the policy ends with the last holder
+            relay_policy: Some(sync::Arc::new(relay_policy)),
             #[cfg(feature = "multihop")]
             multihop: multihop_handle,
             #[cfg(feature = "multihop")]
@@ -3953,6 +3977,13 @@ mod tests {
             transport: list,
             ..membership::JoinOptions::default()
         };
+        setup_with_options(options, injected).await
+    }
+
+    async fn setup_with_options(
+        options: membership::JoinOptions,
+        injected: super::InjectedEndpoint,
+    ) -> anyhow::Result<super::EventLoopConfig> {
         let (kind, author) = membership::resolve_kind(&options, None)?;
         super::setup_mesh(
             kind,
@@ -4006,6 +4037,52 @@ mod tests {
             if let Some(handle) = default_list.transports.multihop.as_ref() {
                 handle.close().await;
             }
+        });
+    }
+
+    // The selectors of an endpoint have one path ordering. A second mesh on an injected endpoint
+    // whose relay carries payload and lists no Nostr, beside a mesh with a lookup-only relay that
+    // lists Nostr, would see Nostr ranked above its relay and refuse the payload: it is refused
+    // at setup, and the error names both policies.
+    #[test]
+    fn a_second_mesh_on_an_injected_endpoint_with_a_conflicting_relay_policy_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "habilis_network::lookup::peer",
+                "injected endpoint advertises no relay address",
+            );
+            let shared = injected(PayloadPath::DirectOnly).await;
+            let nostr_mesh = membership::JoinOptions {
+                transport: vec![Transport::Udp, Transport::WebRtc, Transport::Nostr],
+                nostr_urls: vec!["ws://127.0.0.1:9".to_owned()],
+                lookup: vec![Lookup::Relay, Lookup::Nostr],
+                ..membership::JoinOptions::default()
+            };
+            let first = setup_with_options(nostr_mesh, shared.clone())
+                .await
+                .expect("a lookup-only mesh that lists Nostr sets up");
+            let relay_mesh = membership::JoinOptions {
+                transport: vec![Transport::Udp, Transport::WebRtc, Transport::Relay],
+                lookup: vec![Lookup::Relay],
+                ..membership::JoinOptions::default()
+            };
+            let error = setup_with_options(relay_mesh, shared.clone())
+                .await
+                .expect_err(
+                    "a mesh whose relay carries, beside a Nostr mesh with a lookup-only relay",
+                );
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("relay carries payload")
+                    && message.contains("relay is lookup only"),
+                "the error names both policies: {message}"
+            );
+            let (endpoint, _underlay) = leave_and_keep_handles(first).await;
+            // The mesh has no multihop, so the underlay of the injected handle is the caller's.
+            if let Some(handle) = shared.multihop.clone() {
+                handle.close().await;
+            }
+            endpoint.close().await;
         });
     }
 

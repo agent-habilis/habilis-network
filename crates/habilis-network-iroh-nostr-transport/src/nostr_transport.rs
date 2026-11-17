@@ -128,6 +128,10 @@ impl NostrTransport {
 
     /// Whether `peer` is a member that this transport answers: see
     /// [`set_known_peers`](Self::set_known_peers).
+    ///
+    /// # Panics
+    ///
+    /// Panics if another thread panicked while it held the set of known members.
     #[must_use]
     pub fn knows(&self, peer: EndpointId) -> bool {
         self.known

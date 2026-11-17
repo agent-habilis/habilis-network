@@ -1731,13 +1731,13 @@ mod tests {
         use crate::protocol::nostr::NostrKeys;
         use habilis_network_iroh_nostr_transport::NostrTransport;
         use std::sync::Barrier;
+        use std::thread;
+        use tokio::runtime;
 
         let _guard = ::habilis_network_test_tracing::init();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("a runtime");
+        let mut builder = runtime::Builder::new_multi_thread();
+        builder.worker_threads(2).enable_all();
+        let runtime = builder.build().expect("a runtime");
         let me = iroh::SecretKey::from_bytes(&[77; 32]).public();
         let relay: url::Url = "ws://127.0.0.1:9".parse().expect("a relay URL");
         let plan = |seed: u8| {
@@ -1749,25 +1749,23 @@ mod tests {
             let table = SignalAdmission::new(8);
             table.set_nostr(NostrTransport::new(me));
             let barrier = Barrier::new(2);
-            let results = std::thread::scope(|scope| {
-                let racers: Vec<_> = [1u8, 2u8]
-                    .into_iter()
-                    .map(|seed| {
-                        let (table, barrier, runtime) = (&table, &barrier, &runtime);
-                        let plan = plan(seed);
-                        scope.spawn(move || {
-                            let _entered = runtime.enter();
-                            barrier.wait();
-                            table.activate_nostr(plan)
-                        })
-                    })
-                    .collect();
-                racers
-                    .into_iter()
-                    .map(|racer| racer.join().expect("a racer"))
-                    .collect::<Vec<_>>()
+            let wins = thread::scope(|scope| {
+                let mut racers = Vec::new();
+                for seed in [1u8, 2u8] {
+                    let (table, barrier, runtime) = (&table, &barrier, &runtime);
+                    let plan = plan(seed);
+                    racers.push(scope.spawn(move || {
+                        let _entered = runtime.enter();
+                        barrier.wait();
+                        table.activate_nostr(plan).is_ok()
+                    }));
+                }
+                let mut won = 0;
+                for racer in racers {
+                    won += usize::from(racer.join().expect("a racer"));
+                }
+                won
             });
-            let wins = results.iter().filter(|result| result.is_ok()).count();
             assert_eq!(
                 wins, 1,
                 "round {round}: two plans on one transport leave one winner and one error"

@@ -27,8 +27,8 @@ mod rung;
 pub use protocol_set::ProtocolSet;
 
 pub use rung::{
-    GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, NOSTR_TRANSPORT_ID, RelayPolicy, Rung,
-    WEBRTC_TRANSPORT_ID, best_of, blocked, climb, custom_rung, datagrams, expected_rung,
+    GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, MixedRelayPolicy, NOSTR_TRANSPORT_ID, RelayPolicy,
+    Rung, WEBRTC_TRANSPORT_ID, best_of, blocked, climb, custom_rung, datagrams, expected_rung,
     expected_rung_for, ip_remote, register_relay_policy, relay_carries, remote_id, remote_id_of,
     rung_of, split_segments,
 };
@@ -159,10 +159,10 @@ mod tests {
             relay_carries(local),
             "an endpoint with no policy keeps the plain ladder"
         );
-        let lookup_only = register_relay_policy(local, false);
+        let lookup_only = register_relay_policy(local, false, false).expect("a first mesh");
         assert!(!relay_carries(local), "a lookup-only relay");
         assert!(relay_carries(other), "another endpoint is not affected");
-        let carrying = register_relay_policy(local, true);
+        let carrying = register_relay_policy(local, true, false).expect("no Nostr listed");
         assert!(
             !relay_carries(local),
             "a second mesh whose relay carries does not undo the first"
@@ -174,6 +174,34 @@ mod tests {
             relay_carries(local),
             "the last mesh ended: the plain ladder"
         );
+    }
+
+    /// Two meshes on one endpoint that the one path ordering cannot serve are refused, and the
+    /// refusal names both policies. Meshes that the ordering serves, and a refused mesh, leave the
+    /// table as it was.
+    #[test]
+    fn a_mesh_whose_relay_policy_the_endpoint_ordering_cannot_serve_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let local = iroh::SecretKey::from_bytes(&[63; 32]).public();
+        let lookup_only_with_nostr =
+            register_relay_policy(local, false, true).expect("a first mesh");
+        let refused = register_relay_policy(local, true, false)
+            .expect_err("a relay that carries, beside Nostr above a lookup-only relay");
+        let message = refused.to_string();
+        assert!(
+            message.contains("relay carries payload, does not list Nostr")
+                && message.contains("relay is lookup only, lists Nostr"),
+            "the error names both policies: {message}"
+        );
+        assert!(!relay_carries(local), "the refused mesh changed nothing");
+        let same = register_relay_policy(local, false, true).expect("the same policy is fine");
+        drop(lookup_only_with_nostr);
+        drop(same);
+        assert!(relay_carries(local), "no mesh left: the plain ladder");
+        // With Nostr listed by neither, the two orderings are the same for every mesh.
+        let first = register_relay_policy(local, false, false).expect("no Nostr");
+        let second = register_relay_policy(local, true, false).expect("no Nostr listed by either");
+        drop((first, second));
     }
 
     /// One function names the rung of a custom transport id, for every selector.

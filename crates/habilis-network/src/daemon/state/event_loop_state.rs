@@ -615,7 +615,7 @@ pub struct EventLoopState {
     /// When each peer was last heard over Nostr.
     pub(crate) nostr_seen: HashMap<EndpointId, Instant>,
     /// The relay policy of this mesh for the selectors of its endpoint. Dropped with the state.
-    pub(crate) relay_policy: Option<habilis_network_iroh_transport_util::RelayPolicy>,
+    pub(crate) relay_policy: Option<Arc<habilis_network_iroh_transport_util::RelayPolicy>>,
     /// The peers that a probe proved over Nostr. The proof outlives the probe connection, so that
     /// a graft is not dialed for a pair that only Nostr carries: the hook would close the link at
     /// once. A report of another path takes it back. Bounded by the peers that are probed.

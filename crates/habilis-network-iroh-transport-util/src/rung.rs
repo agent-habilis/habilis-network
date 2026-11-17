@@ -9,7 +9,7 @@ use iroh::endpoint::transports::{Addr, PathSelectionData, Transmit};
 use std::sync::atomic;
 #[cfg(feature = "test-hooks")]
 use std::sync::atomic::Ordering;
-use std::{iter, net, sync};
+use std::{error, fmt, iter, net, sync};
 /// The lowest-RTT path in `iter`.
 ///
 /// A path whose stats are not readable yet — freshly added, not yet validated —
@@ -224,10 +224,59 @@ pub fn expected_rung_for(
         .find(|&rung| allowed(rung) && available(rung))
 }
 
-/// How many meshes with a lookup-only relay each endpoint carries. The selector of an endpoint
-/// reads its ladder from here, because it holds the id of its endpoint and not its mesh policy.
-static LOOKUP_ONLY_MESHES: sync::Mutex<Option<HashMap<iroh::EndpointId, usize>>> =
+/// The relay policy of one mesh that runs on an endpoint: whether its relay carries payload, and
+/// whether it lists the Nostr transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MeshPolicy {
+    carries: bool,
+    lists_nostr: bool,
+}
+
+impl MeshPolicy {
+    /// The words of the policy in an error: what the relay does, and whether Nostr is listed.
+    fn describe(self) -> String {
+        let relay = if self.carries {
+            "relay carries payload"
+        } else {
+            "relay is lookup only"
+        };
+        let nostr = if self.lists_nostr {
+            "lists Nostr"
+        } else {
+            "does not list Nostr"
+        };
+        format!("{relay}, {nostr}")
+    }
+}
+
+/// The meshes that run on each endpoint. The selector of an endpoint reads its ladder from here,
+/// because it holds the id of its endpoint and not its mesh policy.
+static MESHES: sync::Mutex<Option<HashMap<iroh::EndpointId, Vec<MeshPolicy>>>> =
     sync::Mutex::new(None);
+
+/// Two meshes on one endpoint that the path ordering of the endpoint cannot serve: the relay of
+/// one carries payload and the relay of the other does not, and one of them lists Nostr. The
+/// selectors of an endpoint have one ordering, so Nostr would rank above the relay for the mesh
+/// whose relay carries payload, and its payload gate would refuse the path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MixedRelayPolicy {
+    new: String,
+    existing: String,
+}
+
+impl fmt::Display for MixedRelayPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "two meshes on one endpoint disagree on the relay and Nostr: this mesh ({}) and \
+             another mesh on the endpoint ({}); the endpoint has one path ordering. Run them on \
+             separate endpoints, or give them one relay policy",
+            self.new, self.existing
+        )
+    }
+}
+
+impl error::Error for MixedRelayPolicy {}
 
 /// A mesh of an endpoint that told the selectors whether its relay carries payload. Dropping it
 /// ends the mesh: see [`register_relay_policy`].
@@ -235,32 +284,40 @@ static LOOKUP_ONLY_MESHES: sync::Mutex<Option<HashMap<iroh::EndpointId, usize>>>
 #[must_use = "the policy ends when the guard is dropped"]
 pub struct RelayPolicy {
     local: iroh::EndpointId,
-    lookup_only: bool,
+    policy: MeshPolicy,
 }
 
 impl Drop for RelayPolicy {
     fn drop(&mut self) {
-        if !self.lookup_only {
-            return;
-        }
-        let mut table = LOOKUP_ONLY_MESHES.lock().expect("relay policy table");
+        let mut table = MESHES.lock().expect("relay policy table");
         let Some(table) = table.as_mut() else {
             return;
         };
-        if let Some(count) = table.get_mut(&self.local) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                table.remove(&self.local);
-            }
+        let Some(meshes) = table.get_mut(&self.local) else {
+            return;
+        };
+        if let Some(at) = meshes.iter().position(|mesh| *mesh == self.policy) {
+            meshes.swap_remove(at);
+        }
+        if meshes.is_empty() {
+            table.remove(&self.local);
         }
     }
 }
 
 /// Tell the selectors of the endpoint `local` that a mesh runs on it, and whether the relay of that
-/// mesh carries payload. Two meshes may share one endpoint (an injected one): the ladder is the
-/// lookup-only one (Nostr above the relay) while any mesh on the endpoint has a relay that carries
-/// no payload, and each mesh keeps its own payload gate. The policy ends when the guard is dropped.
-/// A selector reads it at each selection, so the call may come after the endpoint is bound.
+/// mesh carries payload (`carries`) and whether the mesh lists Nostr (`lists_nostr`). Two meshes
+/// may share one endpoint (an injected one) if the path ordering of the endpoint serves both: the
+/// ladder is the lookup-only one (Nostr above the relay) while any mesh on the endpoint has a
+/// relay that carries no payload. A mesh whose relay carries payload, next to a mesh whose relay
+/// does not, with Nostr listed by either, is refused: Nostr would rank above the relay for it. The
+/// policy ends when the guard is dropped. A selector reads it at each selection, so the call may
+/// come after the endpoint is bound.
+///
+/// # Errors
+///
+/// [`MixedRelayPolicy`]: another mesh on the endpoint has the other relay policy, and one of the
+/// two lists Nostr.
 ///
 /// # Panics
 ///
@@ -274,27 +331,39 @@ impl Drop for RelayPolicy {
 /// use habilis_network_iroh_transport_util::{register_relay_policy, relay_carries};
 ///
 /// let local = iroh::SecretKey::from_bytes(&[1u8; 32]).public();
-/// let mesh = register_relay_policy(local, false);
+/// let mesh = register_relay_policy(local, false, true)?;
 /// assert!(!relay_carries(local));
 /// drop(mesh);
 /// assert!(relay_carries(local));
+/// # Ok::<(), habilis_network_iroh_transport_util::MixedRelayPolicy>(())
 /// ```
 pub fn register_relay_policy(
     local: iroh::EndpointId,
     // false when the mesh uses the relay for lookup alone
     carries: bool,
-) -> RelayPolicy {
-    if !carries {
-        let mut table = LOOKUP_ONLY_MESHES.lock().expect("relay policy table");
-        *table
-            .get_or_insert_with(HashMap::new)
-            .entry(local)
-            .or_insert(0) += 1;
+    // true when the mesh lists the Nostr transport
+    lists_nostr: bool,
+) -> Result<RelayPolicy, MixedRelayPolicy> {
+    let policy = MeshPolicy {
+        carries,
+        lists_nostr,
+    };
+    let mut guard = MESHES.lock().expect("relay policy table");
+    let table = guard.get_or_insert_with(HashMap::new);
+    let conflict: Option<&MeshPolicy> = table.get(&local).and_then(|meshes| {
+        meshes
+            .iter()
+            .find(|other| other.carries != carries && (other.lists_nostr || lists_nostr))
+    });
+    if let Some(other) = conflict {
+        return Err(MixedRelayPolicy {
+            new: policy.describe(),
+            existing: other.describe(),
+        });
     }
-    RelayPolicy {
-        local,
-        lookup_only: !carries,
-    }
+    let meshes = table.entry(local).or_default();
+    meshes.push(policy);
+    Ok(RelayPolicy { local, policy })
 }
 
 /// Whether the ladder of the endpoint `local` keeps the relay above Nostr: no mesh on it uses the
@@ -316,10 +385,9 @@ pub fn register_relay_policy(
 /// ```
 #[must_use]
 pub fn relay_carries(local: iroh::EndpointId) -> bool {
-    let table = LOOKUP_ONLY_MESHES.lock().expect("relay policy table");
-    !table
-        .as_ref()
-        .is_some_and(|table| table.contains_key(&local))
+    let table = MESHES.lock().expect("relay policy table");
+    let meshes = table.as_ref().and_then(|table| table.get(&local));
+    meshes.is_none_or(|meshes| meshes.iter().all(|mesh| mesh.carries))
 }
 
 /// The best path of the rung that [`expected_rung`] picks among the rungs that
