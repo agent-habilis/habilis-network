@@ -711,6 +711,11 @@ impl SliceStore {
             return Err(SliceError::Malformed);
         }
         if body.value.get(CHUNKS_KEY).is_none() {
+            let bytes = body.value.to_string().len();
+            let limit = self.limits.max_value_bytes;
+            if bytes > limit {
+                return Err(SliceError::ValueTooLarge { bytes, limit });
+            }
             return Ok((body.version, SliceValue::Inline(body.value)));
         }
         if body
@@ -838,13 +843,25 @@ impl SliceStore {
         if live && is_new && !self.take_token(&key, now, self.receive_burst()) {
             return SliceIngest::Refused(SliceError::RateLimited);
         }
-        let mut value = value;
-        if let SliceValue::Pointer { last, .. } = &mut value {
-            *last = self
-                .slices
-                .get_mut(&key)
-                .and_then(|held| held.value.take_complete());
-        }
+        let held = self.slices.get_mut(&key).map(|held| &mut held.value);
+        // A version that names the root that this node holds whole keeps the value, so a sweep keeps its chunks.
+        let value = match (value, held) {
+            (
+                SliceValue::Pointer { pointer, .. },
+                Some(SliceValue::Chunked {
+                    pointer: held_pointer,
+                    value: held_value,
+                }),
+            ) if *held_pointer == pointer => SliceValue::Chunked {
+                pointer,
+                value: held_value.take(),
+            },
+            (SliceValue::Pointer { pointer, .. }, held) => SliceValue::Pointer {
+                pointer,
+                last: held.and_then(SliceValue::take_complete),
+            },
+            (value, _) => value,
+        };
         let incoming = Slice {
             frame: frame.clone(),
             version,
@@ -1949,6 +1966,65 @@ mod tests {
             apply(&mut store, &frame(key(1), 2, at_cap)),
             SliceIngest::Applied,
             "a pointer at the cap must apply"
+        );
+    }
+
+    #[test]
+    fn ingest_refuses_an_inline_value_past_the_value_cap_and_takes_one_at_it() {
+        let mut store = value_capped_store(64);
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 1, json!({"k": "x".repeat(100)}))),
+            SliceIngest::Refused(SliceError::ValueTooLarge {
+                bytes: 108,
+                limit: 64
+            }),
+            "a receiver must refuse the inline value that prepare_local refuses"
+        );
+        assert_eq!(
+            store.version(&key(1)),
+            None,
+            "a refused value must leave no slice"
+        );
+        let at_cap = json!({"k": "x".repeat(56)});
+        assert_eq!(
+            at_cap.to_string().len(),
+            64,
+            "the test value must have exactly the cap"
+        );
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 1, at_cap)),
+            SliceIngest::Applied,
+            "an inline value at the cap must apply"
+        );
+    }
+
+    #[test]
+    fn a_higher_version_that_names_the_held_pointer_keeps_the_chunked_value() {
+        let mut store = value_capped_store(1 << 20);
+        let (pointer, value) = pointer_value();
+        apply(&mut store, &frame(key(1), 1, value.clone()));
+        let fetched = json!({"first": "value"});
+        assert_eq!(
+            store.resolve_pointer(&key(1), pointer, fetched.clone()),
+            Ok(true),
+            "the value is fetched"
+        );
+        assert_eq!(
+            apply(&mut store, &frame(key(1), 2, value)),
+            SliceIngest::Applied,
+            "a higher version with the same pointer must apply"
+        );
+        assert_eq!(store.version(&key(1)), Some(2), "the new version is held");
+        assert_eq!(
+            store.resolved_pointers().copied().collect::<Vec<_>>(),
+            vec![pointer],
+            "the root must stay held, so a sweep keeps its chunks"
+        );
+        assert_eq!(store.unresolved().count(), 0, "no fetch may start again");
+        assert_eq!(
+            store.view().get(&hex_of(&key(1))),
+            Some(&fetched),
+            "the view must still show the value"
         );
     }
 
