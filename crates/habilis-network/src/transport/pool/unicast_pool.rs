@@ -8,14 +8,14 @@ use super::timeouts::{
 };
 use super::warm_send::WarmSend;
 use crate::transport::admission::{BusyGuard, SignalAdmission};
-use crate::transport::payload_path;
+use crate::transport::payload_path::{self, PathWait};
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use bytes::Bytes;
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
@@ -616,33 +616,47 @@ impl UnicastPool {
     /// fails/times out, or a stream write error.
     pub(crate) async fn dial_and_send(&self, eid: EndpointId, bytes: Bytes) -> Result<()> {
         self.inner.dial_attempts.fetch_add(1, Ordering::Relaxed);
-        let connection = self.warm_or_dial(eid).await?;
-        // A connection this call just dialed is milliseconds old: its
-        // non-relay path (the punch, or a WebRTC path opened right after
-        // `AddConnection`) is still forming, and the synchronous check read
-        // "no path selected yet" as relay — refusing the *first* directed
-        // frame to every peer without a warm connection. Wait like the
-        // accept side does, on a dial-sized budget.
-        if !self.payload_path().relay_allowed()
-            && !payload_path::wait_payload_path(
-                &connection,
-                PATH_SELECT_TIMEOUT,
-                self.payload_path(),
-            )
-            .await
-        {
-            bail!("{RELAY_REFUSED}");
-        }
-        // The policy applies to the selected path whatever the relay allows: a mesh that lists the
-        // relay and not Nostr refuses a payload on a Nostr path.
-        if !payload_allowed_on(&connection, self.payload_path()) {
-            bail!("{RELAY_REFUSED}");
-        }
+        let connection = self.connection_with_payload_path(eid).await?;
         if let Err(error) = self.send_marked(eid, &connection, &bytes).await {
             self.evict_if_same(eid, &connection).await;
             return Err(error);
         }
         Ok(())
+    }
+
+    /// The connection to `eid` that a payload may ride, dialed if none is warm. A connection that
+    /// this call just dialed is milliseconds old: its non-relay path (the punch, or a `WebRTC` path
+    /// opened right after `AddConnection`) is still forming, and the synchronous check read "no path
+    /// selected yet" as relay, which refused the *first* directed frame to every peer without a warm
+    /// connection. So a mesh that does not list the relay waits on a dial-sized budget, like the
+    /// accept side. A connection that closes during the wait is not a refusal: a pooled one can be
+    /// closed by the hold of a probe, or by the peer, between the read of the pool and the wait. The
+    /// call dials once more, and a second close is an error that names the close.
+    async fn connection_with_payload_path(&self, eid: EndpointId) -> Result<Connection> {
+        for _ in 0..2 {
+            let connection = self.warm_or_dial(eid).await?;
+            if self.payload_path().relay_allowed() {
+                // The policy applies to the selected path whatever the relay allows: a mesh that
+                // lists the relay and not Nostr refuses a payload on a Nostr path.
+                ensure!(
+                    payload_allowed_on(&connection, self.payload_path()),
+                    "{RELAY_REFUSED}"
+                );
+                return Ok(connection);
+            }
+            match payload_path::payload_path_wait(
+                &connection,
+                PATH_SELECT_TIMEOUT,
+                self.payload_path(),
+            )
+            .await
+            {
+                PathWait::Selected => return Ok(connection),
+                PathWait::TimedOut => bail!("{RELAY_REFUSED}"),
+                PathWait::Closed => self.evict_if_same(eid, &connection).await,
+            }
+        }
+        bail!("the connection closed twice while the path was awaited")
     }
 
     /// Send `bytes` to `eid`, and dial a peer once, not once for each frame. A warm connection takes

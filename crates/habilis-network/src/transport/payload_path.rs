@@ -215,11 +215,20 @@ pub(crate) async fn wait_payload_path(
     deadline: Duration,
     path: PayloadPath,
 ) -> bool {
+    payload_path_wait(connection, deadline, path).await == PathWait::Selected
+}
+
+/// [`wait_payload_path`], with the way the wait ended: a caller that must tell a connection that
+/// closed from a path that did not come reads this one.
+pub(crate) async fn payload_path_wait(
+    connection: &Connection,
+    deadline: Duration,
+    path: PayloadPath,
+) -> PathWait {
     wait_selected_outcome(connection, deadline, |connection| {
         selected_is_payload_path(connection, path)
     })
     .await
-        == PathWait::Selected
 }
 
 /// [`wait_direct`] for a UDP path alone: whether UDP won the race against a
@@ -328,7 +337,7 @@ impl From<bool> for PayloadPath {
 
 /// How a wait for a selected path ended.
 #[derive(Debug, PartialEq, Eq)]
-enum PathWait {
+pub(crate) enum PathWait {
     Selected,
     /// The connection closed first: the other end gave up, which is not a refusal.
     Closed,
