@@ -26,6 +26,10 @@ use habilis_network::runtime::{
 use tokio::sync::{Notify, oneshot};
 use tokio::time::{self, Instant};
 
+/// How long Alice may take to know the endpoint of Bob after she saw him join: the presence of a
+/// member and its `PeerInfo` are two frames.
+const ENDPOINT_BOUND: Duration = Duration::from_secs(45);
+
 /// How long Bob has to complete the group after the repair.
 const REPAIR_BOUND: Duration = Duration::from_secs(20);
 
@@ -36,8 +40,12 @@ const GROUP: &str = "550e8400-e29b-41d4-a716-446655440000";
 
 enum Request {
     Key(oneshot::Sender<AuthorKey>),
-    /// Broadcast shard 0, then repair shard 1 for the member with this key alone.
-    SplitSend(AuthorKey, oneshot::Sender<()>),
+    /// Broadcast shard 0.
+    Flood(oneshot::Sender<()>),
+    /// Repair shard 1 for the member with this key alone, and say how `deliver_to` ended. It
+    /// fails while the node knows no endpoint of the member: the presence of a member can come
+    /// before its `PeerInfo`, so the test asks again.
+    Repair(AuthorKey, oneshot::Sender<Result<(), String>>),
     /// How many partial groups the member holds: a group that waits for a shard.
     PartialGroups(oneshot::Sender<usize>),
 }
@@ -101,16 +109,18 @@ impl NodeDriver for Recorder {
                 let _ = response.send(state.identity().author_key());
                 false
             }
-            Request::SplitSend(requester, done) => {
+            Request::Flood(done) => {
                 let _flood = send_app(state, context, shard_frame(context, 0, "first half, "))
                     .await
                     .expect("shard 0 is broadcast");
+                let _ = done.send(());
+                true
+            }
+            Request::Repair(requester, done) => {
                 let second = shard_frame(context, 1, "second half");
                 // The verdict of the repair is Bob's surfacing, which the test reads.
-                let _repair = deliver_to(&requester, &second, state)
-                    .await
-                    .expect("shard 1 is repaired for the requester");
-                let _ = done.send(());
+                let sent = deliver_to(&requester, &second, state).await;
+                let _ = done.send(sent.map(|_| ()).map_err(|error| format!("{error:?}")));
                 true
             }
             Request::PartialGroups(response) => {
@@ -247,6 +257,29 @@ async fn partial_groups_within(member: &Member, want: usize, bound: Duration) ->
     }
 }
 
+/// Ask `alice` to repair shard 1 for `requester` until `deliver_to` succeeds, or `bound` passes.
+/// Returns the last error when it does not.
+async fn repaired_within(
+    alice: &Member,
+    requester: &AuthorKey,
+    bound: Duration,
+) -> Result<(), String> {
+    let started = Instant::now();
+    loop {
+        let (tx, rx) = oneshot::channel();
+        alice
+            .node
+            .send(Request::Repair(*requester, tx))
+            .await
+            .expect("the repair reaches the loop");
+        let outcome = rx.await.expect("the loop answers");
+        if outcome.is_ok() || started.elapsed() >= bound {
+            return outcome;
+        }
+        time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 #[test]
 fn a_repaired_shard_reaches_the_requester_alone() {
     let guard = habilis_network_test_tracing::init();
@@ -274,13 +307,20 @@ fn a_repaired_shard_reaches_the_requester_alone() {
             "alice never saw bob join"
         );
 
-        let (done_tx, done_rx) = oneshot::channel();
+        let (flood_tx, flood_rx) = oneshot::channel();
         alice
             .node
-            .send(Request::SplitSend(bob.key().await, done_tx))
+            .send(Request::Flood(flood_tx))
             .await
-            .expect("the split send reaches the loop");
-        done_rx.await.expect("alice sends both shards");
+            .expect("the flood reaches the loop");
+        flood_rx.await.expect("alice broadcasts shard 0");
+        let requester = bob.key().await;
+        assert!(
+            repaired_within(&alice, &requester, ENDPOINT_BOUND)
+                .await
+                .is_ok(),
+            "alice never repaired shard 1 for bob: she knew no endpoint of bob within the bound"
+        );
 
         let at_carol = partial_groups_within(&carol, 1, REPAIR_BOUND).await;
         assert_eq!(
