@@ -412,7 +412,7 @@ fn open_chunks(
     if let Some(base) = runtime_base {
         use crate::util;
         util::ensure_mesh_runtime_dir(base, mesh.as_str())?;
-        let folder = setup::default_chunks_path(base, mesh, author);
+        let folder = setup::default_chunks_path(base, mesh, author, uuid::Uuid::new_v4());
         return Ok(MeshChunks::open(Some(&folder))?);
     }
     #[cfg(not(feature = "host"))]
@@ -2111,6 +2111,9 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+    use std::{env, fs};
+
+    use uuid::Uuid;
 
     use tokio::sync::oneshot;
 
@@ -2126,6 +2129,28 @@ mod tests {
     use crate::testing::{fresh_state, nick, test_key};
     use crate::util::clock::Instant;
     use crate::util::tuning;
+
+    /// Two daemons of one mesh and one nickname run on one machine. The second run must not delete the
+    /// chunks that the first run uses.
+    #[cfg(feature = "host")]
+    #[tokio::test]
+    async fn a_second_run_of_one_nickname_keeps_the_chunks_of_the_first() {
+        let base = env::temp_dir().join(format!("habilis-open-chunks-{}", Uuid::new_v4()));
+        let mesh = MeshId::from("test");
+        let first = super::open_chunks(Some(&base), &mesh, &nick("us")).expect("the first store");
+        let root = first
+            .put_value(b"a value of the first run")
+            .await
+            .expect("a value");
+        let second = super::open_chunks(Some(&base), &mesh, &nick("us")).expect("the second store");
+        let kept = first.has_map(root).await;
+        drop(second);
+        drop(fs::remove_dir_all(&base));
+        assert!(
+            kept,
+            "the second run deleted the chunk map of the first run"
+        );
+    }
 
     /// One `PingReport` that the engine emitted: the rows and the `known` count.
     #[derive(Debug, PartialEq, Eq)]

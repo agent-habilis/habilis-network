@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
 use std::{fs, io::ErrorKind};
@@ -18,14 +18,28 @@ use habilis_network_chunks::DiskStore;
 /// large for a slice, and the chunks that were fetched for the slices of other peers. It starts
 /// empty: a run never reads the chunks of an earlier run.
 #[derive(Debug)]
+#[must_use = "dropping the store removes its folder"]
 pub(crate) struct MeshChunks {
     store: Store,
+    /// The folder of a store on disk. The run that made it removes it again, because the name of the folder
+    /// is unique to the run and no later run would clear it.
+    #[cfg(not(target_arch = "wasm32"))]
+    folder: Option<PathBuf>,
     /// The roots whose map this run put and has not dropped. A run starts with an empty store, so no
     /// other map can be there.
     mapped: Mutex<HashSet<Root>>,
     /// The key that seals a value before it is cut into chunks, on a passworded mesh. Without it the chunks are
     /// the bytes of the value, and the chunk store is as open as the `state` channel of a mesh with no password.
     key: Option<SymmetricKey>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for MeshChunks {
+    fn drop(&mut self) {
+        if let Some(folder) = &self.folder {
+            drop(fs::remove_dir_all(folder));
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -63,6 +77,7 @@ impl MeshChunks {
             }
             return Ok(Self {
                 store: Store::Disk(DiskStore::open(folder)?),
+                folder: Some(folder.to_path_buf()),
                 mapped: Mutex::default(),
                 key: None,
             });
@@ -71,6 +86,8 @@ impl MeshChunks {
         let _ = folder;
         Ok(Self {
             store: Store::Memory(InMemoryStore::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            folder: None,
             mapped: Mutex::default(),
             key: None,
         })
@@ -505,5 +522,15 @@ mod tests {
             !store.has(hash).await.expect("a lookup"),
             "the chunk of an earlier run must be gone"
         );
+    }
+
+    #[test]
+    fn a_store_in_a_folder_removes_the_folder_when_the_run_ends() {
+        let dir = TempDir::new("habilis-mesh-chunks-drop");
+        let folder = dir.0.join("run.chunks");
+        let chunks = MeshChunks::open(Some(&folder)).expect("a store in the folder");
+        assert!(folder.exists(), "the folder must exist while the run lasts");
+        drop(chunks);
+        assert!(!folder.exists(), "the folder of an ended run must be gone");
     }
 }

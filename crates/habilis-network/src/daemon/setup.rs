@@ -1412,11 +1412,17 @@ pub(crate) fn default_state_path(base: &Path, mesh: &MeshId, author: &Nickname) 
     util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.state.json"))
 }
 
-/// The chunk folder of a node: `<runtime base>/<mesh folder>/<nickname>.chunks`. A run clears it when it starts.
+/// The chunk folder of one run of a node: `<runtime base>/<mesh folder>/<nickname>.<run>.chunks`. The run is in the
+/// name because two daemons of one nickname can share the mesh folder, and a run clears its folder when it starts.
 #[cfg(feature = "host")]
-pub(crate) fn default_chunks_path(base: &Path, mesh: &MeshId, author: &Nickname) -> PathBuf {
+pub(crate) fn default_chunks_path(
+    base: &Path,
+    mesh: &MeshId,
+    author: &Nickname,
+    run: uuid::Uuid,
+) -> PathBuf {
     use crate::util;
-    util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.chunks"))
+    util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.{}.chunks", run.simple()))
 }
 
 /// The keys of this run, under the state path that [`keys_state_path`] gives. `mesh` is the mesh id and the

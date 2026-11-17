@@ -46,7 +46,7 @@ impl fmt::Display for ChunkError {
                 formatter,
                 "the {what} lock was poisoned by a panic in another thread"
             ),
-            Self::Store { step, .. } => formatter.write_str(step),
+            Self::Store { step, source } => write!(formatter, "{step}: {source}"),
         }
     }
 }
@@ -57,5 +57,25 @@ impl Error for ChunkError {
             Self::Store { source, .. } => Some(source.as_ref()),
             Self::Malformed(_) | Self::Poisoned(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::ChunkError;
+
+    #[test]
+    fn a_store_error_shows_the_error_of_the_backend() {
+        let error = ChunkError::Store {
+            step: "clearing a folder".to_owned(),
+            source: io::Error::other("Directory not empty").into(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "clearing a folder: Directory not empty",
+            "the text must name the cause, not only the step"
+        );
     }
 }
