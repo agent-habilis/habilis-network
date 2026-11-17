@@ -188,6 +188,39 @@ async fn maps_round_trip(harness: &impl Harness) {
     );
 }
 
+async fn a_dropped_map_is_absent_and_a_sweep_still_frees_its_chunks(harness: &impl Harness) {
+    let store = harness.store();
+    let bytes = body(1024, 13);
+    let map = ChunkMap::build(&bytes);
+    store.put_map(&map).await.expect("put_map");
+    store
+        .put(map.leaf(0).expect("one"), &bytes)
+        .await
+        .expect("put");
+
+    store.drop_map(map.root()).await.expect("drop_map");
+    assert_eq!(
+        store.map(map.root()).await.expect("map"),
+        None,
+        "a dropped map is absent from the store"
+    );
+    assert!(
+        store.has(map.leaf(0).expect("one")).await.expect("has"),
+        "dropping a map must keep its chunks until a sweep"
+    );
+    store
+        .drop_map(map.root())
+        .await
+        .expect("a second drop of the same root is not an error");
+
+    store.start_marking().await.expect("start");
+    let dropped = store.sweep().await.expect("sweep");
+    assert_eq!(
+        dropped, 1,
+        "a sweep with no mark frees the chunk of the dropped map"
+    );
+}
+
 async fn an_unknown_root_covers_nothing(harness: &impl Harness) {
     let store = harness.store();
     let map = ChunkMap::build(&body(4096, 5));
@@ -843,6 +876,15 @@ mod mem {
     }
 
     #[test]
+    fn a_dropped_map_is_absent_and_a_sweep_still_frees_its_chunks() {
+        block_on(
+            super::a_dropped_map_is_absent_and_a_sweep_still_frees_its_chunks(&MemHarness(
+                InMemoryStore::new(),
+            )),
+        );
+    }
+
+    #[test]
     fn an_unknown_root_covers_nothing() {
         block_on(super::an_unknown_root_covers_nothing(&MemHarness(
             InMemoryStore::new(),
@@ -1018,6 +1060,13 @@ mod fs_store {
     #[test]
     fn maps_round_trip() {
         block_on(super::maps_round_trip(&FsHarness::new()));
+    }
+
+    #[test]
+    fn a_dropped_map_is_absent_and_a_sweep_still_frees_its_chunks() {
+        block_on(
+            super::a_dropped_map_is_absent_and_a_sweep_still_frees_its_chunks(&FsHarness::new()),
+        );
     }
 
     #[test]

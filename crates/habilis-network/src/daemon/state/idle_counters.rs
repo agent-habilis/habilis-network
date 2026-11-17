@@ -93,6 +93,8 @@ pub(crate) struct ExternalArms {
     /// The gossip stream ended or gave an error.
     pub gossip_end: u64,
     pub unicast: u64,
+    /// The chunk requests that the event loop answered.
+    pub chunk: u64,
     pub path_rx: u64,
     pub address: u64,
     pub direct_rx: u64,
@@ -130,6 +132,7 @@ impl ExternalArms {
             + self.lagged
             + self.gossip_end
             + self.unicast
+            + self.chunk
             + self.path_rx
             + self.address
             + self.direct_rx
