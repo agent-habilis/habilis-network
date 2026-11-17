@@ -35,6 +35,7 @@ pub(crate) mod beacon;
 // want: it spools to disk and stands up a second iroh endpoint on its own ALPN.
 #[cfg(feature = "blob")]
 pub(crate) mod blob;
+pub(crate) mod chunk_fetch;
 pub(crate) mod daemon;
 pub(crate) mod gossip;
 pub(crate) mod lifecycle;

@@ -12,6 +12,9 @@ value, and the store keeps each slice at its newest version.
   nickname keeps its slice in a pending set until it returns.
 - A slice of a key outside the roster, or of a lapsed key, waits in a
   pending set, bounded in count and in time, until the key joins or returns.
+- A value past one frame is a pointer to chunks (`ChunkPointer`). The view
+  keeps the last complete value of an author until the new one is fetched.
+  The encoded value is 1 MiB at most.
 
 See `src/lib.rs` for the API: `SliceStore`, `SliceLimits`, and the
 sealed-body functions in `wire`.

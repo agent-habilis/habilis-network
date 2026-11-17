@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+use tracing_subscriber::filter::{EnvFilter, LevelFilter, Targets};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{Context, SubscriberExt as _};
 use tracing_subscriber::{Layer, fmt as tracing_fmt};
@@ -43,6 +43,10 @@ thread_local! {
 
 /// The end of the name of a thread that a runtime of this crate starts for a test.
 const WORKER: &str = "/worker";
+
+/// The target of the DNS resolver that reads `/etc/hosts`. Its WARN is about a line of the file on the machine, such
+/// as a host name with no address on a CI runner, and not about the code under test.
+const HOSTS_FILE: &str = "hickory_resolver::hosts";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -312,9 +316,12 @@ where
             .with_ansi(mode == Mode::Stderr)
             .with_writer(writer)
             .with_filter(filter);
+        let caught: Targets = Targets::new()
+            .with_default(LevelFilter::WARN)
+            .with_target(HOSTS_FILE, LevelFilter::ERROR);
         let layers = tracing_subscriber::registry()
             .with(print)
-            .with(Catch.with_filter(LevelFilter::WARN));
+            .with(Catch.with_filter(caught));
         layers
             .try_init()
             .expect("another global tracing subscriber is installed");
