@@ -2332,6 +2332,26 @@ mod tests {
         assert!(!node.rides_nostr(bob), "the proof goes with the endpoint");
     }
 
+    /// A sighted endpoint that is not on the roster yet stays a member of the Nostr transport
+    /// through the next sighting and the next alive tick: its datagrams are answered until it
+    /// joins the roster or the bounded list of sightings forgets it.
+    #[test]
+    fn a_sighted_endpoint_stays_a_nostr_member_after_another_sighting_and_a_tick() {
+        use habilis_network_iroh_nostr_transport::NostrTransport;
+        let _guard = ::habilis_network_test_tracing::init();
+        let (first, second) = (endpoint_id(21), endpoint_id(22));
+        let mut node = fresh_state();
+        let transport = NostrTransport::new(endpoint_id(20));
+        node.webrtc_admission.set_nostr(transport.clone());
+        node.note_known_endpoint(first);
+        node.note_known_endpoint(second);
+        node.feed_nostr_members();
+        assert!(
+            transport.knows(first) && transport.knows(second),
+            "both sighted endpoints are members, though neither is on the roster"
+        );
+    }
+
     /// A pair that a probe proved over Nostr is remembered: when the probe connection is gone the
     /// selected kind reads as none, and a graft would dial a gossip link that the hook closes at
     /// once. A report of another path takes the proof back.

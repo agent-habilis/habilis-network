@@ -126,6 +126,16 @@ impl NostrTransport {
         opened
     }
 
+    /// Whether `peer` is a member that this transport answers: see
+    /// [`set_known_peers`](Self::set_known_peers).
+    #[must_use]
+    pub fn knows(&self, peer: EndpointId) -> bool {
+        self.known
+            .lock()
+            .expect("the known members")
+            .contains(&peer)
+    }
+
     /// Whether an active transport serves the plan `keys` and `ranking`: `None` when it is not
     /// active, `Some(true)` for the same plan, and `Some(false)` for other keys or another relay
     /// list. A caller that hands one transport to a mesh refuses the second answer: the transport

@@ -2455,24 +2455,27 @@ impl EventLoopState {
     pub(crate) fn note_known_endpoint(&mut self, peer: EndpointId) -> bool {
         let first = self.known_endpoints.insert(peer);
         if first {
-            self.feed_nostr_members(Some(peer));
+            self.feed_nostr_members();
         }
         first
     }
 
-    /// The members that the Nostr transport answers: the roster. The list of sighted endpoints is
-    /// bounded and evicts a live member when it is full, and the member would lose its replies.
+    /// The members that the Nostr transport answers: the roster, and the sighted endpoints that
+    /// are not on it yet. The list of sightings is bounded and evicts the oldest when it is full,
+    /// so it is the bounded set of pending newcomers, and a live member does not depend on it: the
+    /// roster holds the member.
     pub(crate) fn nostr_member_ids(&self) -> HashSet<EndpointId> {
         let addresses = self.member_addresses();
-        addresses.iter().map(|address| address.id).collect()
+        let mut members: HashSet<EndpointId> = addresses.iter().map(|address| address.id).collect();
+        members.extend(self.known_endpoints.iter().copied());
+        members
     }
 
-    /// Tell the Nostr transport its members, and `newcomer` too: an endpoint that was just sighted
-    /// is not on the roster yet, and it must get its reply at once.
-    pub(crate) fn feed_nostr_members(&self, newcomer: Option<EndpointId>) {
-        let mut members = self.nostr_member_ids();
-        members.extend(newcomer);
-        self.webrtc_admission.set_known_peers(members);
+    /// Tell the Nostr transport its members. A newcomer that was just sighted is in the list of
+    /// sightings already, and it gets its reply at once.
+    pub(crate) fn feed_nostr_members(&self) {
+        self.webrtc_admission
+            .set_known_peers(self.nostr_member_ids());
     }
 
     /// A probe proved `peer` over Nostr: see [`Self::rides_nostr`].
