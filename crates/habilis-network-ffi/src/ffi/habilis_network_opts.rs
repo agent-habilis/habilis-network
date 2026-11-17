@@ -2,7 +2,7 @@ use std::ffi::c_char;
 
 use std::ptr;
 /// The mesh selectors, mirroring `habilis_network_opts` in the header. String fields are
-/// NUL-terminated C strings or NULL; `max_connections == 0` takes the engine default (32).
+/// NUL-terminated C strings or NULL; `max_connections == 0` takes the engine default (16).
 #[repr(C)]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]

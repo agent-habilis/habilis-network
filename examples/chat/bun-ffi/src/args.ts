@@ -27,7 +27,7 @@ export const USAGE = `usage: bun src/main.ts <how to reach the mesh> [options]
                           same list; relay needs relay in --lookup)
     --relay-url <url>     custom relay ladder, repeatable (which relay, nothing
                           more; part of the mesh id like --transport)
-    --max-connections <n> cap on the direct connections (default 32)
+    --max-connections <n> cap on the direct connections (default 16)
     --json                automation mode: NDJSON events out, commands in
 `
 

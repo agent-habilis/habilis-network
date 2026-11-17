@@ -139,7 +139,7 @@ About the multihop row: in a full direct mesh no cell goes through a relay hop. 
 
 ## Boundary test: N = 60 and N = 66
 
-The default gossip active view was 64 when this test ran (`GOSSIP_ACTIVE_VIEW_CAPACITY`, now `MAX_CONNECTIONS` = 32, `crates/habilis-network-util/src/tuning.rs`). The test was this: if N = 60 forms and N = 66 loops on `re-graft the rendezvous`, the limit is the 64 boundary.
+The default gossip active view was 64 when this test ran (`GOSSIP_ACTIVE_VIEW_CAPACITY`, now `MAX_CONNECTIONS` = 16, `crates/habilis-network-util/src/tuning.rs`). The test was this: if N = 60 forms and N = 66 loops on `re-graft the rendezvous`, the limit is the 64 boundary.
 
 Result, UDP, gossip only:
 
@@ -214,7 +214,7 @@ This section turns the measurements above into a rule for two caps. Phase 2 of t
 
 ### The two caps
 
-- **G** is the size of the gossip active view (`max_peers`). It merged with C into `max_connections`, and its default is now 32 (`MAX_CONNECTIONS` in `crates/habilis-network-util/src/tuning.rs`).
+- **G** is the size of the gossip active view (`max_peers`). It merged with C into `max_connections`, and its default is now 16 (`MAX_CONNECTIONS` in `crates/habilis-network-util/src/tuning.rs`).
 - **D** was the cap on WebRTC sessions. Decision D11 replaced it with **C**, the ceiling of direct connections, which counts WebRTC sessions and unicast connections together. It merged with G into `max_connections`, whose default is 32 (`MAX_CONNECTIONS`). See the section "The ceiling C of direct connections (decision D11)" at the end of this document. The text and the measurements below were made with D, before D11.
 - D counted WebRTC sessions only. Plain QUIC connections were not counted, and no count cap limited them. The idle closes limited them in time: 120 s on the dial side and 240 s on the accept side. Today one backstop of 900 s (`DIRECT_IDLE_BACKSTOP`) replaces both.
 
@@ -414,7 +414,7 @@ The stream counts, the datagram buffer, the keep-alive, the idle timeout and the
 
 ### Keep-alive cost
 
-iroh sends a heartbeat on each connection every 5 s. At `max_connections` = 32, that is 32 connections and about 6 packets per second when the node is idle (before the merge, C = 64 and G = 32 gave 96 connections and about 19). This number comes from the iroh default and from the sum. It is not measured here.
+iroh sends a heartbeat on each connection every 5 s. At `max_connections` = 16, that is 16 connections and about 3 packets per second when the node is idle (before the merge, C = 64 and G = 32 gave 96 connections and about 19). This number comes from the iroh default and from the sum. It is not measured here.
 
 ### RAM after D11
 

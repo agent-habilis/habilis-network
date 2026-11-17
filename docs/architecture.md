@@ -902,9 +902,9 @@ Measured with the `habilis-network-stream` binary on one machine (2026-09-27), 1
 
 Capacity ceilings:
 
-- `max_connections` (default 32) is the one cap on the direct connections of a node: gossip neighbors, WebRTC sessions and unicast connections together.
+- `max_connections` (default 16) is the one cap on the direct connections of a node: gossip neighbors, WebRTC sessions and unicast connections together.
   It is also the size of the HyParView active view, raised from the iroh-gossip default of 5.
-  A mesh of 33 members or fewer forms a full mesh with zero membership churn.
+  A mesh of 17 members or fewer forms a full mesh with zero membership churn.
 - Each live link costs about 0.5 MB of resident memory, and broadcast amplification grows with the square of the mesh size.
 
 What the engine is not:

@@ -3616,15 +3616,15 @@ mod tests {
         });
     }
 
-    // The default of the one bound: 32 direct connections, gossip neighbors, `WebRTC` sessions
+    // The default of the one bound: 16 direct connections, gossip neighbors, `WebRTC` sessions
     // and unicast connections together.
     #[test]
-    fn the_default_bound_is_32_connections() {
+    fn the_default_bound_is_16_connections() {
         let _guard = ::habilis_network_test_tracing::init();
         assert_eq!(
             tuning::MAX_CONNECTIONS,
-            32,
-            "the default of max_connections is 32"
+            16,
+            "the default of max_connections is 16"
         );
     }
 
