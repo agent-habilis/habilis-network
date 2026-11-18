@@ -565,9 +565,6 @@ impl<S: Subscriber> Layer<S> for Catch {
         let shared = own.is_empty();
         let metadata = event.metadata();
         let level = *metadata.level();
-        if is_host_config_warn(level, metadata.target(), &fields.text) {
-            return;
-        }
         let target = metadata.target().to_owned();
         let logged = || Logged {
             level,
@@ -613,15 +610,6 @@ impl<S: Subscriber> Layer<S> for Catch {
             });
         }
     }
-}
-
-/// Whether the event is the WARN of hickory about a line of the hosts file that does not start with
-/// an IP. It reports the config of the host machine, not our code: a CI runner on EC2 has a
-/// line that starts with its hostname. Any other event of hickory still counts.
-fn is_host_config_warn(level: Level, target: &str, text: &str) -> bool {
-    level == Level::WARN
-        && target == "hickory_resolver::hosts"
-        && text.starts_with("could not parse an IP from hosts file")
 }
 
 #[derive(Default)]

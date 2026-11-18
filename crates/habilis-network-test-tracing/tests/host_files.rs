@@ -32,3 +32,19 @@ fn an_error_from_the_hosts_target_still_fails() {
     let text = text.expect("the guard must panic on an error");
     assert!(text.contains("unexpected ERROR"), "{text}");
 }
+
+#[test]
+fn the_same_text_from_another_hickory_target_still_fails() {
+    let text = panic_text(|| {
+        let _log = habilis_network_test_tracing::init();
+        tracing::warn!(
+            target: "hickory_resolver::config",
+            "could not parse an IP from hosts file (\"ip-10-0-128-25.ec2.internal\")"
+        );
+    });
+    let text = text.expect("the guard must panic");
+    assert!(
+        text.contains("unexpected WARN hickory_resolver::config"),
+        "{text}"
+    );
+}
