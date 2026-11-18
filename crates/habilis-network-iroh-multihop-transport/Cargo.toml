@@ -49,7 +49,7 @@ test-hooks = []
 habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
 tokio.workspace = true
 # A local relay server, for the tests that put a connection on the relay.
-iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "339b1053fb322e82e565f3a059d902f29c712b96", default-features = false, features = ["server"] }
+iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "5d1260f7de2a68c5aeb6ffde47e8c38ecadf3ae7", default-features = false, features = ["server"] }
 # The tables that take a rung away from one node, for the selector's unit tests.
 habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transport-util", features = ["test-hooks"] }
 # For the e2e that puts both custom transports on one endpoint.
