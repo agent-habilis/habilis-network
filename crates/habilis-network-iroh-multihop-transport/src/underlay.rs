@@ -1141,6 +1141,76 @@ mod tests {
         });
     }
 
+    /// The own vector of a forwarder that links to `neighbor` only.
+    fn link_only_to(forwarder: &Forwarder, neighbor: AppId) {
+        let own_key = SecretKey::from_bytes(&[99; 32]);
+        let own_vector = LinkVector::signed(
+            &own_key,
+            topology::wall_clock_ms(),
+            EndpointAddr::new(forwarder.underlay.id()),
+            vec![(neighbor, 1)],
+        );
+        assert!(
+            forwarder
+                .topology
+                .write()
+                .expect("topology lock poisoned")
+                .ingest(own_vector),
+            "the vector of this node is accepted"
+        );
+    }
+
+    /// The number of warnings that `body` logs on this thread.
+    fn warnings_in(body: impl FnOnce()) -> usize {
+        // the test counts warnings from the code under test and reads the count after
+        let warnings = Arc::new(AtomicUsize::new(0));
+        subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), body);
+        warnings.load(Ordering::Relaxed)
+    }
+
+    /// This node is in the middle of a route `A -> this -> B`. A cell of `A` passes, and its
+    /// connection proves that it arrived from `A`. The reply of `B` goes back to `A`, whose first
+    /// link-vector has not arrived, and this node links to `B` only. The reply is not a warning.
+    #[test]
+    fn a_middle_hop_of_a_reply_route_whose_origin_has_no_vector_is_not_a_warning() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            let (origin, destination) = (stranger(160), stranger(161));
+            link_only_to(&forwarder, destination.app_id);
+            let forward = cell(vec![self_hop(&forwarder), destination], 0, origin);
+            forwarder.handle_cell(forward, origin.underlay_id);
+            let reply = cell(vec![self_hop(&forwarder), origin], 0, destination);
+            let warnings = warnings_in(|| forwarder.handle_cell(reply, destination.underlay_id));
+            assert_eq!(
+                forwarder.counters().forwarded,
+                2,
+                "both cells were forwarded"
+            );
+            assert_eq!(
+                warnings, 0,
+                "the middle hop of a reply route is not a warning"
+            );
+            forwarder.underlay.close().await;
+        });
+    }
+
+    /// The hop that a forwarded cell arrived from is the only hop that this node hears. A hop that
+    /// the cell only names, such as the next hop of a reply, stays a warning.
+    #[test]
+    fn a_middle_hop_still_warns_for_a_hop_that_no_cell_arrived_from() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            let (origin, destination, other) = (stranger(160), stranger(161), stranger(162));
+            link_only_to(&forwarder, destination.app_id);
+            let forward = cell(vec![self_hop(&forwarder), destination], 0, origin);
+            forwarder.handle_cell(forward, origin.underlay_id);
+            let reply = cell(vec![self_hop(&forwarder), other], 0, destination);
+            let warnings = warnings_in(|| forwarder.handle_cell(reply, destination.underlay_id));
+            assert_eq!(warnings, 1, "a hop that no cell arrived from is a warning");
+            forwarder.underlay.close().await;
+        });
+    }
+
     #[test]
     fn a_hop_without_a_vector_is_logged_once_each() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
