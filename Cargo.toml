@@ -139,8 +139,8 @@ iroh-dns = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", 
 # (rkuhn/swarm-discovery#28). Neither change has an upstream path — n0 will
 # not point their crates at ours — so delete the fork the moment the iroh pins
 # become unnecessary and swarm-discovery 0.6.4+ ships.
-iroh-mdns-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "30033c81b4839c7a1869a215788d52954cd70ab3" }
-iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "30033c81b4839c7a1869a215788d52954cd70ab3" }
+iroh-mdns-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "706b20795949493f0f21dc6ee9ac69c21dbbceeb" }
+iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "706b20795949493f0f21dc6ee9ac69c21dbbceeb" }
 # `default-features = false` for the same reason as `iroh`: the browser leg
 # cannot carry the host-only defaults.
 #
@@ -154,7 +154,7 @@ iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/a
 # Neighbor ping-pong that two nodes could start (the peers a node answered are remembered), then the
 # fix of a join walk that died at the contact node (the renew arm of ForwardJoin goes on), then the
 # expiry of the answers a node remembered (a peer that shed its side and asks again is answered).
-iroh-gossip = { version = "=0.102.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "e6e22024d3e9d5d3a3ecc2333b1821513dcada27", default-features = false, features = ["net"] }
+iroh-gossip = { version = "=0.102.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "3f21bd68d04192aab4458bd873671ba798cecf5d", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
 # and it resolves to the same crates.io release iroh itself depends on.
