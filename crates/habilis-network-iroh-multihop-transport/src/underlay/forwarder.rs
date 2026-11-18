@@ -58,10 +58,10 @@ pub(crate) struct Forwarder {
     pub(super) unresolved_hops: AtomicU64,
     /// The hops that got a log line, and whether it was a warning: see [`UNRESOLVED_SEEN_CAP`].
     pub(super) unresolved_seen: Mutex<HashMap<UnderlayId, bool>>,
-    /// The hops that named a cell this node delivered: the sender and the hops of its route. And
-    /// the hop that a cell that this node forwarded arrived from. A reply goes back along that
-    /// route reversed, so these are the hops that can lack a vector for a normal reason: see
-    /// [`HEARD_HOPS_CAP`].
+    /// The hops that a cell arrived from, whether this node delivered or forwarded the cell: the
+    /// connection proves each of them. A reply goes back along the route of a cell reversed, so
+    /// the first hop of a reply to a delivered cell, and the origin of a reply that this node
+    /// relays, can lack a vector for a normal reason: see [`HEARD_HOPS_CAP`].
     pub(super) heard_hops: Mutex<HeardHops>,
 }
 
@@ -108,8 +108,8 @@ impl Forwarder {
     /// by its id alone, never at an address that a cell carries, and counted: it may still be reachable by what iroh
     /// knows of the id, and if it is not, the cells are lost like any other.
     ///
-    /// Logged at debug when the hop is explained. A cell that this node delivered named it, or a
-    /// cell that this node forwarded arrived from it: a reply goes back along the reversed route
+    /// Logged at debug when the hop is explained. A cell that this node delivered or forwarded
+    /// arrived from it: a reply goes back along the reversed route
     /// of a cell, and the sender's first link-vector arrives some 15 s after it starts. Or it is a link of this node: the origin of a route
     /// saw the vector of a new neighbor before this node did, and the link reaches it. Or this
     /// node held the vector and removed it, because the peer left or the vector expired: the
@@ -175,16 +175,8 @@ impl Forwarder {
             .contains(&underlay_id)
     }
 
-    /// Remember the hops of the reply route of a delivered cell. Past [`HEARD_HOPS_CAP`] hops
-    /// the oldest is forgotten.
-    fn note_heard(&self, reply_route: &Route) {
-        for hop in reply_route.hops() {
-            self.note_heard_hop(hop.underlay_id);
-        }
-    }
-
-    /// Remember one hop that named a cell. The ceiling and the order of forgetting are those of
-    /// [`Self::note_heard`].
+    /// Remember one hop that a cell arrived from. Past [`HEARD_HOPS_CAP`] hops the oldest is
+    /// forgotten.
     fn note_heard_hop(&self, underlay_id: UnderlayId) {
         let mut heard = self.heard_hops.lock().expect("heard hops poisoned");
         if !heard.set.insert(underlay_id) {
@@ -348,12 +340,14 @@ impl Forwarder {
     }
 
     /// Deliver a cell that terminated here to the local transport.
-    fn deliver(&self, cell: Cell) {
+    fn deliver(&self, cell: Cell, from: UnderlayId) {
         let Some(route) = Route::reverse_from(cell.path.hops(), cell.source) else {
             self.note_drop("return route is not a legal route");
             return;
         };
-        self.note_heard(&route);
+        // `from` is the one id of the cell that the connection proves: the first hop of `route`.
+        // The source and the other hops are fields of the cell that its sender chose.
+        self.note_heard_hop(from);
         let delivered = Delivered {
             remote: route.encode(),
             packet: cell.packet,
@@ -415,7 +409,7 @@ impl Forwarder {
                 self.forwarded.fetch_add(1, Ordering::Relaxed);
                 self.enqueue(&next, cell.advanced());
             }
-            None => self.deliver(cell),
+            None => self.deliver(cell, from),
         }
     }
 

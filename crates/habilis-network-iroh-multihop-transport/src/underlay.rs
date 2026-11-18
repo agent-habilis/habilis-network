@@ -60,15 +60,16 @@ const MAX_WRITERS: usize = 64;
 /// the only bound, and it multiplies by the writer count instead of capping it.
 const FORWARD_QUEUE_BYTES: usize = 32 * 1024 * 1024;
 
-/// Hops of delivered cells that the forwarder remembers, so that a reply along a reversed route
-/// can tell its first hop. The ids come off the wire, so the set has a ceiling.
+/// Hops that cells arrived from that the forwarder remembers, so that a reply along a reversed
+/// route can tell its first hop. The ids are those of connections that anyone can open, so the set
+/// has a ceiling.
 const HEARD_HOPS_CAP: usize = 1024;
 
 /// Hops without a vector that get a log line of their own. The ids come off the wire, so the map
 /// that remembers them has a ceiling.
 const UNRESOLVED_SEEN_CAP: usize = 128;
 
-/// The hops that named a cell this node delivered, newest last. Past [`HEARD_HOPS_CAP`] hops
+/// The hops that a cell arrived from, newest last. Past [`HEARD_HOPS_CAP`] hops
 /// the oldest is forgotten.
 #[derive(Debug, Default)]
 struct HeardHops {
@@ -1319,7 +1320,37 @@ mod tests {
         });
     }
 
-    /// The hops that delivered cells named are remembered past [`HEARD_HOPS_CAP`]: the oldest
+    /// A delivered cell names its source and the hops of its route, but only the hop that it
+    /// arrived from is proven by the connection. The hop that the cell arrived from is heard. A
+    /// hop that the cell only names, such as a source that no cell of its own reached this node
+    /// from, stays a warning when this node dials it.
+    #[test]
+    fn a_hop_that_a_delivered_cell_only_names_is_a_warning() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            let (previous, named_source) = (stranger(170), stranger(171));
+            let delivered = cell(vec![previous, self_hop(&forwarder)], 1, named_source);
+            forwarder.handle_cell(delivered, previous.underlay_id);
+            assert_eq!(forwarder.counters().delivered, 1, "the cell was delivered");
+            assert_eq!(
+                warnings_in(|| {
+                    forwarder.dial_addr(&previous);
+                }),
+                0,
+                "the hop that the cell arrived from is explained"
+            );
+            assert_eq!(
+                warnings_in(|| {
+                    forwarder.dial_addr(&named_source);
+                }),
+                1,
+                "a source that the connection does not prove is not explained"
+            );
+            forwarder.underlay.close().await;
+        });
+    }
+
+    /// The hops that delivered cells arrived from are remembered past [`HEARD_HOPS_CAP`]: the oldest
     /// hop is forgotten, and a reply to the newest cell is explained.
     #[test]
     fn a_hop_named_by_a_cell_past_the_heard_cap_is_not_a_warning() {
