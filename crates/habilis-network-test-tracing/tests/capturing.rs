@@ -41,3 +41,25 @@ fn a_warn_that_the_filter_hides_still_fails() {
         );
     });
 }
+
+#[test]
+fn a_failure_prints_the_last_200_captured_lines() {
+    support::without_rust_log("a_failure_prints_the_last_200_captured_lines", || {
+        let err = habilis_network_test_tracing::catch_panic(AssertUnwindSafe(|| {
+            let _log = init_capturing("capturing=info");
+            for step in 0..250 {
+                tracing::info!(target: "capturing", "step {step:03}");
+            }
+            tracing::warn!(target: "elsewhere", "link lost");
+        }))
+        .expect_err("the guard must panic");
+        let text: &String = err.downcast_ref().expect("panic text");
+        assert!(
+            text.contains("unexpected WARN elsewhere: link lost"),
+            "{text}"
+        );
+        assert!(text.contains("step 249"), "{text}");
+        assert!(text.contains("step 051"), "{text}");
+        assert!(!text.contains("step 049"), "{text}");
+    });
+}
