@@ -129,6 +129,9 @@ iroh-base = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh",
 # Only `iroh-mainline-address-lookup` names it, and only under `dht`. Pinned to
 # the same rev for the same reason as `iroh-base`.
 iroh-dns = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "5d1260f7de2a68c5aeb6ffde47e8c38ecadf3ae7" }
+# The relay server and client that the tests of two members put on a local relay. Same repo and rev as `iroh`,
+# so the graph holds one copy. A member adds `server` and its own `optional` or target scope.
+iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "5d1260f7de2a68c5aeb6ffde47e8c38ecadf3ae7", default-features = false }
 # The mDNS + mainline-DHT address-lookup providers, extracted from iroh core in
 # the 1.0 line. Forked for one reason only: they sat between this crate and iroh
 # and named iroh/iroh-base/iroh-dns from crates.io, which is what forced every
