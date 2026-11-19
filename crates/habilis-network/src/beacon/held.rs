@@ -6,11 +6,13 @@ use iroh::{Endpoint, EndpointAddr};
 use crate::lookup::{ProbeAnswer, TransportHandles, build_endpoint, probe_answer};
 use crate::protocol::meshes::LookupOpts;
 use crate::util::clock::Instant;
+use crate::util::tuning::RENDEZVOUS_CLOSE;
+use tokio::sync::oneshot;
 
 use super::rung_ladder::{admit_rung, forget_rungs, settle_on_rung};
 use super::{
     Rendezvous, RendezvousLane, RendezvousParams, RivalProbe, RungRead, RungWatch, claim,
-    releasable, rung_is_busy, spawn_rival_probe,
+    releasable, rendezvous, rung_is_busy, spawn_rival_probe,
 };
 
 use n0_future::task;
@@ -22,11 +24,14 @@ use std::time;
 /// reached the id at one rung may reuse that path for the next port and read a foreign rung as
 /// ours. All rungs at once, `budget` each, so eight silent rungs cost one budget. A rung whose
 /// prober did not bind is left unread, and read later by the walk. Each endpoint closes off this
-/// task: closing one that dialed a silent rung takes seconds.
+/// task: closing one that dialed a silent rung takes seconds. The closes are not detached: a run
+/// that ends before one is done would drop its endpoint open, so the caller holds the receivers
+/// of [`BusyRungReads::closes`] and waits for them at the end of the run. Each close is bounded by
+/// `RENDEZVOUS_CLOSE`.
 pub(crate) async fn read_busy_rungs(
     params: &RendezvousParams,
     budget: time::Duration,
-) -> Vec<(u16, ProbeAnswer)> {
+) -> BusyRungReads {
     let probes: Vec<_> = params
         .bind_ports
         .iter()
@@ -54,18 +59,32 @@ pub(crate) async fn read_busy_rungs(
                     .with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
                 let answer = probe_answer(&prober, address, budget).await;
                 tracing::debug!(target: "habilis_network::beacon", port, ?answer, "busy rung read at setup");
-                drop(task::spawn(async move { prober.close().await }));
-                Some((port, answer))
+                let closed = rendezvous::spawn_bounded_close(RENDEZVOUS_CLOSE, async move {
+                    prober.close().await;
+                });
+                Some((port, answer, closed))
             })
         })
         .collect();
-    let mut read = Vec::with_capacity(probes.len());
+    let mut reads = BusyRungReads {
+        answers: Vec::with_capacity(probes.len()),
+        closes: Vec::with_capacity(probes.len()),
+    };
     for probe in probes {
-        if let Ok(Some(reading)) = probe.await {
-            read.push(reading);
+        if let Ok(Some((port, answer, closed))) = probe.await {
+            reads.answers.push((port, answer));
+            reads.closes.push(closed);
         }
     }
-    read
+    reads
+}
+
+/// What [`read_busy_rungs`] read, and the closes of the endpoints that read it.
+#[derive(Debug, Default)]
+pub(crate) struct BusyRungReads {
+    pub(crate) answers: Vec<(u16, ProbeAnswer)>,
+    /// One per prober, each resolved when its endpoint is closed or the bound ran out.
+    pub(crate) closes: Vec<oneshot::Receiver<()>>,
 }
 
 /// Read the busy rungs of a private ladder without claiming one: admit the rung that serves our

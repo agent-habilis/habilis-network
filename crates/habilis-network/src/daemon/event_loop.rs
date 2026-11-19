@@ -266,6 +266,7 @@ async fn run_checked<Driver: NodeDriver>(
         rendezvous_params: rendezvous.rendezvous_params,
         rung_rx: rendezvous.rung_rx,
         rung_probe: rendezvous.rung_probe,
+        prober_closes: rendezvous.prober_closes,
         rung_reports,
         cohost: rendezvous.cohost,
         started,
@@ -847,6 +848,8 @@ struct EventLoop<Driver: NodeDriver> {
     rung_rx: watch::Receiver<Option<RelayUrl>>,
     /// The startup probe behind `rung_rx`, released with the rendezvous.
     rung_probe: Option<lookup::StoppableTask>,
+    /// The closes of the endpoints that read the busy rungs at setup.
+    prober_closes: Vec<oneshot::Receiver<()>>,
     /// What the probe tasks of the private ladder found, and the walk that asked for it.
     rung_reports: mpsc::UnboundedReceiver<beacon::RungReport>,
     /// When this member may serve the rendezvous (see [`CoHostPolicy`]).
@@ -918,6 +921,7 @@ struct Loop<'node, Driver: NodeDriver> {
     rendezvous_params: beacon::RendezvousParams,
     rung_rx: watch::Receiver<Option<RelayUrl>>,
     rung_probe: Option<lookup::StoppableTask>,
+    prober_closes: Vec<oneshot::Receiver<()>>,
     rung_reports: mpsc::UnboundedReceiver<beacon::RungReport>,
     cohost: CoHostPolicy,
     started: Instant,
@@ -958,6 +962,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         )
         .await;
         super::cohost_arm::wait_for_shed_close(&mut self.state).await;
+        super::cohost_arm::wait_for_prober_closes(self.prober_closes).await;
         match outcome {
             Ok(exit_after_release) => {
                 if exit_after_release {
@@ -1574,6 +1579,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         rendezvous_params,
         rung_rx,
         rung_probe,
+        prober_closes,
         rung_reports,
         cohost,
         started,
@@ -1654,6 +1660,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         rendezvous_params,
         rung_rx,
         rung_probe,
+        prober_closes,
         rung_reports,
         cohost,
         started,

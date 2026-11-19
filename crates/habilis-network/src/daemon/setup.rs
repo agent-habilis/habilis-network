@@ -26,7 +26,7 @@ use anyhow::Result;
 use super::setup_error::SetupError;
 use iroh::{Endpoint, RelayUrl};
 use rand::RngCore;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 #[cfg(all(unix, feature = "host"))]
 use zeroize::Zeroizing;
 
@@ -606,6 +606,8 @@ struct Assembled {
     webrtc_ice: transport::IceProfile,
     /// The raw topic string (`SetupKind::Topic` only); `None` for create/join.
     topic_string: Option<String>,
+    /// The closes of the endpoints that read the busy rungs at setup; the run waits for them at its end.
+    prober_closes: Vec<oneshot::Receiver<()>>,
 }
 
 /// G and C with `0` taken as the default. Every option set (`Opts`, the C
@@ -1579,6 +1581,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         address_book,
         webrtc_ice,
         topic_string,
+        prober_closes,
     } = assemble(kind, &build, injected).await?;
     // Read out of `build` before anything below moves what it borrows
     // (`author`, `sink`, `rung_tx`).
@@ -1633,6 +1636,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             // once the IPC socket accepts. Confirm/correct the optimistic rung 0 in the
             // background (covers a joiner, which has no beacon self-monitor of its own).
             rung_probe: spawn_startup_rung_confirmation(ladder, rung_tx),
+            prober_closes,
             cohost: cohost_override.unwrap_or(cohost),
         },
         runtime: RuntimeConfig {
@@ -1871,6 +1875,7 @@ async fn setup_create(
         address_book,
         webrtc_ice,
         topic_string: None,
+        prober_closes: Vec::new(),
     })
 }
 
@@ -1923,7 +1928,7 @@ async fn setup_join(
     // this registered address — the loopback port ladder (loopback-only) or
     // the chosen relay rung (reachable across machines).
     let read = beacon::read_busy_rungs(&rdv, SETUP_RUNG_READ).await;
-    let withheld = rungs_withheld_at_setup(build.cohost.unwrap_or(cohost), &read);
+    let withheld = rungs_withheld_at_setup(build.cohost.unwrap_or(cohost), &read.answers);
     register_rendezvous(&address_book, &rdv, &withheld);
     // We subscribe, background-connect to the rendezvous, and — for a plain
     // join — `daemon::run` defers co-hosting our own (same seed-id) rendezvous
@@ -1980,6 +1985,7 @@ async fn setup_join(
         address_book,
         webrtc_ice,
         topic_string,
+        prober_closes: read.closes,
     })
 }
 

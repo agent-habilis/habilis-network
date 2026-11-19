@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use iroh::Endpoint;
 use iroh::protocol::Router;
 use iroh_gossip::api::GossipTopic;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::gossip::event::NodeSink;
 use crate::protocol::meshes::{Mesh, MeshName};
@@ -190,6 +190,9 @@ pub(crate) struct RendezvousConfig {
     /// The backgrounded startup probe behind `rung_rx`, released on the way
     /// out with the rendezvous. `None` for an empty ladder.
     pub(crate) rung_probe: Option<lookup::StoppableTask>,
+    /// The closes of the endpoints that read the busy rungs at setup, each bounded. The end of
+    /// the run waits for them: a close that a runtime drop cut off leaves its endpoint open.
+    pub(crate) prober_closes: Vec<oneshot::Receiver<()>>,
     /// When this member may serve the rendezvous (beacon role).
     pub(crate) cohost: CoHostPolicy,
 }

@@ -1111,6 +1111,59 @@ fn shed_and_wait_mid_rewalk_closes_the_monitor_probe_endpoint() {
     );
 }
 
+/// Regression for `Endpoint dropped without calling Endpoint::close` at the end of a short run.
+/// The read of a busy rung at setup binds one throwaway endpoint per busy rung. A rung that says
+/// nothing makes its close take seconds, so a run that ends before it finishes drops the endpoint
+/// open with the runtime. The read hands the closes to the caller, and the end of the run waits.
+#[cfg(feature = "host")]
+#[test]
+fn reading_a_busy_rung_at_setup_leaves_no_endpoint_open_when_the_runtime_drops() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let (_silent, ports) = ladder_of_two();
+    let mut params = public_params();
+    params.bind_ports = ports;
+
+    let errors = testing::errors_through_runtime_drop(async {
+        let reads = super::read_busy_rungs(&params, std_Duration::from_millis(250)).await;
+        assert_eq!(reads.answers.len(), 1, "the one busy rung was read");
+        // what the end of the run does with the closes
+        for closed in reads.closes {
+            let _ = closed.await;
+        }
+    });
+
+    assert!(
+        !errors.contains("Endpoint dropped without calling"),
+        "the endpoint that read the busy rung reached its drop open:\n{errors}"
+    );
+}
+
+/// The control of the test above: a ladder with no busy rung binds no endpoint to read, so the
+/// runtime drop finds none open.
+#[cfg(feature = "host")]
+#[test]
+fn reading_a_ladder_with_no_busy_rung_leaves_no_endpoint_open_when_the_runtime_drops() {
+    let _guard = ::habilis_network_test_tracing::init();
+    let (silent, ports) = ladder_of_two();
+    drop(silent);
+    let mut params = public_params();
+    params.bind_ports = ports;
+
+    let errors = testing::errors_through_runtime_drop(async {
+        let reads = super::read_busy_rungs(&params, std_Duration::from_millis(250)).await;
+        assert!(
+            reads.answers.is_empty(),
+            "no rung is busy, so none was read"
+        );
+        assert!(reads.closes.is_empty(), "no prober was bound");
+    });
+
+    assert!(
+        !errors.contains("Endpoint dropped without calling"),
+        "an endpoint reached its drop open:\n{errors}"
+    );
+}
+
 /// A holder dials its own beacon, and the endpoint tries every address that it knows for the id:
 /// a rung that it did not bind can be held by an endpoint of another identity, which fails the
 /// dial as a whole. The mesh registers the whole ladder at start, when no rung is busy yet, so

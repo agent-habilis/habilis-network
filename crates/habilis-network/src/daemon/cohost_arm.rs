@@ -10,6 +10,7 @@
 use crate::daemon::state::TestHold;
 use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
 use std::time::Duration;
+use tokio::sync::oneshot;
 
 use iroh::{Endpoint, EndpointId};
 
@@ -331,6 +332,15 @@ pub(super) async fn maybe_reclaim(
 /// endpoint in flight. A receiver whose task was cancelled ends the wait too.
 pub(super) async fn wait_for_shed_close(state: &mut EventLoopState) {
     if let Some(closed) = state.beacon_closing.take() {
+        let _ = closed.await;
+    }
+}
+
+/// Waits for the closes of the endpoints that read the busy rungs at setup, so that the run does
+/// not end with one of them in flight. Each is bounded where it was spawned, and a receiver whose
+/// task was cancelled ends its wait too.
+pub(super) async fn wait_for_prober_closes(closes: Vec<oneshot::Receiver<()>>) {
+    for closed in closes {
         let _ = closed.await;
     }
 }
@@ -1680,6 +1690,45 @@ mod tests {
                 state.beacon_closing.is_none(),
                 "the wait leaves the close of the beacon in the state"
             );
+        });
+    }
+
+    /// The run ends after the closes of the endpoints that read the busy rungs at setup. Closing
+    /// one that dialed a silent rung takes seconds, and a host that ends the loop and drops its
+    /// runtime cuts a close that nothing waits for short: iroh logs an ERROR for the endpoint.
+    #[test]
+    fn the_end_of_the_run_waits_for_the_closes_of_the_rung_probers() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            const CLOSE_TAKES: Duration = Duration::from_millis(200);
+            let (done, closed) = oneshot::channel();
+            task::spawn(async move {
+                time::sleep(CLOSE_TAKES).await;
+                let _ = done.send(());
+            });
+            let started = time::Instant::now();
+
+            super::wait_for_prober_closes(vec![closed]).await;
+
+            assert!(
+                started.elapsed() >= CLOSE_TAKES,
+                "the end of the run returned before the close of a rung prober was done"
+            );
+        });
+    }
+
+    /// A prober close that was cancelled never answers, and the end of the run must not wait for it.
+    #[test]
+    fn the_end_of_the_run_does_not_wait_for_a_prober_close_that_was_cancelled() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (done, closed): (oneshot::Sender<()>, _) = oneshot::channel();
+            drop(done);
+
+            time::timeout(
+                Duration::from_secs(5),
+                super::wait_for_prober_closes(vec![closed]),
+            )
+            .await
+            .expect("the wait ends when the close task is gone");
         });
     }
 
