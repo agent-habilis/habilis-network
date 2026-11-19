@@ -1763,6 +1763,73 @@ fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
     });
 }
 
+/// The rung that a member read as ours is offered for one heal tick after the reading. A member
+/// that is meshed does not read the ladder again, so if the beacon is gone and a foreign beacon
+/// of another mesh binds the port, the book must not offer it at each heal registration until
+/// a probe reads it foreign.
+#[test]
+fn a_rung_read_as_ours_is_not_offered_after_a_heal_tick_without_a_new_reading() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let rung = 40_001;
+        let mut rungs = super::RungWatch::detached();
+        rungs.clear_foreign(rung);
+        assert_eq!(
+            rungs.offered_rungs(),
+            vec![rung],
+            "a fresh reading is offered"
+        );
+
+        rungs.expire_ours();
+
+        let none: Vec<u16> = Vec::new();
+        assert_eq!(
+            rungs.offered_rungs(),
+            none,
+            "a stale reading as ours is still offered after its owner left"
+        );
+        rungs.clear_foreign(rung);
+        assert_eq!(
+            rungs.offered_rungs(),
+            vec![rung],
+            "a new reading offers it again"
+        );
+    });
+}
+
+/// The beacon that this member holds is checked on its own rung: a check that reads ours keeps
+/// the rung offered, or the holder would drop it from its book one heal tick after the bind.
+#[test]
+fn the_check_of_our_own_rung_keeps_it_offered() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        use super::RungReport;
+        use crate::lookup::ProbeAnswer;
+
+        let params = public_params();
+        let node = SecretKey::generate().public();
+        let rung = 40_002;
+        let mut rungs = super::RungWatch::detached();
+        rungs.clear_foreign(rung);
+        rungs.note(
+            RungReport {
+                port: rung,
+                answer: ProbeAnswer::Ours,
+                generation: 0,
+            },
+            Instant::now(),
+        );
+        rungs.expire_ours();
+
+        let failed = rungs.own_rung_failed(&params, node, rung);
+
+        assert!(!failed, "a rung that answers as ours has not failed");
+        assert_eq!(
+            rungs.offered_rungs(),
+            vec![rung],
+            "the check of the own rung did not keep it offered"
+        );
+    });
+}
+
 /// A rung that a foreign listener held and that this member then binds is its own rung: it
 /// is not foreign any more, or `register_rendezvous` would leave it out of the book after each
 /// heal.

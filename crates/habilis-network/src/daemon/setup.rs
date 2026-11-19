@@ -133,7 +133,8 @@ fn spawn_startup_rung_confirmation(
 /// read can be the rung of another mesh, whose beacon would end the dial with its own identity.
 /// A rung that says nothing, or refuses, is not offered either: the member reads the ladder while
 /// it is not meshed (`read_ladder_while_unmeshed`, for every policy, a `discover` session included),
-/// admits the rung that answers as ours, and admits a silent rung that is not refused.
+/// and admits the rung that answers as ours. A silent rung is asked again and stays out until it
+/// answers.
 pub(crate) fn rungs_offered_at_setup(read: &[(u16, ProbeAnswer)]) -> Vec<u16> {
     read.iter()
         .filter(|(_, answer)| matches!(answer, ProbeAnswer::Ours))

@@ -92,14 +92,17 @@ pub(crate) struct RungWatch {
     /// that, and so does a listener of another program, so the answer cannot tell them apart. A
     /// dial of the rendezvous id tries every address of the id, and such a listener fails the dial
     /// as a whole, so the rung stays out of the book until it answers as ours. Silence is not
-    /// here: a host too loaded to answer reads the same, and its beacon is found by the dial.
+    /// here: a host too loaded to answer reads the same, so a silent rung is asked again, and it
+    /// stays out of the book like a refusing one until it answers as ours.
     pub(crate) refused: BTreeSet<u16>,
     /// The rungs that the walk read as serving the beacon of our own mesh, and has not read
-    /// otherwise since. Only these are offered to iroh for the rendezvous id
-    /// ([`Self::offered_rungs`]): a rung that nobody has proven to be ours can be taken by the
-    /// beacon of another mesh whose ladder shares the port, and a dial that meets it ends on its
-    /// identity.
-    pub(crate) ours: BTreeSet<u16>,
+    /// otherwise since, each with the time of the last reading as ours. Only these are offered to
+    /// iroh for the rendezvous id ([`Self::offered_rungs`]): a rung that nobody has proven to be
+    /// ours can be taken by the beacon of another mesh whose ladder shares the port, and a dial
+    /// that meets it ends on its identity. A reading as ours is good for one heal tick, as a
+    /// cached reading is: a member that is meshed reads no more, and if the beacon is gone and
+    /// another mesh binds the port, the rung must not stay in the book.
+    pub(crate) ours: BTreeMap<u16, Instant>,
     pub(crate) reports: mpsc::UnboundedSender<RungReport>,
     /// The probe tasks that are out. A task reports before it closes its prober, so the loop that
     /// ends has to wait for them: [`Self::finish`].
@@ -117,7 +120,7 @@ impl RungWatch {
             own_counted: None,
             foreign: BTreeSet::new(),
             refused: BTreeSet::new(),
-            ours: BTreeSet::new(),
+            ours: BTreeMap::new(),
             reports,
             tasks: Vec::new(),
         }
@@ -132,7 +135,7 @@ impl RungWatch {
     pub(crate) fn clear_foreign(&mut self, port: u16) {
         self.foreign.remove(&port);
         self.refused.remove(&port);
-        self.ours.insert(port);
+        self.ours.insert(port, Instant::now());
     }
 
     /// Our beacon on `port` is gone (shed, or released to re-probe): the rung is not ours any more,
@@ -148,13 +151,18 @@ impl RungWatch {
         self.ours.remove(&port);
     }
 
-    /// The rungs that the book offers for the rendezvous id: those that the walk read as ours,
-    /// and that no later reading took back ([`Self::foreign`], [`Self::refused`]). A rung that was
-    /// never read, or whose reading was not "ours", stays out until a probe says it is ours.
+    /// The rungs that the book offers for the rendezvous id: those that the walk read as ours
+    /// within the last heal tick, and that no later reading took back ([`Self::foreign`],
+    /// [`Self::refused`]). A rung that was never read, or whose reading was not "ours" or is
+    /// older than a heal tick, stays out until a probe says it is ours.
     pub(crate) fn offered_rungs(&self) -> Vec<u16> {
+        let now = Instant::now();
         let mut offered: Vec<u16> = Vec::new();
-        for port in &self.ours {
-            if !self.foreign.contains(port) && !self.refused.contains(port) {
+        for (port, read_at) in &self.ours {
+            if Self::alive(*read_at, now)
+                && !self.foreign.contains(port)
+                && !self.refused.contains(port)
+            {
                 offered.push(*port);
             }
         }
@@ -262,6 +270,10 @@ impl RungWatch {
             RungRead::Ours => {
                 self.own_misses = 0;
                 self.own_counted = None;
+                // The check of the beacon that we hold is a reading as ours: its rung stays offered.
+                if let Some(read_at) = self.ours.get_mut(&own_port) {
+                    *read_at = Instant::now();
+                }
                 false
             }
             RungRead::Unknown => {
@@ -292,6 +304,16 @@ impl RungWatch {
         let long_ago = heal_interval().saturating_mul(2);
         for probe in self.in_flight.values_mut() {
             probe.since = probe.since.checked_sub(long_ago).unwrap_or(probe.since);
+        }
+    }
+
+    /// Tests only: every rung is last read as ours longer ago than a heal tick, as when one has
+    /// passed.
+    #[cfg(test)]
+    pub(crate) fn expire_ours(&mut self) {
+        let long_ago = heal_interval().saturating_mul(2);
+        for read_at in self.ours.values_mut() {
+            *read_at = read_at.checked_sub(long_ago).unwrap_or(*read_at);
         }
     }
 
