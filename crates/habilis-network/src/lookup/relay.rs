@@ -252,7 +252,7 @@ struct HomingTimes {
 impl HomingTimes {
     /// The times of a real member: the process tuning, so that a test of the whole daemon can set
     /// them short. They are read once, when a follower starts, so
-    /// [`tuning::init`](crate::util::tuning::init) must run before any monitor starts.
+    /// [`tuning::init`] must run before any monitor starts.
     fn live() -> Self {
         Self {
             probe: RELAY_RUNG_PROBE,
