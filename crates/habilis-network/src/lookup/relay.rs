@@ -624,6 +624,11 @@ pub(crate) async fn select_bootstrap_rung(
 /// across members, and what makes a recovered earlier rung win over a later
 /// one on every (re)selection.
 ///
+/// A rung that answered while a lower rung was still silent has waited for it, and can be offline
+/// by the time that the lower rung says no. The walk asks that rung again before it takes it, and
+/// falls through to the next rung if it says no. A rung whose own answer arrives after every rung
+/// below it said no is taken at once: rung 0 is one probe.
+///
 /// Each probe gets a receiver whose sender the walk drops once it decides, or
 /// once `stop`'s sender is dropped. The walk then starts no more probes and
 /// waits for every probe to end, so no probe outlives it. Generic over the
@@ -653,7 +658,7 @@ where
         if may_start && (probes.is_empty() || Instant::now() >= next_start) {
             if let Some((index, rung)) = unstarted.next() {
                 let probe = reachable(rung.clone(), probes_stopped.clone());
-                probes.push(async move { (index, probe.await) });
+                probes.push(answer_of(index, probe));
             }
             next_start = Instant::now() + stagger;
             continue;
@@ -684,13 +689,32 @@ where
         }
         match lowest_reachable(&answers) {
             WalkVerdict::Waiting => {}
-            WalkVerdict::Rung(lowest) => {
+            // The rung answered itself, with every rung below it already said no: its answer is
+            // fresh.
+            WalkVerdict::Rung(lowest) if lowest == index => {
                 selected = ladder.get(lowest).cloned();
                 stop_probes = None;
+            }
+            // A rung below said no after this one answered, and the answer waited behind it. The
+            // rung can be offline now, as the old walk, which probed one rung after the other,
+            // would have found: ask it again, and take the rung above if it says no.
+            WalkVerdict::Rung(lowest) => {
+                if let Some(rung) = ladder.get(lowest)
+                    && let Some(slot) = answers.get_mut(lowest)
+                {
+                    *slot = None;
+                    let probe = reachable(rung.clone(), probes_stopped.clone());
+                    probes.push(answer_of(lowest, probe));
+                }
             }
             WalkVerdict::NoRung => stop_probes = None,
         }
     }
+}
+
+/// The answer of one probe, with the index of the rung that it probed.
+async fn answer_of(index: usize, probe: impl Future<Output = bool>) -> (usize, bool) {
+    (index, probe.await)
 }
 
 /// What the answers of a walk so far decide.
@@ -2666,6 +2690,132 @@ mod tests {
                 vec!["a", "b"],
                 "the walk stops every probe in flight"
             );
+        });
+    }
+
+    /// The script of one fake rung: what each probe of it answers, after how many milliseconds.
+    /// The probe that is the n-th of the rung takes the n-th answer, or the last one when the
+    /// script is shorter.
+    type Script = (&'static str, &'static [(u64, bool)]);
+
+    /// Run the ladder walk over scripted rungs on paused time. Returns the selected rung and the
+    /// rungs of the probes, in the order that they started.
+    async fn walk_scripted(
+        script: &[Script],
+        stagger: std_Duration,
+    ) -> (Option<String>, Vec<String>) {
+        time::pause();
+        let hosts: Vec<&str> = script.iter().map(|(host, _)| *host).collect();
+        let ladder = rungs(&hosts);
+        let started = cell::RefCell::new(Vec::new());
+        let selected = select_first_reachable(&ladder, None, stagger, |rung, probes_stopped| {
+            let host = short_host(&rung);
+            let (_, answers) = script
+                .iter()
+                .find(|(scripted, _)| *scripted == host)
+                .expect("each rung has a script");
+            let nth: usize = started
+                .borrow()
+                .iter()
+                .filter(|seen| **seen == host)
+                .count();
+            let scripted = answers.get(nth).or_else(|| answers.last());
+            let (delay, up) = scripted
+                .copied()
+                .expect("each rung scripts one answer at least");
+            let delay = std_Duration::from_millis(delay);
+            started.borrow_mut().push(host);
+            async move {
+                tokio::select! {
+                    () = time::sleep(delay) => up,
+                    () = super::stopped(Some(probes_stopped)) => false,
+                }
+            }
+        })
+        .await;
+        (host_of(selected.as_ref()), started.into_inner())
+    }
+
+    /// **A rung that answered while a lower rung was still silent is asked again before the walk
+    /// takes it.**
+    ///
+    /// Rung 0 is silent for 3 s. Rung 1 answers at 1.5 s, and is offline again when rung 0 says
+    /// no. Rung 2 stays up. The old sequential walk first probed rung 1 after rung 0 timed out,
+    /// found it dead, and fell through to rung 2.
+    #[test]
+    fn a_rung_that_answered_behind_a_silent_one_is_asked_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (selected, started) = walk_scripted(
+                &[
+                    ("a", &[(3000, false)]),
+                    ("b", &[(1500, true), (10, false)]),
+                    ("c", &[(2000, true)]),
+                ],
+                std_Duration::from_secs(1),
+            )
+            .await;
+            assert_eq!(
+                selected.as_deref(),
+                Some("c"),
+                "rung 1 went offline while rung 0 was silent: the walk falls through to rung 2"
+            );
+            assert_eq!(
+                started,
+                vec!["a", "b", "c", "b"],
+                "rung 1 is asked again when rung 0 says no"
+            );
+        });
+    }
+
+    /// **A rung that still answers when it is asked again is the pick.**
+    #[test]
+    fn a_rung_that_answers_again_behind_a_silent_one_is_picked() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (selected, started) = walk_scripted(
+                &[
+                    ("a", &[(3000, false)]),
+                    ("b", &[(1500, true), (10, true)]),
+                    ("c", &[(2000, true)]),
+                ],
+                std_Duration::from_secs(1),
+            )
+            .await;
+            assert_eq!(selected.as_deref(), Some("b"), "rung 1 is still up");
+            assert_eq!(
+                started,
+                vec!["a", "b", "c", "b"],
+                "rung 1 is asked once more, after rung 0 says no"
+            );
+        });
+    }
+
+    /// **A rung 0 that answers at once is picked on its first answer.**
+    ///
+    /// The fast path stays: no later rung is probed, and nothing is asked twice.
+    #[test]
+    fn a_rung_that_answers_first_with_nothing_below_it_is_not_asked_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (selected, started) = walk_scripted(
+                &[("a", &[(10, true)]), ("b", &[(10, true)])],
+                std_Duration::from_secs(1),
+            )
+            .await;
+            assert_eq!(selected.as_deref(), Some("a"), "rung 0 answers");
+            assert_eq!(started, vec!["a"], "one probe, and no later rung");
+        });
+    }
+
+    /// **A rung that answers after every lower rung said no is picked on its first answer.**
+    #[test]
+    fn a_rung_that_answers_after_the_lower_ones_said_no_is_not_asked_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (selected, started) = walk_scripted(
+                &[("a", &[(10, false)]), ("b", &[(10, true)])],
+                std_Duration::from_secs(1),
+            )
+            .await;
+            assert_eq!(selected.as_deref(), Some("b"), "rung 1 answers");
+            assert_eq!(started, vec!["a", "b"], "each rung is probed once");
         });
     }
 
