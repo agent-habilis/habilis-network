@@ -21,6 +21,8 @@ mod rung_path;
 mod rung_refresh;
 mod stoppable_task;
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -340,6 +342,8 @@ async fn follow_rung(
             if is_ended(endpoint, stop) {
                 return;
             }
+            #[cfg(test)]
+            note_walk_ended();
             match follower.walked(selected, Instant::now()) {
                 Some(next) => {
                     let Some(next) = mover.take(endpoint, follower.rung(), next, "next").await
@@ -404,6 +408,19 @@ async fn next_wake(
         (answered, ended_at) = round_answers(round) => Wake::Round(answered, ended_at),
         () = n0future_time::sleep(until_read) => Wake::Read,
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: how many walks of a follower ended on this thread, whatever they found. The
+    /// runtime of a test is one thread, so a test reads the walks of its own followers.
+    static WALKS_ENDED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Tests only: count a walk that ended, before the follower acts on what it found.
+#[cfg(test)]
+fn note_walk_ended() {
+    WALKS_ENDED.with(|ended| ended.set(ended.get() + 1));
 }
 
 impl Mover<'_> {
@@ -1853,17 +1870,24 @@ mod tests {
                 ladder: vec![first.clone(), second],
                 rung: first,
             };
+            let before = walks_ended();
             let follower =
                 homing.follow_with(endpoint.clone(), return_times(std_Duration::from_hours(1)));
 
-            // The first walk starts after the 2 s that the rung gets to connect, and ends at once.
-            time::sleep(std_Duration::from_secs(8)).await;
+            // The first walk finds no rung. The follower walks again only if it went on: it needs 2
+            // more failed reads for a second walk.
+            time::timeout(std_Duration::from_secs(60), wait_for_walks(before, 2))
+                .await
+                .expect("the follower did not walk twice in 60 s");
             let alive = !follower.is_finished();
             let walked = walk_probes.load(Ordering::SeqCst);
             endpoint.close().await;
             drop(follower.await);
 
-            assert!(walked > 0, "no walk ran in 8 s, so the test proves nothing");
+            assert!(
+                walked > 0,
+                "no walk probed the last rung, so the test proves nothing"
+            );
             assert!(alive, "the follower ended while its endpoint was open");
         });
     }
@@ -1887,6 +1911,7 @@ mod tests {
                 ladder: vec![first.clone(), second.clone()],
                 rung: first.clone(),
             };
+            let before = walks_ended();
             let follower =
                 homing.follow_with(endpoint.clone(), return_times(std_Duration::from_hours(1)));
             assert_eq!(
@@ -1897,8 +1922,11 @@ mod tests {
 
             first_refuses.store(true, Ordering::SeqCst);
             second_refuses.store(true, Ordering::SeqCst);
-            // 2 failed reads and a walk of refused rungs: the walk finds no rung.
-            time::sleep(std_Duration::from_secs(8)).await;
+            // 2 failed reads and a walk of refused rungs: the walk finds no rung. Rung 1 comes back
+            // only after that walk ended, so that the move needs the walk after it.
+            time::timeout(std_Duration::from_secs(60), wait_for_walks(before, 1))
+                .await
+                .expect("no walk ended in 60 s");
             second_refuses.store(false, Ordering::SeqCst);
             let moved = time::timeout(
                 std_Duration::from_secs(30),
@@ -1945,6 +1973,7 @@ mod tests {
             let (_stop, stopped) = watch::channel(());
             let ladder = [first.clone(), second.clone()];
 
+            let before = walks_ended();
             first_refuses.store(true, Ordering::SeqCst);
             second_refuses.store(true, Ordering::SeqCst);
             let following = super::follow_rung(
@@ -1956,20 +1985,28 @@ mod tests {
                 Some(&stopped),
             );
             tokio::pin!(following);
-            let early = time::timeout(std_Duration::from_secs(8), &mut following).await;
+            // The follower ends in the outage, or its first walk ends and finds no rung. The test
+            // polls `following`, so the walk runs here.
+            let ended_early = tokio::select! {
+                () = &mut following => true,
+                waited = time::timeout(std_Duration::from_secs(60), wait_for_walks(before, 1)) => {
+                    waited.expect("no walk ended in 60 s");
+                    false
+                }
+            };
             let published_early = rung_rx.has_changed().unwrap_or(false);
             let held = rung_rx.borrow_and_update().clone();
             second_refuses.store(false, Ordering::SeqCst);
-            let later = if early.is_err() {
+            let later = if ended_early {
+                false
+            } else {
                 time::timeout(std_Duration::from_secs(30), &mut following)
                     .await
                     .is_ok()
-            } else {
-                false
             };
             endpoint.close().await;
 
-            assert!(early.is_err(), "the beacon follower ended in the outage");
+            assert!(!ended_early, "the beacon follower ended in the outage");
             assert!(
                 !published_early,
                 "the beacon published {held:?} in the outage"
@@ -2143,6 +2180,19 @@ mod tests {
             vec![second],
             "the first walk of a rung that never connected leaves it out"
         );
+    }
+
+    /// How many walks of followers ended on this thread so far.
+    fn walks_ended() -> usize {
+        super::WALKS_ENDED.with(cell::Cell::get)
+    }
+
+    /// Wait until `count` more walks than `before` ended, whatever they found. A walk is over when
+    /// its verdict is known, so a rung that comes back after this cannot change it.
+    async fn wait_for_walks(before: usize, count: usize) {
+        while walks_ended() < before + count {
+            time::sleep(std_Duration::from_millis(50)).await;
+        }
     }
 
     /// Wait until the home relay of the endpoint is `rung`.
