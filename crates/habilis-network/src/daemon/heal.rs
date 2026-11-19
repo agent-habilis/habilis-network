@@ -270,11 +270,13 @@ pub(super) async fn try_resubscribe(
 /// ladder walk already ran in the background task. A rung that the monitor
 /// of a beacon decided is applied only while that beacon is the one held:
 /// a beacon that was shed ends its monitor, but a decision that the monitor
-/// published at the same time can still arrive. If the new rung
+/// published at the same time can still arrive. A beacon that moved its own
+/// relay to a lower rung in place ([`lookup::RungChange::Moved`]) serves on:
+/// the loop registers the rung and does nothing else. If the new rung
 /// differs from the one we're homed on, re-pre-register `rendezvous_id`
 /// at it and drop the beacon so `maybe_cohost` rebuilds it homed on the
 /// new rung.
-pub(super) fn apply_rung_change(
+pub(crate) fn apply_rung_change(
     state: &mut EventLoopState,
     params: &mut beacon::RendezvousParams,
     rendezvous: &mut Option<beacon::Rendezvous>,
@@ -292,6 +294,25 @@ pub(super) fn apply_rung_change(
         return;
     }
     let selected = decision.rung;
+    // The beacon moved its own relay in place, and serves on. It is no new claim, so nothing of
+    // a re-home applies: the beacon is not shed, the arbitration epoch goes on, and the reading of
+    // the rendezvous stays. The loop only follows the rung: joiners are told where it is, and the
+    // next claim homes on it.
+    if decision.change == lookup::RungChange::Moved {
+        if let lookup::RungRefresh::Rehome(new) =
+            lookup::plan_rung_refresh(params.bootstrap_relay.as_ref(), selected)
+        {
+            tracing::info!(
+                target: "habilis_network::beacon",
+                old = ?params.bootstrap_relay,
+                new = ?new,
+                "the beacon moved to another relay rung in place; registering the rung"
+            );
+            params.bootstrap_relay = new;
+            setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
+        }
+        return;
+    }
     if let lookup::RungRefresh::Rehome(new) =
         lookup::plan_rung_refresh(params.bootstrap_relay.as_ref(), selected)
     {

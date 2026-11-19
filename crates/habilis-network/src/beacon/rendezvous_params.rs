@@ -46,7 +46,8 @@ pub(crate) struct RendezvousParams {
     /// chosen rung. The event loop holds the matching receiver and, on a
     /// change, updates [`Self::bootstrap_relay`], re-registers the
     /// rendezvous, and re-homes the beacon — so the heavy ladder walk
-    /// never runs on the sole event loop.
+    /// never runs on the sole event loop. A beacon that moved its own relay in place to a lower rung
+    /// is not re-homed: the loop updates the rung and the registration only.
     pub(crate) rung_tx: watch::Sender<lookup::RungDecision>,
 }
 

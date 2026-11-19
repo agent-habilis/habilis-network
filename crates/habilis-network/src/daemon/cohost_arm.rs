@@ -2360,6 +2360,7 @@ mod tests {
             let (_tx, rx) = watch::channel(lookup::RungDecision {
                 from: Some(retired),
                 rung: Some(rung_of("first")),
+                change: lookup::RungChange::Rehome,
             });
             let mut rendezvous = Some(beacon);
 
@@ -2396,6 +2397,7 @@ mod tests {
                 let (_tx, rx) = watch::channel(lookup::RungDecision {
                     from,
                     rung: Some(rung_of("first")),
+                    change: lookup::RungChange::Rehome,
                 });
                 let mut rendezvous = Some(beacon);
 
@@ -2417,6 +2419,67 @@ mod tests {
                     "the beacon is shed for a re-home (from the monitor: {from_monitor})"
                 );
             }
+        });
+    }
+
+    /// **A beacon that moved its own relay in place is followed by the loop, not shed.**
+    ///
+    /// The beacon serves on, so nothing of a new claim applies: the beacon stays held, the epoch of
+    /// the rival re-check goes on, and the reading of the rendezvous stays. The loop only follows
+    /// the rung: the parameters of the next claim, and the address that joiners are given.
+    #[test]
+    fn a_beacon_that_moved_in_place_is_followed_not_shed() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rung_of = |host: &str| -> iroh::RelayUrl {
+                format!("https://{host}.example/")
+                    .parse()
+                    .expect("a test host forms a valid https URL")
+            };
+            let mut params = public_params();
+            params.bootstrap_relay = Some(rung_of("second"));
+            let mut state = testing::fresh_state();
+            state.rival_recheck_rounds = 5;
+            state
+                .rendezvous_flags
+                .insert(state::RendezvousFlag::ProbeReadFree);
+            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
+            let (_tx, rx) = watch::channel(lookup::RungDecision {
+                from: Some(beacon.generation),
+                rung: Some(rung_of("first")),
+                change: lookup::RungChange::Moved,
+            });
+            let mut rendezvous = Some(beacon);
+
+            super::super::heal::apply_rung_change(&mut state, &mut params, &mut rendezvous, &rx);
+
+            assert_eq!(
+                params.bootstrap_relay,
+                Some(rung_of("first")),
+                "the next claim homes on the rung that the beacon moved to"
+            );
+            let info = state.address_book.get_endpoint_info(params.id);
+            let first_rung = rung_of("first");
+            assert!(
+                info.is_some_and(|info| info
+                    .into_endpoint_addr()
+                    .relay_urls()
+                    .any(|url| *url == first_rung)),
+                "joiners are not given the rung that the beacon moved to"
+            );
+            assert_eq!(
+                state.rival_recheck_rounds, 5,
+                "a move in place starts no new arbitration epoch"
+            );
+            assert!(
+                state
+                    .rendezvous_flags
+                    .contains(&state::RendezvousFlag::ProbeReadFree),
+                "a move in place forgot the reading of the rendezvous"
+            );
+            let held = rendezvous
+                .take()
+                .expect("the loop shed a beacon that moved in place");
+            held.shed_and_wait().await;
         });
     }
 

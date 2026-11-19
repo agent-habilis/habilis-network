@@ -35,7 +35,7 @@ use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, Watcher};
 use tokio::sync::watch;
 
 pub use default_rung::DefaultRung;
-pub(crate) use rung_decision::{Generation, RungDecision};
+pub(crate) use rung_decision::{Generation, RungChange, RungDecision};
 use rung_follower::RungFollower;
 pub use rung_path::RungPath;
 pub(crate) use rung_refresh::RungRefresh;
@@ -287,9 +287,31 @@ impl Homing {
 enum Mover<'tx> {
     /// A peer endpoint moves its own relay map, and keeps following.
     InPlace,
-    /// The beacon publishes the rung. The event loop re-homes the beacon on it, and starts a new
-    /// follower, so this one ends.
+    /// The beacon. A return to a lower rung moves the relay of the beacon in place, as a peer does,
+    /// tells the event loop, and keeps following: the beacon serves on, and a joiner reaches it by
+    /// either rung until the old one is gone. A walk after the rung failed publishes the rung. The
+    /// event loop sheds the beacon and claims a new one on it, with a new follower, so this one
+    /// ends.
     Publish(&'tx watch::Sender<RungDecision>, Generation),
+}
+
+/// Why a follower moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoveKind {
+    /// The walk after a failed rung picked the next rung.
+    Next,
+    /// A lower rung answered every return round for the hold.
+    Lower,
+}
+
+impl MoveKind {
+    /// The name of the move in the log.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Next => "next",
+            Self::Lower => "lower",
+        }
+    }
 }
 
 /// Follow the ladder from `rung` until the endpoint closes or `stop`'s sender is dropped. The peer
@@ -346,7 +368,9 @@ async fn follow_rung(
             note_walk_ended();
             match follower.walked(selected, Instant::now()) {
                 Some(next) => {
-                    let Some(next) = mover.take(endpoint, follower.rung(), next, "next").await
+                    let Some(next) = mover
+                        .take(endpoint, follower.rung(), next, MoveKind::Next)
+                        .await
                     else {
                         return;
                     };
@@ -366,7 +390,9 @@ async fn follow_rung(
             }
             Wake::Round(answered, ended_at) => {
                 if let Some(lower) = follower.round_ended(&answered, ended_at, Instant::now()) {
-                    let Some(next) = mover.take(endpoint, follower.rung(), lower, "lower").await
+                    let Some(next) = mover
+                        .take(endpoint, follower.rung(), lower, MoveKind::Lower)
+                        .await
                     else {
                         return;
                     };
@@ -425,33 +451,52 @@ fn note_walk_ended() {
 
 impl Mover<'_> {
     /// Take `next` in place of `rung`. Returns the rung that the follower goes on with, or `None`
-    /// when the follower ends. `kind` names the move in the log: the next rung, or a lower one.
+    /// when the follower ends.
     async fn take(
         self,
         endpoint: &Endpoint,
         rung: &RelayUrl,
         next: RelayUrl,
-        kind: &str,
+        kind: MoveKind,
     ) -> Option<RelayUrl> {
-        match self {
-            Self::InPlace => {
-                tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, kind, "peer endpoint moves to another relay rung");
-                // The relay actor of iroh shares the config of a relay.
-                let config = Arc::new(rung_config(&next));
-                endpoint.insert_relay(next.clone(), config).await;
-                endpoint.remove_relay(rung).await;
+        let kind_name = kind.name();
+        match (self, kind) {
+            (Self::InPlace, _) => {
+                tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, kind = kind_name, "peer endpoint moves to another relay rung");
+                move_relay_in_place(endpoint, rung, &next).await;
                 Some(next)
             }
-            Self::Publish(rung_tx, generation) => {
-                tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, kind, "beacon moves to another relay rung");
+            (Self::Publish(rung_tx, generation), MoveKind::Lower) => {
+                tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, kind = kind_name, "beacon moves to a lower relay rung in place");
+                move_relay_in_place(endpoint, rung, &next).await;
+                let _ = rung_tx.send(RungDecision {
+                    from: Some(generation),
+                    rung: Some(next.clone()),
+                    change: RungChange::Moved,
+                });
+                Some(next)
+            }
+            (Self::Publish(rung_tx, generation), MoveKind::Next) => {
+                tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, kind = kind_name, "beacon moves to another relay rung");
                 let _ = rung_tx.send(RungDecision {
                     from: Some(generation),
                     rung: Some(next),
+                    change: RungChange::Rehome,
                 });
                 None
             }
         }
     }
+}
+
+/// Move the relay of `endpoint` from `rung` to `next`, with the endpoint up. The new relay joins
+/// the map first and the old one leaves it after: the connection to the old relay stays until the
+/// home moves, so a dial by either rung finds the endpoint all the time.
+async fn move_relay_in_place(endpoint: &Endpoint, rung: &RelayUrl, next: &RelayUrl) {
+    // The relay actor of iroh shares the config of a relay.
+    let config = Arc::new(rung_config(next));
+    endpoint.insert_relay(next.clone(), config).await;
+    endpoint.remove_relay(rung).await;
 }
 
 /// One probe round of the rungs below the home, in a task of its own beside the liveness reads.
@@ -917,18 +962,20 @@ fn next_relay_backoff(current: Duration) -> Duration {
 ///   ([`follow_rung`]). On a sustained outage, re-walk the ladder once and
 ///   publish the rung it picks; the event loop re-homes the beacon on it.
 ///   A walk that picks the same rung, or finds no rung, publishes nothing,
-///   and the beacon goes on following on its rung. On a later rung, publish the lowest rung below it
-///   once it answered every round for [`RELAY_RETURN_HOLD`]. The
-///   rendezvous address names every rung, so a joiner still reaches the
-///   beacon while it moves.
+///   and the beacon goes on following on its rung. On a later rung, move the relay of the beacon
+///   in place to the lowest rung below it once it answered every round for [`RELAY_RETURN_HOLD`],
+///   and tell the event loop ([`RungChange::Moved`]). The beacon is not shed and not claimed again,
+///   and the monitor goes on following. The rendezvous address names every rung, and the
+///   connection to the old relay stays until the home moves, so a joiner reaches the beacon all
+///   the time.
 /// - **Relay-less** (no rung): re-walk the ladder; a reachable rung ⇒
 ///   publish it; an empty round ⇒ back off ([`next_relay_backoff`]) and
 ///   loop.
 ///
-/// Every publish flows to the event loop's rung-update arm, which
-/// re-homes the beacon (drop + rebuild) — spawning a fresh monitor for
-/// the new state. So the monitor returns after publishing a change, or
-/// once `beacon::Rendezvous` stops it, publishing nothing.
+/// A publish after a failed rung ([`RungChange::Rehome`]) flows to the event loop's rung-update
+/// arm, which re-homes the beacon (drop + rebuild) — spawning a fresh monitor for the new state. So
+/// the monitor returns after that publish, or once `beacon::Rendezvous` stops it, publishing
+/// nothing. It returns after a move in place only when the beacon stops it.
 #[must_use]
 pub(crate) fn spawn_relay_monitor(
     endpoint: Endpoint,
@@ -984,6 +1031,7 @@ async fn monitor_relay_less(
             let _ = rung_tx.send(RungDecision {
                 from: Some(generation),
                 rung: Some(rung),
+                change: RungChange::Rehome,
             });
             return;
         }
@@ -999,7 +1047,7 @@ async fn monitor_relay_less(
 mod tests {
     use super::{
         RELAY_LIVENESS_FAILS_TO_EVICT, RENDEZVOUS_RELAY_LADDER_URLS, RelayChoice, RelayUrl,
-        RungDecision, RungRefresh, next_relay_backoff, plan_rung_refresh, relay_ladder,
+        RungChange, RungDecision, RungRefresh, next_relay_backoff, plan_rung_refresh, relay_ladder,
         select_bootstrap_rung, select_first_reachable, should_evict_rung,
     };
     use crate::lookup::{TransportOpts, build_peer_endpoint, build_peer_webrtc};
@@ -1015,11 +1063,15 @@ mod tests {
     use tokio::sync::watch;
     use tokio::task::JoinHandle;
 
+    use crate::beacon::{Rendezvous, RendezvousParams};
     use crate::lookup::test_relay;
+    use crate::transport::PayloadPath;
     use crate::util::tuning;
+    use crate::{daemon, testing};
     use iroh::endpoint::{Builder, presets};
-    use std::cell;
+    use iroh_gossip::proto::TopicId;
     use std::time::Duration as std_Duration;
+    use std::{cell, future};
     use tokio::time;
     /// Tripwire: the last rungs of our pinned rendezvous ladder must stay
     /// equal to iroh's `defaults::prod` relay hosts, **in order** (NA-east
@@ -1493,52 +1545,283 @@ mod tests {
         });
     }
 
-    /// **A beacon on a later rung publishes rung 0 once rung 0 answers for the hold time.**
+    /// **A beacon on a later rung moves to rung 0 in place once rung 0 answers for the hold time.**
     ///
-    /// The event loop re-homes the beacon on the rung that the monitor publishes. A monitor that
-    /// acts only on a failure of its own rung never publishes while rung 1 is healthy, so the
-    /// beacon stays on rung 1 for good.
+    /// The monitor moves the relay of the beacon, tells the event loop that the beacon moved, and
+    /// goes on following. A monitor that acts only on a failure of its own rung never moves while
+    /// rung 1 is healthy, so the beacon stays on rung 1 for good.
     #[test]
-    fn a_beacon_on_a_later_rung_publishes_rung_0_after_the_hold() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let (first, _first_server) = test_relay::spawn_plain().await.expect("a local relay");
-            let (second, _second_server) = test_relay::spawn_plain().await.expect("a local relay");
-            let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
-                .relay_mode(super::one_rung_mode(Some(&second)));
-            let endpoint = builder.bind().await.expect("bind the beacon endpoint");
-            let (rung_tx, rung_rx) = watch::channel(RungDecision::at_startup(Some(second.clone())));
-            let (_stop, stopped) = watch::channel(());
-            let hold = std_Duration::from_secs(3);
-            let ladder = [first.clone(), second.clone()];
+    fn a_beacon_on_a_later_rung_moves_to_rung_0_in_place_after_the_hold() {
+        ::habilis_network_test_tracing::run(
+            ::habilis_network_test_tracing::init(),
+            move_a_beacon_in_place(None),
+        );
+    }
 
-            let started = time::Instant::now();
-            let published = time::timeout(
-                std_Duration::from_secs(30),
-                super::follow_rung(
-                    &endpoint,
-                    &ladder,
-                    second,
-                    return_times(hold),
-                    super::Mover::Publish(&rung_tx, super::Generation::next()),
-                    Some(&stopped),
-                ),
+    /// **The old relay connection of a beacon that moved in place closes when it is idle.**
+    ///
+    /// iroh closes the connection to a relay that is not the home after 60 s without traffic
+    /// (`RELAY_INACTIVE_CLEANUP_TIME`), so the beacon does not keep a session on the rung that it left.
+    #[test]
+    #[ignore = "90 s: waits for the inactive timeout of 60 s of the relay actor of iroh"]
+    fn the_old_relay_connection_of_a_beacon_that_moved_in_place_closes_when_idle() {
+        ::habilis_network_test_tracing::run(
+            ::habilis_network_test_tracing::init(),
+            move_a_beacon_in_place(Some(std_Duration::from_secs(90))),
+        );
+    }
+
+    /// Run a beacon on rung 1 until its monitor moves it to rung 0 in place, and check the move.
+    /// With `old_closes_within`, also wait for the connection to rung 1 to close.
+    async fn move_a_beacon_in_place(old_closes_within: Option<std_Duration>) {
+        let (first, _first_server) = test_relay::spawn_plain().await.expect("a local relay");
+        let (second, second_server) = test_relay::spawn_plain().await.expect("a local relay");
+        let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(super::one_rung_mode(Some(&second)));
+        let endpoint = builder.bind().await.expect("bind the beacon endpoint");
+        home_of(&endpoint).await;
+        let (rung_tx, mut rung_rx) = watch::channel(RungDecision::at_startup(Some(second.clone())));
+        let (_stop, stopped) = watch::channel(());
+        let hold = std_Duration::from_secs(3);
+        let ladder = [first.clone(), second.clone()];
+
+        let started = time::Instant::now();
+        let following = super::follow_rung(
+            &endpoint,
+            &ladder,
+            second,
+            return_times(hold),
+            super::Mover::Publish(&rung_tx, super::Generation::next()),
+            Some(&stopped),
+        );
+        tokio::pin!(following);
+        let moved = time::timeout(std_Duration::from_secs(30), async {
+            tokio::select! {
+                () = &mut following => false,
+                changed = rung_rx.changed() => changed.is_ok(),
+            }
+        })
+        .await;
+        let took = started.elapsed();
+        let decision = rung_rx.borrow().clone();
+        // The old relay stays the home until iroh moves the home: the connection to it is up all
+        // the time.
+        let home_moved =
+            time::timeout(std_Duration::from_secs(30), home_becomes(&endpoint, &first))
+                .await
+                .is_ok();
+        let old_closed = match old_closes_within {
+            Some(within) => time::timeout(within, async {
+                while second_server.metrics().server.disconnects.get() == 0 {
+                    time::sleep(std_Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .is_ok(),
+            None => true,
+        };
+        let still_following = time::timeout(std_Duration::from_millis(200), &mut following)
+            .await
+            .is_err();
+        endpoint.close().await;
+
+        assert_eq!(
+            moved,
+            Ok(true),
+            "the monitor of a healthy rung 1 moved nothing for 30 s"
+        );
+        assert_eq!(
+            decision.rung,
+            Some(first.clone()),
+            "the monitor moves to rung 0"
+        );
+        assert_eq!(
+            decision.change,
+            RungChange::Moved,
+            "the beacon moved in place: the loop must not shed it"
+        );
+        assert!(
+            home_moved,
+            "the home relay of the beacon never became rung 0"
+        );
+        assert!(old_closed, "the beacon kept its connection to rung 1");
+        assert!(still_following, "the monitor ended after a move in place");
+        assert!(
+            took >= hold,
+            "the monitor moved to rung 0 after {took:?}, before the hold of {hold:?}"
+        );
+    }
+
+    /// The parameters that the event loop holds for a beacon with the id `id`, homed on `home`.
+    fn beacon_params(id: iroh::EndpointId, home: &RelayUrl) -> RendezvousParams {
+        RendezvousParams {
+            topic_id: TopicId::from_bytes([7u8; 32]),
+            id,
+            secret: iroh::SecretKey::generate(),
+            bind_ports: Vec::new(),
+            lookups: LookupOpts::loopback(),
+            relay_transport: PayloadPath::DirectOnly,
+            bootstrap_relay: Some(home.clone()),
+            rung_tx: watch::channel(RungDecision::default()).0,
+        }
+    }
+
+    /// Dial `address` with `joiner` every 100 ms, until 3 s after the loop applied a decision of
+    /// the monitor (`decided_at`), or for 60 s. Returns how many dials reached the beacon, and how
+    /// many did not in 2 s.
+    async fn dial_through_a_return(
+        joiner: &iroh::Endpoint,
+        address: &iroh::EndpointAddr,
+        alpn: &[u8],
+        decided_at: &cell::Cell<Option<time::Instant>>,
+    ) -> (u32, u32) {
+        let (mut reached, mut missed) = (0_u32, 0_u32);
+        let started = time::Instant::now();
+        loop {
+            let after_decision = decided_at
+                .get()
+                .is_some_and(|at| at.elapsed() >= std_Duration::from_secs(3));
+            if after_decision || started.elapsed() >= std_Duration::from_secs(60) {
+                return (reached, missed);
+            }
+            match time::timeout(
+                std_Duration::from_secs(2),
+                joiner.connect(address.clone(), alpn),
             )
-            .await;
-            let took = started.elapsed();
-            endpoint.close().await;
+            .await
+            {
+                Ok(Ok(connection)) => {
+                    reached += 1;
+                    connection.close(0_u32.into(), b"done");
+                }
+                _ => missed += 1,
+            }
+            time::sleep(std_Duration::from_millis(100)).await;
+        }
+    }
+
+    /// **A return of the beacon to rung 0 leaves it reachable by a joiner that has only the relays.**
+    ///
+    /// The beacon is on rung 1 while rung 0 is down. Rung 0 comes back, answers for the hold, and
+    /// the monitor returns the beacon to it. A joiner with no mDNS, no DHT and no direct address
+    /// dials the rendezvous id every 100 ms, by an address that names both rungs, from before the
+    /// return to after it. The loop handles the decision of the monitor as the event loop does.
+    /// The beacon must stay one endpoint, held by the loop, that every dial reaches, and it must end
+    /// homed on rung 0. A beacon that the loop sheds for the return is closed for the time that the
+    /// next claim takes, and a joiner in that time reaches nothing.
+    #[test]
+    fn a_return_of_the_beacon_leaves_it_reachable_for_a_relay_only_joiner() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            const ALPN: &[u8] = b"habilis-network/test-return";
+            allow_refused_rung_warnings();
+            let (real_one, _real_one_server) =
+                test_relay::spawn_plain().await.expect("a local relay");
+            let (real_two, _real_two_server) =
+                test_relay::spawn_plain().await.expect("a local relay");
+            let (first, first_refuses) = spawn_switchable_relay(&real_one).await;
+            let (second, _second_refuses) = spawn_switchable_relay(&real_two).await;
+            first_refuses.store(true, Ordering::SeqCst);
+
+            let beacon_builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&second)))
+                .alpns(vec![ALPN.to_vec()]);
+            let beacon = beacon_builder
+                .bind()
+                .await
+                .expect("bind the beacon endpoint");
+            assert_eq!(
+                home_of(&beacon).await,
+                vec![second.clone()],
+                "the home of the beacon"
+            );
+            let accepting = beacon.clone();
+            let accept = n0future_task::spawn(async move {
+                while let Some(incoming) = accepting.accept().await {
+                    if let Ok(connection) = incoming.await {
+                        n0future_task::spawn(async move {
+                            connection.closed().await;
+                        });
+                    }
+                }
+            });
+            // The joiner holds rung 0 only, and dials by an address that names both rungs.
+            let joiner_builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&first)));
+            let joiner = joiner_builder
+                .bind()
+                .await
+                .expect("bind the joiner endpoint");
+            let beacon_address = iroh::EndpointAddr::new(beacon.id());
+            let address: iroh::EndpointAddr = beacon_address
+                .with_relay_url(first.clone())
+                .with_relay_url(second.clone());
+
+            // What the event loop holds: the beacon, the parameters, and the rung that it applies.
+            let mut params = beacon_params(beacon.id(), &second);
+            let mut state = testing::fresh_state();
+            let beacon_held = Rendezvous::for_test(beacon.clone(), None);
+            let generation = beacon_held.generation;
+            let mut rendezvous = Some(beacon_held);
+            let (rung_tx, mut rung_rx) =
+                watch::channel(RungDecision::at_startup(Some(second.clone())));
+            let (_stop, stopped) = watch::channel(());
+            let ladder = [first.clone(), second.clone()];
+            let decided_at: cell::Cell<Option<time::Instant>> = cell::Cell::new(None);
+
+            let applying = async {
+                while rung_rx.changed().await.is_ok() {
+                    decided_at.set(Some(time::Instant::now()));
+                    daemon::apply_rung_change(&mut state, &mut params, &mut rendezvous, &rung_rx);
+                }
+            };
+            let following = async {
+                // Rung 0 comes back after a second of dials against the beacon on rung 1.
+                time::sleep(std_Duration::from_secs(1)).await;
+                first_refuses.store(false, Ordering::SeqCst);
+                super::follow_rung(
+                    &beacon,
+                    &ladder,
+                    second.clone(),
+                    return_times(std_Duration::from_secs(3)),
+                    super::Mover::Publish(&rung_tx, generation),
+                    Some(&stopped),
+                )
+                .await;
+                let never: future::Pending<()> = future::pending();
+                never.await;
+            };
+            let (reached, missed) = tokio::select! {
+                dials = dial_through_a_return(&joiner, &address, ALPN, &decided_at) => dials,
+                () = following => unreachable!("the follower never ends"),
+                () = applying => unreachable!("the receiver never closes"),
+            };
+            let home: Vec<RelayUrl> = beacon.addr().relay_urls().cloned().collect();
+            let closed = beacon.is_closed();
+            let still_held = rendezvous.is_some();
+            accept.abort();
+            joiner.close().await;
+            beacon.close().await;
 
             assert!(
-                published.is_ok(),
-                "the monitor of a healthy rung 1 published nothing for 30 s"
+                decided_at.get().is_some(),
+                "the monitor never decided a return in 60 s"
+            );
+            assert!(
+                reached > 10,
+                "the joiner reached the beacon {reached} times only"
             );
             assert_eq!(
-                rung_rx.borrow().rung,
-                Some(first),
-                "the monitor publishes rung 0"
+                missed, 0,
+                "the joiner missed the beacon {missed} times in {reached} dials: it was closed for the return"
             );
             assert!(
-                took >= hold,
-                "the monitor published rung 0 after {took:?}, before the hold of {hold:?}"
+                !closed && still_held,
+                "the loop shed the beacon for a return"
+            );
+            assert_eq!(
+                home,
+                vec![first],
+                "the beacon is not homed on rung 0 after the return"
             );
         });
     }
