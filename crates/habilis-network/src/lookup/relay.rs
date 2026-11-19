@@ -357,8 +357,8 @@ async fn follow_rung(
                 let alive = home_connected(&status.get(), follower.rung()) && probes_answer(endpoint);
                 follower.read(alive, Instant::now());
             }
-            answered = round_answers(&mut round) => {
-                if let Some(lower) = follower.round_ended(&answered, Instant::now()) {
+            (answered, ended_at) = round_answers(&mut round) => {
+                if let Some(lower) = follower.round_ended(&answered, ended_at, Instant::now()) {
                     let Some(next) = mover.take(endpoint, follower.rung(), lower, "lower").await else {
                         return;
                     };
@@ -408,27 +408,33 @@ impl Mover<'_> {
 #[derive(Debug)]
 struct ReturnRound {
     stop: watch::Sender<()>,
-    task: n0future_task::JoinHandle<Vec<RelayUrl>>,
+    /// The rungs that answered, and the time at which the round ended.
+    task: n0future_task::JoinHandle<(Vec<RelayUrl>, Instant)>,
 }
 
 impl ReturnRound {
     /// Start a round that probes each of `below`.
     fn spawn(below: Vec<RelayUrl>, probe: Duration) -> Self {
         let (stop, stopped) = watch::channel(());
-        let task =
-            n0future_task::spawn(async move { probe_lower_rungs(&below, probe, &stopped).await });
+        let task = n0future_task::spawn(async move {
+            let answered = probe_lower_rungs(&below, probe, &stopped).await;
+            (answered, Instant::now())
+        });
         Self { stop, task }
     }
 }
 
-/// The rungs that answered the round in flight, once it ends. Never resolves without a round.
-async fn round_answers(round: &mut Option<ReturnRound>) -> Vec<RelayUrl> {
+/// The rungs that answered the round in flight, and the time at which it ended, once it ends. A
+/// round that panicked answers none, at the time that it is read. Never resolves without a round.
+async fn round_answers(round: &mut Option<ReturnRound>) -> (Vec<RelayUrl>, Instant) {
     let Some(running) = round.as_mut() else {
         return future::pending().await;
     };
-    let answered = (&mut running.task).await.unwrap_or_default();
+    let ended = (&mut running.task)
+        .await
+        .unwrap_or_else(|_| (Vec::new(), Instant::now()));
     *round = None;
-    answered
+    ended
 }
 
 /// Stop the round in flight, and wait until its probes have closed their endpoints.

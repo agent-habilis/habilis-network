@@ -103,10 +103,22 @@ impl<'ladder> RungFollower<'ladder> {
         Some(below.to_vec())
     }
 
-    /// Note the rungs that answered the return round that ended at `now`. Returns the rung to
-    /// return to, once it answered every round for the hold.
-    pub(super) fn round_ended(&mut self, answered: &[RelayUrl], now: Instant) -> Option<RelayUrl> {
+    /// Note the rungs that answered the return round that ended at `completed_at`, read at `now`.
+    /// Returns the rung to return to, once it answered every round for the hold. The round counts
+    /// at the time that it ended, not at the time that the member read it.
+    pub(super) fn round_ended(
+        &mut self,
+        answered: &[RelayUrl],
+        completed_at: Instant,
+        now: Instant,
+    ) -> Option<RelayUrl> {
         self.round_runs = false;
+        // The member reads a round at once, unless it stalled after the round ended. Then the
+        // answers are old, and the rung can be down since: they are no sample. The round stays
+        // due, so a new one starts at the next pass of the loop.
+        if now.saturating_duration_since(completed_at) > self.times.interval {
+            return None;
+        }
         // This round was due one wait (the current one, which doubles after empty rounds) after the
         // last, started at the next pass of the loop (a read interval at most), and ended within
         // the probe time. A longer gap had no round, so it is no evidence for the hold.
@@ -114,7 +126,7 @@ impl<'ladder> RungFollower<'ladder> {
         self.return_wait = next_return_wait(self.return_wait, !answered.is_empty(), self.times);
         self.next_round = now + self.return_wait;
         self.watch
-            .observe(answered, now, self.times.return_hold, max_gap)
+            .observe(answered, completed_at, self.times.return_hold, max_gap)
     }
 
     /// Note the move of the member to `rung`, done at `now`. The failed reads of the old rung say
@@ -170,7 +182,7 @@ mod tests {
     ) -> Option<RelayUrl> {
         let below = follower.round_due(now).expect("a return round is due");
         assert!(!below.is_empty(), "a round probes at least 1 rung");
-        follower.round_ended(answered, now)
+        follower.round_ended(answered, now, now)
     }
 
     /// Fail enough reads in a row at `now` to walk.
@@ -465,7 +477,7 @@ mod tests {
         assert!(follower.round_due(last).is_some(), "the last round starts");
         follower.read(false, last);
         let lower = follower
-            .round_ended(&[rung("a")], last)
+            .round_ended(&[rung("a")], last, last)
             .expect("rung 0 answered for the hold");
         follower.moved(lower, last);
         follower.read(false, last + TIMES.interval);
@@ -543,6 +555,77 @@ mod tests {
             round(&mut follower, &[rung("a")], minute(7)),
             Some(rung("a")),
             "the hold counts from minute 4, the first round after the stall"
+        );
+    }
+
+    /// **A round that ended before a stall of the member does not start the hold at the resume.**
+    ///
+    /// Rung 0 answers a round, the member stalls, and the next round ends just before the stall
+    /// and is read after it. Its answer is old: the rung can be down since. It must not count as the
+    /// first sample of a new streak, or the member returns after 2 minutes of live answers, not 3.
+    #[test]
+    fn a_round_read_after_a_stall_is_not_the_first_sample_of_a_streak() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let ladder = ladder();
+        let start = Instant::now();
+        let mut follower = RungFollower::new(&ladder, rung("c"), TIMES, true, start);
+        let minute = |count: u32| start + TIMES.return_every * count;
+        assert_eq!(
+            round(&mut follower, &[rung("a")], minute(1)),
+            None,
+            "minute 1"
+        );
+        let ended_at = minute(2);
+        assert!(follower.round_due(ended_at).is_some(), "minute 2 starts");
+        let resumed_at = minute(7);
+        assert_eq!(
+            follower.round_ended(&[rung("a")], ended_at, resumed_at),
+            None,
+            "an old answer returns nothing"
+        );
+        for count in 1..4 {
+            assert_eq!(
+                round(
+                    &mut follower,
+                    &[rung("a")],
+                    resumed_at + TIMES.return_every * count
+                ),
+                None,
+                "live round {count} after the resume: the old answer is no sample"
+            );
+        }
+        assert_eq!(
+            round(
+                &mut follower,
+                &[rung("a")],
+                resumed_at + TIMES.return_every * 4
+            ),
+            Some(rung("a")),
+            "3 minutes after the first live round"
+        );
+    }
+
+    /// **A round that the member reads at once keeps its credit.**
+    #[test]
+    fn a_round_read_at_once_counts_to_the_hold() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let ladder = ladder();
+        let start = Instant::now();
+        let mut follower = RungFollower::new(&ladder, rung("c"), TIMES, true, start);
+        let lag = TIMES.interval / 2;
+        let mut returned = None;
+        for count in 1..5 {
+            let ended_at = start + (TIMES.return_every + lag) * count;
+            assert!(
+                follower.round_due(ended_at).is_some(),
+                "round {count} starts"
+            );
+            returned = follower.round_ended(&[rung("a")], ended_at, ended_at + lag);
+        }
+        assert_eq!(
+            returned,
+            Some(rung("a")),
+            "4 rounds, read within a read interval of their end, make the hold"
         );
     }
 }
