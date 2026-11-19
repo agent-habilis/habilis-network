@@ -4,6 +4,8 @@
 use std::panic::AssertUnwindSafe;
 
 const HOSTS: &str = "hickory_resolver::hosts";
+const CONFIG: &str = "hickory_resolver::config";
+const HOSTS_LINE: &str = "could not parse an IP from hosts file (\"ip-10-0-130-32\")";
 
 fn panic_text(body: impl FnOnce() + Send) -> Option<String> {
     let err = habilis_network_test_tracing::catch_panic(AssertUnwindSafe(body)).err()?;
@@ -15,7 +17,7 @@ fn panic_text(body: impl FnOnce() + Send) -> Option<String> {
 fn a_warn_about_the_hosts_file_of_the_machine_passes() {
     let text = panic_text(|| {
         let _log = habilis_network_test_tracing::init();
-        tracing::warn!(target: HOSTS, "could not parse an IP from hosts file (\"ip-10-0-130-32\")");
+        tracing::warn!(target: HOSTS, "{HOSTS_LINE}");
     });
     assert_eq!(
         text, None,
@@ -37,14 +39,11 @@ fn an_error_from_the_hosts_target_still_fails() {
 fn the_same_text_from_another_hickory_target_still_fails() {
     let text = panic_text(|| {
         let _log = habilis_network_test_tracing::init();
-        tracing::warn!(
-            target: "hickory_resolver::config",
-            "could not parse an IP from hosts file (\"ip-10-0-128-25.ec2.internal\")"
-        );
+        tracing::warn!(target: CONFIG, "{HOSTS_LINE}");
     });
     let text = text.expect("the guard must panic");
     assert!(
-        text.contains("unexpected WARN hickory_resolver::config"),
+        text.contains(&format!("unexpected WARN {CONFIG}")),
         "{text}"
     );
 }
