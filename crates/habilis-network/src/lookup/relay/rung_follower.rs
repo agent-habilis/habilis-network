@@ -105,7 +105,8 @@ impl<'ladder> RungFollower<'ladder> {
 
     /// Note the rungs that answered the return round that ended at `completed_at`, read at `now`.
     /// Returns the rung to return to, once it answered every round for the hold. The round counts
-    /// at the time that it ended, not at the time that the member read it.
+    /// at the time that it ended, not at the time that the member read it: after a stall, the gap
+    /// to the round before it is long, and the streak starts again.
     pub(super) fn round_ended(
         &mut self,
         answered: &[RelayUrl],
@@ -113,12 +114,6 @@ impl<'ladder> RungFollower<'ladder> {
         now: Instant,
     ) -> Option<RelayUrl> {
         self.round_runs = false;
-        // The member reads a round at once, unless it stalled after the round ended. Then the
-        // answers are old, and the rung can be down since: they are no sample. The round stays
-        // due, so a new one starts at the next pass of the loop.
-        if now.saturating_duration_since(completed_at) > self.times.interval {
-            return None;
-        }
         // This round was due one wait (the current one, which doubles after empty rounds) after the
         // last, started at the next pass of the loop (a read interval at most), and ended within
         // the probe time. A longer gap had no round, so it is no evidence for the hold.
