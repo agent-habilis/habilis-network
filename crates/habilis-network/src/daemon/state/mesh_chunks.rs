@@ -3,15 +3,21 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Mutex;
-#[cfg(not(target_arch = "wasm32"))]
-use std::{fs, io::ErrorKind};
+#[cfg(all(unix, feature = "host"))]
+use std::{
+    fs::{self, File},
+    io::ErrorKind,
+};
 
 use habilis_network_chunks::{ChunkError, ChunkHash, ChunkMap, ChunkStore, InMemoryStore, Root};
 use habilis_network_doc::ChunkPointer;
 
 use crate::protocol::{SymmetricKey, seal_error};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(unix, feature = "host"))]
+use crate::daemon::setup;
+
+#[cfg(all(unix, feature = "host"))]
 use habilis_network_chunks::DiskStore;
 
 /// The chunk store of one run of a mesh. It holds the chunks of the own values that are too
@@ -26,53 +32,56 @@ pub(crate) struct MeshChunks {
     /// The key that seals a value before it is cut into chunks, on a passworded mesh. Without it the chunks are
     /// the bytes of the value, and the chunk store is as open as the `state` channel of a mesh with no password.
     key: Option<SymmetricKey>,
+    /// The lock of the chunk folder, held for the whole run: the kernel frees it when the run ends, also
+    /// after a crash. Only the run that holds it uses the folder.
+    #[cfg(all(unix, feature = "host"))]
+    _folder_lock: Option<File>,
 }
 
 #[derive(Debug)]
 enum Store {
     Memory(InMemoryStore),
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(unix, feature = "host"))]
     Disk(DiskStore),
 }
 
 impl MeshChunks {
-    /// Opens the store in `folder`, or in memory when there is no folder. A folder that an earlier
-    /// run filled is cleared first.
+    /// Opens the store in `folder`, or in memory when there is no folder, or when another daemon holds the
+    /// folder, or when the lock of the folder cannot be taken. The run that takes the lock clears the
+    /// folder, which an earlier run may have filled, and keeps the lock until it ends. Only a unix host
+    /// locks a folder, so any other target keeps its chunks in memory.
     ///
     /// # Errors
     ///
-    /// The folder cannot be made, or cannot be opened as a chunk store.
+    /// The folder cannot be cleared or made, or cannot be opened as a chunk store.
     #[cfg_attr(
-        target_arch = "wasm32",
+        not(all(unix, feature = "host")),
         expect(
             clippy::unnecessary_wraps,
             reason = "the same signature as the version for a target with files"
         )
     )]
     pub(crate) fn open(folder: Option<&Path>) -> Result<Self, ChunkError> {
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(folder) = folder {
-            match fs::remove_dir_all(folder) {
-                Err(error) if error.kind() != ErrorKind::NotFound => {
-                    return Err(ChunkError::Store {
-                        step: format!("clearing {}", folder.display()),
-                        source: error.into(),
-                    });
-                }
-                Ok(()) | Err(_) => {}
-            }
+        #[cfg(all(unix, feature = "host"))]
+        if let Some(folder) = folder
+            && let Some(lock) = hold_folder(folder)
+        {
+            clear_folder(folder)?;
             return Ok(Self {
                 store: Store::Disk(DiskStore::open(folder)?),
                 mapped: Mutex::default(),
                 key: None,
+                _folder_lock: Some(lock),
             });
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(not(all(unix, feature = "host")))]
         let _ = folder;
         Ok(Self {
             store: Store::Memory(InMemoryStore::new()),
             mapped: Mutex::default(),
             key: None,
+            #[cfg(all(unix, feature = "host"))]
+            _folder_lock: None,
         })
     }
 
@@ -112,13 +121,13 @@ impl MeshChunks {
             })?;
             match &self.store {
                 Store::Memory(store) => store.put(hash, chunk).await?,
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(all(unix, feature = "host"))]
                 Store::Disk(store) => store.put(hash, chunk).await?,
             }
         }
         match &self.store {
             Store::Memory(store) => store.put_map(&map).await?,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(unix, feature = "host"))]
             Store::Disk(store) => store.put_map(&map).await?,
         }
         self.mapped
@@ -148,7 +157,7 @@ impl MeshChunks {
         };
         match &self.store {
             Store::Memory(store) => sweep_except(store, &kept, &stale).await?,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(unix, feature = "host"))]
             Store::Disk(store) => sweep_except(store, &kept, &stale).await?,
         }
         let mut mapped = self
@@ -193,7 +202,7 @@ impl MeshChunks {
 
         match &self.store {
             Store::Memory(store) => store.map(root).await,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(unix, feature = "host"))]
             Store::Disk(store) => store.map(root).await,
         }
     }
@@ -208,7 +217,7 @@ impl MeshChunks {
 
         match &self.store {
             Store::Memory(store) => store.get(hash).await,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(unix, feature = "host"))]
             Store::Disk(store) => store.get(hash).await,
         }
     }
@@ -220,7 +229,7 @@ impl MeshChunks {
 
         let map = match &self.store {
             Store::Memory(store) => store.map(root).await,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(unix, feature = "host"))]
             Store::Disk(store) => store.map(root).await,
         };
         map.expect("a map lookup").is_some()
@@ -258,9 +267,47 @@ impl MeshChunks {
     pub(crate) fn stored_chunks(&self) -> usize {
         match &self.store {
             Store::Memory(store) => store.stored_chunks(),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(unix, feature = "host"))]
             Store::Disk(_) => usize::MAX,
         }
+    }
+}
+
+/// The lock of `folder`, or `None` when another daemon holds the folder or the lock cannot be taken. Both
+/// leave the chunks of this run in memory, and the daemon starts all the same.
+#[cfg(all(unix, feature = "host"))]
+fn hold_folder(folder: &Path) -> Option<File> {
+    match setup::hold_chunks_folder(folder) {
+        Ok(Some(lock)) => Some(lock),
+        Ok(None) => {
+            tracing::info!(
+                target: "habilis_network::lifecycle",
+                folder = %folder.display(),
+                "another daemon holds the chunk folder of this nickname: the chunks of this run stay in memory"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "habilis_network::lifecycle",
+                folder = %folder.display(),
+                %error,
+                "the chunk folder cannot be locked: the chunks of this run stay in memory"
+            );
+            None
+        }
+    }
+}
+
+/// Removes `folder` and what an earlier run left in it. A folder that is not there is already clear.
+#[cfg(all(unix, feature = "host"))]
+fn clear_folder(folder: &Path) -> Result<(), ChunkError> {
+    match fs::remove_dir_all(folder) {
+        Err(error) if error.kind() != ErrorKind::NotFound => Err(ChunkError::Store {
+            step: format!("clearing {}", folder.display()),
+            source: error.into(),
+        }),
+        Ok(()) | Err(_) => Ok(()),
     }
 }
 
@@ -484,6 +531,65 @@ mod tests {
             plain.open_value(b"as it is").expect("no key, no seal"),
             b"as it is",
             "a mesh with no password keeps the bytes of the value as they are"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_store_on_a_folder_that_a_first_store_holds_leaves_the_first_whole() {
+        let dir = TempDir::new("habilis-mesh-chunks-two");
+        let folder = dir.0.join("run.chunks");
+        let first = MeshChunks::open(Some(&folder)).expect("the first store");
+        let root = first
+            .put_value(b"the value of the first run")
+            .await
+            .expect("a value");
+        assert!(first.has_map(root).await, "the first store holds its map");
+        let _second = MeshChunks::open(Some(&folder)).expect("the second store opens");
+        assert!(
+            first.has_map(root).await,
+            "a second store on the folder must not clear the chunks of the first"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_that_cannot_take_the_folder_keeps_its_chunks_in_memory() {
+        let dir = TempDir::new("habilis-mesh-chunks-memory");
+        let folder = dir.0.join("run.chunks");
+        let _first = MeshChunks::open(Some(&folder)).expect("the first store");
+        let second = MeshChunks::open(Some(&folder)).expect("the second store opens");
+        assert!(
+            matches!(second.store, Store::Memory(_)),
+            "a folder that another store holds must give a store in memory"
+        );
+        let root = second
+            .put_value(b"the value of the second run")
+            .await
+            .expect("a value in memory");
+        assert_eq!(
+            second.stored_bytes(root).await,
+            b"the value of the second run",
+            "the store in memory must keep what it is given"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_takes_and_clears_the_folder_once_the_store_that_held_it_is_gone() {
+        let dir = TempDir::new("habilis-mesh-chunks-handover");
+        let folder = dir.0.join("run.chunks");
+        let first = MeshChunks::open(Some(&folder)).expect("the first store");
+        let root = first
+            .put_value(b"the value of the first run")
+            .await
+            .expect("a value");
+        drop(first);
+        let second = MeshChunks::open(Some(&folder)).expect("the second store opens");
+        assert!(
+            matches!(second.store, Store::Disk(_)),
+            "a folder that nobody holds any more must give a store on disk"
+        );
+        assert!(
+            !second.has_map(root).await,
+            "the store that takes the folder clears what the earlier run left"
         );
     }
 

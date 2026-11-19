@@ -925,6 +925,8 @@ mod tests {
             let folder =
                 env::temp_dir().join(format!("habilis-fetches-broken-store-{}", process::id()));
             let chunks_folder = folder.join("run.chunks");
+            // The lock file of the chunk folder lives beside it, so the parent folder must be there.
+            fs::create_dir_all(&folder).expect("the parent of the chunk folder");
             state.chunks = MeshChunks::open(Some(&chunks_folder)).expect("a store on disk");
             fs::remove_dir_all(&chunks_folder).expect("the folder goes");
             fs::write(&chunks_folder, b"").expect("a file takes the place of the folder");
