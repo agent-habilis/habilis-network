@@ -1350,10 +1350,9 @@ fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
 #[test]
 fn a_rung_that_this_member_binds_is_no_longer_foreign() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-        let socket =
-            net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0)).expect("a free loopback port");
-        let rung = socket.local_addr().expect("its address").port();
-        drop(socket);
+        // Port 0: the claim binds a port that the OS picks, so no other test can take it between
+        // a free-port check and the bind.
+        let rung = 0;
         let mut params = public_params();
         params.bind_ports = vec![rung];
         let peer = loopback_endpoint().await;
