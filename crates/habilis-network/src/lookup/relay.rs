@@ -1531,14 +1531,18 @@ mod tests {
     /// iroh measures a relay in an incremental net report by QUIC address discovery only. A rung
     /// without it, a tunnel rung or a plain `http://` rung, gets no latency there, so every second
     /// periodic report, every 20 to 26 s, has no preferred relay for one period. A liveness read
-    /// that takes that as a dead rung evicts a healthy rung and walks the ladder. The walk probes
-    /// every rung, so the count of the second relay grows.
+    /// that takes that as a dead rung evicts a healthy rung and walks the ladder.
+    ///
+    /// A walk probes rung 0 first, at once, with an endpoint of its own, and that endpoint is a new
+    /// client key of the relay. The endpoint under test is the only other client of rung 0, so a
+    /// count of 1 says that no walk started. The count of rung 1 cannot say it: a healthy rung 0
+    /// answers inside the stagger, the walk stops there, and rung 1 sees nothing.
     #[test]
     #[ignore = "60 s: waits for 2 periods of the net report of iroh"]
     fn a_peer_on_a_healthy_rung_without_qad_is_not_evicted() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let (first, _first_server) = test_relay::spawn_plain().await.expect("a local relay");
-            let (second, second_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (first, first_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (second, _second_server) = test_relay::spawn_plain().await.expect("a local relay");
             let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(super::one_rung_mode(Some(&first)));
             let endpoint = builder.bind().await.expect("bind the endpoint");
@@ -1551,13 +1555,13 @@ mod tests {
             assert_eq!(home_of(&endpoint).await, vec![first], "the home relay");
 
             time::sleep(std_Duration::from_secs(60)).await;
-            let walked = http_connections(&second_server);
+            let clients = relay_clients(&first_server);
             endpoint.close().await;
             drop(follower.await);
 
             assert_eq!(
-                walked, 0,
-                "the endpoint judged its healthy rung dead and walked the ladder"
+                clients, 1,
+                "the endpoint judged its healthy rung dead and walked the ladder: a probe endpoint of the walk joined rung 0"
             );
         });
     }
@@ -2150,6 +2154,12 @@ mod tests {
             }
             time::sleep(std_Duration::from_millis(500)).await;
         }
+    }
+
+    /// How many distinct endpoints connected to a relay as clients. A probe endpoint of a walk is
+    /// a new one each time.
+    fn relay_clients(server: &Server) -> u64 {
+        server.metrics().server.unique_client_keys.get()
     }
 
     /// How many HTTP connections a relay accepted. An endpoint that holds a relay in its map
