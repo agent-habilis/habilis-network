@@ -2574,12 +2574,15 @@ mod tests {
     /// The stagger of the fake walks: a rung that answers in 10 ms answers before the next starts.
     const FAKE_STAGGER: std_Duration = std_Duration::from_millis(100);
 
-    /// Run the ladder walk over fake rungs, with `stop` as the stop of the caller.
+    /// Run the ladder walk over fake rungs, with `stop` as the stop of the caller. The time is
+    /// paused, so the order of the probes depends on the delays of the fakes alone: a late poll of
+    /// the walk on a loaded machine does not start a probe before a fast rung answers.
     async fn walk_with(
         fakes: &[FakeRung],
         stop: Option<&watch::Receiver<()>>,
         stagger: std_Duration,
     ) -> Walk {
+        time::pause();
         let hosts: Vec<&str> = fakes.iter().map(|fake| fake.host).collect();
         let ladder = rungs(&hosts);
         let started = cell::RefCell::new(Vec::new());
