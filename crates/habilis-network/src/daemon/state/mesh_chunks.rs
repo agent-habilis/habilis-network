@@ -240,8 +240,10 @@ impl MeshChunks {
     pub(crate) async fn stored_bytes(&self, root: Root) -> Vec<u8> {
         use habilis_network_chunks::ChunkSource as _;
 
-        let Store::Memory(store) = &self.store else {
-            panic!("the bytes can be read from a store in memory only");
+        let store = match &self.store {
+            Store::Memory(store) => store,
+            #[cfg(all(unix, feature = "host"))]
+            Store::Disk(_) => panic!("the bytes can be read from a store in memory only"),
         };
         let map = store
             .map(root)
@@ -337,9 +339,12 @@ fn chunk_at(bytes: &[u8], range: Range<u64>) -> Option<&[u8]> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(unix, feature = "host"))]
     use std::path::PathBuf;
+    #[cfg(all(unix, feature = "host"))]
     use std::{env, fs, process};
 
+    #[cfg(all(unix, feature = "host"))]
     use habilis_network_chunks::{ChunkSource as _, ChunkStore as _, DiskStore, chunk_hash};
 
     use habilis_network_doc::ChunkPointer;
@@ -350,8 +355,10 @@ mod tests {
     use super::{MeshChunks, Store};
 
     /// A temp dir that goes away when the test ends, also when an assert fails.
+    #[cfg(all(unix, feature = "host"))]
     struct TempDir(PathBuf);
 
+    #[cfg(all(unix, feature = "host"))]
     impl TempDir {
         fn new(name: &str) -> Self {
             let dir = env::temp_dir().join(format!("{name}-{}", process::id()));
@@ -361,6 +368,7 @@ mod tests {
         }
     }
 
+    #[cfg(all(unix, feature = "host"))]
     impl Drop for TempDir {
         fn drop(&mut self) {
             drop(fs::remove_dir_all(&self.0));
@@ -534,6 +542,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(unix, feature = "host"))]
     #[tokio::test]
     async fn a_second_store_on_a_folder_that_a_first_store_holds_leaves_the_first_whole() {
         let dir = TempDir::new("habilis-mesh-chunks-two");
@@ -551,6 +560,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(unix, feature = "host"))]
     #[tokio::test]
     async fn a_store_that_cannot_take_the_folder_keeps_its_chunks_in_memory() {
         let dir = TempDir::new("habilis-mesh-chunks-memory");
@@ -572,6 +582,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(unix, feature = "host"))]
     #[tokio::test]
     async fn a_store_takes_and_clears_the_folder_once_the_store_that_held_it_is_gone() {
         let dir = TempDir::new("habilis-mesh-chunks-handover");
@@ -593,6 +604,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(unix, feature = "host"))]
     #[tokio::test]
     async fn a_store_in_a_folder_starts_empty_whatever_an_earlier_run_left() {
         let dir = TempDir::new("habilis-mesh-chunks-clear");

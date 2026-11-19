@@ -323,6 +323,7 @@ fn surface(state: &EventLoopState, context: &HandlerCtx<'_>, channel: Channel, a
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    #[cfg(all(unix, feature = "host"))]
     use std::{env, fs, process};
 
     use habilis_network_chunks::{CHUNK_BYTES_USIZE, Root};
@@ -911,6 +912,8 @@ mod tests {
         harness.endpoint.close().await;
     }
 
+    // A store on disk is what breaks here, and only a unix host has one.
+    #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_value_whose_chunks_are_not_kept_is_not_shown_and_is_fetched_again() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
