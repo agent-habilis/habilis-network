@@ -11,6 +11,7 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use tokio::sync::mpsc;
 
+use crate::transport::ceiling::EXTRA_IDLE;
 use crate::util::consts::MAX_MESSAGE_SIZE;
 use crate::util::tuning::DIRECT_IDLE_BACKSTOP;
 
@@ -55,6 +56,20 @@ impl UnicastAcceptor {
 
     pub(crate) fn new(tx: mpsc::Sender<UnicastFrame>, relay_transport: PayloadPath) -> Self {
         Self::with_idle(tx, relay_transport, DIRECT_IDLE_BACKSTOP)
+    }
+
+    /// How long `peer` may send nothing before its connection closes. A peer whose connection took
+    /// no unit (an extra) goes after [`EXTRA_IDLE`], sooner than the timeout of a direct one.
+    fn idle_for(&self, peer: iroh::EndpointId) -> Duration {
+        let extra: bool = self
+            .admission
+            .as_ref()
+            .is_some_and(|table| table.is_extra(peer));
+        if extra {
+            self.idle.min(EXTRA_IDLE)
+        } else {
+            self.idle
+        }
     }
 
     /// [`Self::new`] with the idle timeout spelled out, for tests that must not
@@ -120,7 +135,8 @@ impl ProtocolHandler for UnicastAcceptor {
         // peer closes the connection (`accept_uni` errors), or nothing arrives
         // for the idle timeout.
         loop {
-            match n0future_time::timeout(self.idle, connection.accept_uni()).await {
+            let idle = self.idle_for(connection.remote_id());
+            match n0future_time::timeout(idle, connection.accept_uni()).await {
                 Ok(Ok(mut recv)) => {
                     let admission = self.admission.as_ref();
                     let _busy = admission.map(|table| table.busy(connection.remote_id()));
@@ -149,8 +165,11 @@ mod tests {
     use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
     use super::super::UNICAST_ALPN;
-    use super::{DIRECT_IDLE_BACKSTOP, IDLE, PayloadPath, UnicastAcceptor, UnicastFrame, mpsc};
-    use crate::lookup;
+    use super::super::admission::SignalAdmission;
+    use super::{
+        DIRECT_IDLE_BACKSTOP, EXTRA_IDLE, IDLE, PayloadPath, UnicastAcceptor, UnicastFrame, mpsc,
+    };
+    use crate::{lookup, testing};
     use iroh::endpoint::presets;
     use std::sync::Arc;
     use std::time::Instant;
@@ -281,6 +300,33 @@ mod tests {
             router.shutdown().await.expect("shutdown");
             client.close().await;
         });
+    }
+
+    /// A peer whose connection took no unit (an extra) idles out after the extra idle, a minute,
+    /// though the timeout of the acceptor is ten times longer. Any other peer keeps the timeout.
+    #[test]
+    fn an_extra_idles_out_after_the_extra_idle_and_another_peer_keeps_the_timeout() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let admission = SignalAdmission::new(1);
+        admission.note_success(testing::endpoint_id(7));
+        let _busy = admission.busy(testing::endpoint_id(7));
+        let extra = testing::endpoint_id(8);
+        admission.note_success(extra);
+        assert!(admission.is_extra(extra), "no unit was free or evictable");
+        let (tx, _frames) = mpsc::channel(8);
+        let timeout = Duration::from_mins(10);
+        let acceptor =
+            UnicastAcceptor::with_idle(tx, PayloadPath::RelayAllowed, timeout).admission(admission);
+        assert_eq!(
+            acceptor.idle_for(extra),
+            EXTRA_IDLE,
+            "an extra goes after the extra idle"
+        );
+        assert_eq!(
+            acceptor.idle_for(testing::endpoint_id(7)),
+            timeout,
+            "a unit keeps the timeout"
+        );
     }
 
     #[test]

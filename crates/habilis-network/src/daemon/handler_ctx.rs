@@ -41,7 +41,7 @@ pub struct HandlerCtx<'node> {
     /// self-echo check is a 32-byte compare, not a fresh key derivation on
     /// every inbound message.
     pub our_pubkey: AuthorKey,
-    pub(crate) max_peers: usize,
+    pub(crate) max_connections: usize,
     /// Well-known rendezvous endpoint id. Its co-hosted pseudo-node
     /// shows up as a gossip neighbor on peer endpoints; it is
     /// filtered out of peer accounting everywhere it could leak.

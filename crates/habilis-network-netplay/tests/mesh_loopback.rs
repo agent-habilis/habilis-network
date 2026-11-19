@@ -79,7 +79,7 @@ async fn node_config(topic: &str, nick: &str) -> EventLoopConfig {
     };
     setup_mesh(
         kind,
-        SetupParams::new(author, SilentSink::default()).max_peers(16),
+        SetupParams::new(author, SilentSink::default()).max_connections(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network")

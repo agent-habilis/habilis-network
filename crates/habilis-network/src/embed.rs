@@ -19,4 +19,5 @@ pub use crate::daemon::state::{
 };
 pub use crate::gossip::app::{AppClass, AppFrameError, InboundApp, NodeApp};
 pub use crate::gossip::event::{NodeEvent, NodeSink, SilentSink};
+pub use crate::topology::{PathLabel, PeerLink, TopologyGraph, TopologyLink, TopologySnapshot};
 pub use crate::transport::Lane;

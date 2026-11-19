@@ -392,7 +392,7 @@ mod tests {
                     author: &node.author,
                     identity: &node.identity,
                     our_pubkey: node.our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &node.sink,

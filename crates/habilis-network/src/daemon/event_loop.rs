@@ -256,7 +256,7 @@ async fn run_checked<Driver: NodeDriver>(
         leave_label,
         author: mesh.author,
         sink: runtime.sink,
-        max_peers: runtime.max_peers,
+        max_connections: runtime.max_connections,
         state,
         app,
         ipc_rx,
@@ -828,7 +828,7 @@ struct EventLoop<Driver: NodeDriver> {
     author: Nickname,
     // trait object: the loop, its app output and the IPC server share one sink
     sink: Arc<dyn NodeSink>,
-    max_peers: usize,
+    max_connections: usize,
     state: EventLoopState,
     /// Application state behind the [`NodeDriver`] seam, disjoint from the mesh
     /// `state` and threaded as its own `&mut` through the app callbacks.
@@ -1564,7 +1564,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         leave_label,
         author,
         sink,
-        max_peers,
+        max_connections,
         state,
         app,
         ipc_rx,
@@ -1593,6 +1593,8 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
     } = loop_state;
 
     log_daemon_start(&author);
+    // The rendezvous takes no unit of the ceiling: a member at its ceiling may still return to it.
+    state.webrtc_admission.set_rendezvous(rendezvous_params.id);
     let slot_freed = state.webrtc_admission.slot_freed();
     let underlay_slot_freed = underlay_slot_freed_of(&state);
     let route_wake = route_wake_of(&state);
@@ -1621,7 +1623,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         author: &author,
         identity: identity.as_ref(),
         our_pubkey,
-        max_peers,
+        max_connections,
         rendezvous_id: rendezvous_params.id,
         external_msg_tx: external_msg_tx.as_ref(),
         sink: sink.as_ref(),

@@ -12,9 +12,8 @@
  *   const char *lookup;      // offset 32
  *   const char *transport;   // offset 40
  *   const char *relay_urls;  // offset 48
- *   size_t max_peers;        // offset 56
- *   size_t max_direct;       // offset 64
- * } habilis_network_opts;             // 72 bytes
+ *   size_t max_connections;  // offset 56
+ * } habilis_network_opts;       // 64 bytes
  * ```
  *
  * 64-bit little-endian only, the same scope `msg.ts` claims for the same
@@ -30,10 +29,9 @@ const NAME_OFFSET = 24
 const LOOKUP_OFFSET = 32
 const TRANSPORT_OFFSET = 40
 const RELAY_URLS_OFFSET = 48
-const MAX_PEERS_OFFSET = 56
-const MAX_DIRECT_OFFSET = 64
+const MAX_CONNECTIONS_OFFSET = 56
 
-export const OPTS_BYTES = 72
+export const OPTS_BYTES = 64
 
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1
 
@@ -95,8 +93,7 @@ export function encodeOpts(opts: WireOpts, pointerOf: (buffer: Uint8Array) => bi
   field(LOOKUP_OFFSET, opts.lookup)
   field(TRANSPORT_OFFSET, opts.transport)
   field(RELAY_URLS_OFFSET, opts.relayUrls)
-  view.setBigUint64(MAX_PEERS_OFFSET, BigInt(opts.maxPeers), LITTLE_ENDIAN)
-  view.setBigUint64(MAX_DIRECT_OFFSET, BigInt(opts.maxDirect), LITTLE_ENDIAN)
+  view.setBigUint64(MAX_CONNECTIONS_OFFSET, BigInt(opts.maxConnections), LITTLE_ENDIAN)
 
   return { struct, keepAlive }
 }

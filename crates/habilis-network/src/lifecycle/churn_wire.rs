@@ -178,7 +178,7 @@ fn wire_cost_of_one_minute_with_5_peers() {
             author: &us,
             identity: &identity,
             our_pubkey: identity.author_key(),
-            max_peers: 16,
+            max_connections: 16,
             rendezvous_id: endpoint_id(9),
             external_msg_tx: None,
             sink: &sink,

@@ -132,7 +132,7 @@ async fn spawn_with(
     let config = setup_mesh(
         SetupKind::Topic { mesh, topic_string },
         SetupParams::new(author, sink)
-            .max_peers(16)
+            .max_connections(16)
             .transports(transports),
     )
     .await

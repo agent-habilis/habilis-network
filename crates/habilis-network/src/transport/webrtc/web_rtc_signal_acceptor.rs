@@ -242,6 +242,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                     Refusal::Evicted => (EVICTED, b"evicted lately"),
                     Refusal::Denied => (SIGNAL_ABORTED, b"denied"),
                     Refusal::AtCapacity => (CAP_REFUSED, b"at capacity"),
+                    Refusal::Pinned => (CAP_REFUSED, b"pinned to multihop"),
                     Refusal::InFlight | Refusal::HaveSession | Refusal::Cooling => {
                         (SIGNAL_FAILED, b"already negotiating")
                     }

@@ -21,9 +21,11 @@
 
 #![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
 
+mod pin_set;
 mod protocol_set;
 mod rung;
 
+pub use pin_set::{climb_pinned, is_pinned, multihop_remote_of, pin, pin_allows, pinned_in, unpin};
 pub use protocol_set::ProtocolSet;
 
 pub use rung::{

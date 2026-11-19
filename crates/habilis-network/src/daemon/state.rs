@@ -1831,7 +1831,7 @@ mod tests {
     /// The orphan set drops an orphan when it is full, and the state of that orphan goes with it: its address, direct
     /// path, proof and backoff are cleaned at the eviction, so no eviction leaves state that nothing finds again. That
     /// holds for an orphan whose link has ended since it came in (it waits for the next sweep, and the flood evicts it
-    /// first), and for a linked one when more endpoints are linked than the set holds (`--max-peers` is not capped).
+    /// first), and for a linked one when more endpoints are linked than the set holds (`--max-connections` is not capped).
     #[test]
     fn the_orphan_that_a_full_set_drops_loses_its_state_with_it() {
         use super::direct_state::DirectState;
@@ -3738,11 +3738,11 @@ mod tests {
     // A `NeighborDown` drops the gossip link, not the pooled unicast
     // connection the verdict describes. Erasing the verdict with the link
     // parked every directed frame on a flap until the alive tick re-probed.
-    /// A session to a gossip neighbor is not a unit of the ceiling, because the gossip link
-    /// holds the peer anyway. The ledger learns of a neighbor when the link comes up, and that
-    /// the peer is not one when it goes down.
+    /// A gossip neighbor is one unit of the ceiling, and so is a session to it: the peer is one
+    /// unit however many of the two it holds. The ledger learns of a neighbor when the link comes
+    /// up, and that the peer is not one when it goes down.
     #[test]
-    fn a_session_counts_against_the_ceiling_only_while_its_peer_is_not_a_neighbor() {
+    fn a_gossip_link_and_a_session_to_one_peer_are_one_unit_of_the_ceiling() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         let bob = endpoint_id(1);
@@ -3750,14 +3750,36 @@ mod tests {
         assert_eq!(
             state.webrtc_admission.direct_units(),
             1,
-            "one direct unit counts against the ceiling"
+            "a session is one direct unit"
         );
 
         state.link(bob);
-        assert_eq!(state.webrtc_admission.direct_units(), 0, "a neighbor");
+        assert_eq!(
+            state.webrtc_admission.direct_units(),
+            1,
+            "the link of a peer with a session adds no unit"
+        );
 
         state.unlink(bob);
-        assert_eq!(state.webrtc_admission.direct_units(), 1, "no longer one");
+        assert_eq!(
+            state.webrtc_admission.direct_units(),
+            1,
+            "the session still holds the unit"
+        );
+
+        let carol = endpoint_id(2);
+        state.link(carol);
+        assert_eq!(
+            state.webrtc_admission.direct_units(),
+            2,
+            "a link alone is one unit"
+        );
+        state.unlink(carol);
+        assert_eq!(
+            state.webrtc_admission.direct_units(),
+            1,
+            "a peer with no link and no session leaves the count"
+        );
     }
 
     /// A meshed member that lost every link is a silent partition once the gap outlasts a heal,

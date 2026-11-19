@@ -48,10 +48,11 @@ typedef struct habilis_network_mesh habilis_network_mesh;
  * `transport` is what payload may ride, `relay_urls` is which relay. A joiner
  * inherits all three from the id; a topic fixes `lookup` to all three lookups.
  *
- * String fields are NUL-terminated or NULL. `max_peers == 0` takes the engine's
- * default active-view cap (G, 32). `max_direct == 0` takes the default ceiling
- * of direct connections (C, 64): the WebRTC sessions and unicast connections
- * together. A newcomer past C evicts the least valuable peer.
+ * String fields are NUL-terminated or NULL. `max_connections == 0` takes the engine's
+ * default cap on the direct connections (16): the gossip neighbors, the WebRTC
+ * sessions and the unicast connections together. It is also the size of the gossip
+ * active view. A newcomer past the cap evicts the least valuable peer that is not
+ * a gossip neighbor.
  */
 typedef struct {
   const char *mesh;
@@ -60,14 +61,14 @@ typedef struct {
   const char *name;       /* mesh name on create; NULL falls back to "habilis-network" */
   const char *lookup;     /* "mdns,dht,relay", any subset; NULL = none, a
                              loopback mesh reachable from this machine only */
-  const char *transport;  /* "udp,webrtc,relay", any subset with "udp" or
-                             "webrtc"; NULL = "udp,webrtc", so every byte of
-                             data goes peer to peer. "relay", or a list without
-                             "udp", needs "relay" in `lookup` */
+  const char *transport;  /* "udp,webrtc,multihop,gossip,relay", any subset with
+                             "udp" or "webrtc"; NULL = "udp,webrtc,multihop,
+                             relay" ("relay" is left out when `lookup` has no
+                             "relay"). "relay", or a list without "udp",
+                             needs "relay" in `lookup` */
   const char *relay_urls; /* comma-separated custom relay ladder; NULL = the
                              default. Needs "relay" in `lookup` */
-  size_t max_peers;
-  size_t max_direct;
+  size_t max_connections;
 } habilis_network_opts;
 
 /*

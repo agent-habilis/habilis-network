@@ -46,21 +46,6 @@ pub(crate) const SIGNAL_EXCHANGE_DEADLINE: time::Duration = time::Duration::from
 /// following tick rather than being skipped indefinitely.
 pub(crate) const SIGNAL_ROUND_DEADLINE: time::Duration = time::Duration::from_secs(45);
 
-/// The default of C, the ceiling of direct connections one node holds (64): the `WebRTC`
-/// sessions and the unicast connections together. A node sets its own with
-/// `SetupParams::max_direct`; `0` takes this value.
-///
-/// It is deliberately not the same knob as `HyParView`'s `active_view_capacity` (G): that one
-/// sizes the gossip overlay and is fixed when the mesh is built. Each direct connection costs
-/// memory and, in a browser, up to a full ICE gathering budget — so the ceiling is real, not
-/// notional. A newcomer past C evicts the least valuable peer, see
-/// `crate::transport::ceiling`; no offer is refused for it.
-///
-/// Public so the CLI and the browser can render a denominator. A node with its
-/// own ceiling reports it with [`crate::transport::admission::SignalAdmission::cap`], because
-/// this constant is only the default.
-pub const MAX_DIRECT_PEERS: usize = 64;
-
 /// The ALPN a nudge connects on. Its acceptor ([`super::nudge_acceptor::NudgeAcceptor`]) closes
 /// every connection at once: the connect exists only for what iroh does when
 /// it completes, which is to try the UDP punch again and re-run path selection

@@ -42,7 +42,7 @@ pub(crate) fn build_mesh(
     // with the dialer (see `DirectOnlyGossip::accept`).
     needs_session: bool,
 ) -> (Gossip, Router, MemoryLookup) {
-    // `active_view_capacity` is the live direct-neighbor cap (`--max-peers`),
+    // `active_view_capacity` is the live direct-neighbor cap (`--max-connections`),
     // raised above iroh-gossip's default (5) so meshes up to it form a full mesh
     // with nothing to shuffle — no membership churn, hence none of the
     // churn-driven per-connection leak. Set it small to reproduce the churn. The

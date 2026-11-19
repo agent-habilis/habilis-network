@@ -27,6 +27,9 @@ impl InFlightDial {
 impl Drop for InFlightDial {
     fn drop(&mut self) {
         self.pool.inner.dialing.lock().remove(&self.eid);
+        // The dial planned a unit or a pin, and a dial that ends with no connection gives it back. A
+        // connection that the dial opened holds its own unit and pin in the ledger already.
+        self.pool.release_plan(self.eid);
         self.outcome_tx.send_if_modified(|outcome| {
             if outcome.is_some() {
                 return false;

@@ -17,6 +17,7 @@ use crate::protocol::messages::Authored;
 use crate::protocol::{
     AppFrameParams, AppTag, AuthorKey, Channel, MessageBody, MessageKind, Nickname,
 };
+use crate::topology::TopologySnapshot;
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -380,6 +381,11 @@ pub enum Inspect {
         /// Gets the count.
         reply: oneshot::Sender<usize>,
     },
+    /// The connections of this member, the cap on them, and the multihop graph, at one instant.
+    Topology {
+        /// Gets the snapshot.
+        reply: oneshot::Sender<TopologySnapshot>,
+    },
 }
 
 /// Test-only reads of the member's identity, logs and rung.
@@ -411,6 +417,15 @@ pub enum InspectTest {
         peer: String,
         /// Gets the reason, or `None` when there is none.
         reply: oneshot::Sender<Option<&'static str>>,
+    },
+    /// Tests only: how many dials this node made to the member `peer` since it started, direct or
+    /// through a route. A send over a warm connection is not a dial. A peer that the node does not
+    /// know reads 0.
+    DialsTo {
+        /// The peer, by nickname.
+        peer: String,
+        /// Gets the count.
+        reply: oneshot::Sender<u64>,
     },
 }
 
@@ -1048,6 +1063,10 @@ impl MembershipApp {
                 let _ = reply.send(state.member_count());
                 false
             }
+            Inspect::Topology { reply } => {
+                let _ = reply.send(state.topology_snapshot());
+                false
+            }
         }
     }
 
@@ -1064,6 +1083,13 @@ impl MembershipApp {
             }
             InspectTest::EndpointId { reply } => {
                 let _ = reply.send(context.endpoint.id());
+                false
+            }
+            InspectTest::DialsTo { peer, reply } => {
+                let dials = known_peer(state, &peer)
+                    .ok()
+                    .map_or(0, |address| state.unicast_pool.dials_to(address.id));
+                let _ = reply.send(dials);
                 false
             }
             InspectTest::SelectedRung { peer, reply } => {

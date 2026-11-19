@@ -370,6 +370,8 @@ async fn cut_webrtc_between_alice_and_bob(alice: &Member, bob: &Member) {
 #[test]
 fn the_underlay_opens_a_session_to_carol_when_only_the_application_ip_is_cut() {
     let guard = habilis_network_test_tracing::init();
+    // The list has no relay: a cell that reaches a hop over the relay is refused, and said once.
+    habilis_network_test_tracing::allow_relay_cell_refusal();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let (alice, bob, carol) = three_members(&relay).await;
@@ -395,6 +397,8 @@ const STAYS_ON_RELAY: (&str, &str) = (
 #[test]
 fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member() {
     let guard = habilis_network_test_tracing::init();
+    // The list has no relay: a cell that reaches a hop over the relay is refused, and said once.
+    habilis_network_test_tracing::allow_relay_cell_refusal();
     guard.expect_warn(STAYS_ON_RELAY.0, STAYS_ON_RELAY.1);
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");

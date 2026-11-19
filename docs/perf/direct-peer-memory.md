@@ -18,7 +18,7 @@ Each node is one process. The driver, `mesh_peer_load`, was a throw-away file wh
 - The first process creates the mesh. It also starts a local plain-HTTP relay with `net::test_relay::spawn_plain`. No run uses a public relay, the DHT or mDNS.
 - The lookup list holds only `relay`. The transport list holds only `udp`, or only `webrtc`.
 - STUN: the `WebRTC` runs were not on a loopback mesh. By the code, a node on such a mesh asks two public STUN servers for its public address (`stun1.l.google.com:19302` and `stun.cloudflare.com:3478`, `DEFAULT_STUN_HOSTS`). Those servers only learn the public ip:port of the node, and no payload goes through them. I did not capture packets to confirm that the runs did this. The UDP runs do not use `WebRTC`, so they make no STUN request. The sentence above that no run uses a public relay, the DHT or mDNS is true. It does not cover STUN.
-- `max_peers` is 64, the default gossip active view. One run uses 8 (`MESH_MAX_PEERS`).
+- `max_peers` is 64, the gossip active view that was the default when the runs were made. One run uses 8 (`MESH_MAX_PEERS`). The setting is now `max_connections` (`MESH_MAX_CONNECTIONS`), it merged G and C, and its default is 32. The tables below keep the old names, because they are measurements.
 - Once per second, each node reads its roster with `Request::Peers`. With traffic on, it sends one directed `msg` to each roster peer with `Request::Send`.
 - With traffic off, the node sends no directed message. This is the gossip-only run.
 - `MESH_MULTIHOP=on` sets `multihop: true` in `SetupParams`. This registers the second endpoint of the multihop underlay.
@@ -139,7 +139,7 @@ About the multihop row: in a full direct mesh no cell goes through a relay hop. 
 
 ## Boundary test: N = 60 and N = 66
 
-The default gossip active view is 64 (`GOSSIP_ACTIVE_VIEW_CAPACITY`, `crates/habilis-network-util/src/tuning.rs`). The test was this: if N = 60 forms and N = 66 loops on `re-graft the rendezvous`, the limit is the 64 boundary.
+The default gossip active view was 64 when this test ran (`GOSSIP_ACTIVE_VIEW_CAPACITY`, now `MAX_CONNECTIONS` = 16, `crates/habilis-network-util/src/tuning.rs`). The test was this: if N = 60 forms and N = 66 loops on `re-graft the rendezvous`, the limit is the 64 boundary.
 
 Result, UDP, gossip only:
 
@@ -214,8 +214,8 @@ This section turns the measurements above into a rule for two caps. Phase 2 of t
 
 ### The two caps
 
-- **G** is the size of the gossip active view (`max_peers`). The planned default is 32. Today it is 64 (`GOSSIP_ACTIVE_VIEW_CAPACITY` in `crates/habilis-network-util/src/tuning.rs`).
-- **D** was the cap on WebRTC sessions. Decision D11 replaced it with **C**, the ceiling of direct connections, which counts WebRTC sessions and unicast connections together. The default is 64 (`MAX_DIRECT_PEERS`) and the setting is `max_direct`. See the section "The ceiling C of direct connections (decision D11)" at the end of this document. The text and the measurements below were made with D, before D11.
+- **G** is the size of the gossip active view (`max_peers`). It merged with C into `max_connections`, and its default is now 16 (`MAX_CONNECTIONS` in `crates/habilis-network-util/src/tuning.rs`).
+- **D** was the cap on WebRTC sessions. Decision D11 replaced it with **C**, the ceiling of direct connections, which counts WebRTC sessions and unicast connections together. It merged with G into `max_connections`, whose default is 32 (`MAX_CONNECTIONS`). See the section "The ceiling C of direct connections (decision D11)" at the end of this document. The text and the measurements below were made with D, before D11.
 - D counted WebRTC sessions only. Plain QUIC connections were not counted, and no count cap limited them. The idle closes limited them in time: 120 s on the dial side and 240 s on the accept side. Today one backstop of 900 s (`DIRECT_IDLE_BACKSTOP`) replaces both.
 
 G bounds a count. It does not refuse a member. The iroh-gossip fork (`src/proto/hyparview.rs`, `on_join` and `add_active`) always accepts a high-priority `Join` or `Neighbor` request. If the active view is full, it first drops a random active member, and that member gets a disconnect. It refuses only a low-priority `Neighbor` request at a full view. A burst of joins can therefore replace the neighbors of a node that is at G. The number of links stays at G or less, but the churn is not bounded.
@@ -375,7 +375,7 @@ D11 replaces the cap D with one ceiling C. A node never refuses an offer or a co
 
 ### What C counts
 
-A peer is one unit when the node holds a unicast QUIC connection to it, or a `WebRTC` session to it while it is not a gossip neighbor. A gossip neighbor is held by its gossip link, so its session is not a unit. The gossip connections and the multihop underlay are not counted. The default of C is 64 (`MAX_DIRECT_PEERS`). The setting is `max_direct`. It replaced `max_sessions` at the same place in the C struct (offset 64, 72 bytes), so the meaning of the field changed but not its layout.
+A peer is one unit when the node holds a unicast QUIC connection to it, a `WebRTC` session to it, or a gossip link to it (it is a gossip neighbor). A peer with several of these is still one unit. A gossip neighbor counts but an eviction never takes it, so a ceiling full of neighbors is overrun by a newcomer. The multihop underlay is not counted. The default of C is 64 (`MAX_DIRECT_PEERS`). The setting is `max_direct`. It replaced `max_sessions` at the same place in the C struct (offset 64, 72 bytes), so the meaning of the field changed but not its layout.
 
 ### The ledger
 
@@ -414,7 +414,7 @@ The stream counts, the datagram buffer, the keep-alive, the idle timeout and the
 
 ### Keep-alive cost
 
-iroh sends a heartbeat on each connection every 5 s. At C = 64 and G = 32, that is 96 connections and about 19 packets per second when the node is idle. This number comes from the iroh default and from the sum. It is not measured here.
+iroh sends a heartbeat on each connection every 5 s. At `max_connections` = 16, that is 16 connections and about 3 packets per second when the node is idle (before the merge, C = 64 and G = 32 gave 96 connections and about 19). This number comes from the iroh default and from the sum. It is not measured here.
 
 ### RAM after D11
 

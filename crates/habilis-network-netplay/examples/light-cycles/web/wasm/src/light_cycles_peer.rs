@@ -77,7 +77,7 @@ impl LightCyclesPeer {
 
         let config = setup_mesh(
             kind,
-            SetupParams::new(author.clone(), SilentSink::default()).max_peers(16),
+            SetupParams::new(author.clone(), SilentSink::default()).max_connections(16),
         )
         .await
         .map_err(js_error::to_js_error)?;

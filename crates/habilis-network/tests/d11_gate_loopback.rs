@@ -5,8 +5,10 @@
 //!
 //! - `a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts`: alice holds at most two
 //!   direct connections and sends in rotation to three peers. Every frame must arrive, and the
-//!   ledger must never count more than two units once the sends have ended. Eviction closes an idle
-//!   connection, a send dials at once, and a busy connection is not a victim.
+//!   ledger must never count more than two units. Eviction closes an idle connection, a send dials
+//!   at once, and a busy connection is not a victim. A connection that finds no unit free and no
+//!   peer to evict is an extra: it takes no unit, it counts toward twice the ceiling, and it closes
+//!   after a minute with no use.
 //! - `a_lane_pair_delivers_a_frame_sent_as_soon_as_the_roster_forms`: a mesh whose only transport
 //!   is `webrtc` (the relay is lookup only), so every pair needs the lane. A frame in each direction,
 //!   sent when the roster holds, must arrive: the node that holds the frame is the higher id in one of
@@ -32,9 +34,12 @@ use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
+use habilis_network::topology::TopologySnapshot;
 use tokio::time;
 const ROSTER_DEADLINE: Duration = Duration::from_mins(2);
 const FRAME_DEADLINE: Duration = Duration::from_mins(2);
+/// How long the extras of alice may last after the final send: a minute of idle, and the sweep.
+const EXTRA_DEADLINE: Duration = Duration::from_secs(90);
 /// How long a lane pair may take from the roster to a frame in both directions. The session is
 /// offered when the frame is held, not at the next tick of the retry pass (30 s), so the wait is an
 /// ICE round, a few seconds.
@@ -63,7 +68,7 @@ impl Member {
         nick: &str,
         relay: &RelayUrl,
         transport: Vec<Transport>,
-        max_direct: usize,
+        max_connections: usize,
     ) -> Self {
         let options = membership::JoinOptions::default()
             .nick(Some(nick.to_owned()))
@@ -71,7 +76,7 @@ impl Member {
         let options = options
             .transport(transport)
             .relay_urls(vec![relay.to_string()]);
-        let options = options.max_direct(max_direct);
+        let options = options.max_connections(max_connections);
         Self::open(&options).await
     }
 
@@ -112,6 +117,13 @@ impl Member {
     async fn direct_units(&self) -> (usize, usize) {
         self.membership
             .request(|reply| Request::Routing(Routing::DirectUnits { reply }))
+            .await
+            .expect("the loop answers")
+    }
+
+    async fn snapshot(&self) -> TopologySnapshot {
+        self.membership
+            .request(|reply| Request::Inspect(Inspect::Topology { reply }))
             .await
             .expect("the loop answers")
     }
@@ -198,21 +210,28 @@ fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
                     delivered(&alice, member, nick, &text).await,
                     "{text:?} never arrived"
                 );
-                let (units, _) = alice.direct_units().await;
-                eprintln!("DIAG after {text:?}: alice counts {units} direct units");
+                let (units, over) = alice.direct_units().await;
+                assert!(
+                    units <= 2 && over == 0,
+                    "after {text:?}: alice counts {units} units ({over} over) at a ceiling of 2: {:?}",
+                    alice.snapshot().await
+                );
             }
         }
 
-        // Busy units can put the count over the ceiling for a moment; once the sends end, it settles.
+        // A connection that no unit could take is an extra, and it closes a minute after its last
+        // use: alice ends with no more connections than units.
         let started = Instant::now();
         loop {
-            let (units, over) = alice.direct_units().await;
-            if units <= 2 && over == 0 {
+            let snapshot = alice.snapshot().await;
+            if snapshot.connected_peers <= 2 && snapshot.direct_units <= 2 {
                 break;
             }
             assert!(
-                started.elapsed() < Duration::from_secs(30),
-                "alice still counts {units} units ({over} over) 30 s after the last send"
+                started.elapsed() < EXTRA_DEADLINE,
+                "alice still holds {} connections and {} units {EXTRA_DEADLINE:?} after the last send",
+                snapshot.connected_peers,
+                snapshot.direct_units
             );
             time::sleep(Duration::from_millis(500)).await;
         }

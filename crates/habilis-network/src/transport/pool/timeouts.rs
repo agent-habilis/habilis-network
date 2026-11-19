@@ -16,6 +16,10 @@ pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
 /// the cooldown bounds that to one stall per window per peer.
 pub(super) const DIAL_FAILURE_COOLDOWN: Duration = Duration::from_secs(10);
 
+/// The error of a probe that the ceiling refuses: the node is at its ceiling of direct connections,
+/// and a probe that no send waits on evicts nobody.
+pub(crate) const AT_CEILING: &str = "unicast dial skipped: the node is at its ceiling";
+
 /// The error of a cold send to a peer on the dial-failure cooldown.
 pub(crate) const COOLDOWN_REFUSED: &str = "unicast dial on cooldown after a recent failure";
 
@@ -26,6 +30,15 @@ pub(crate) const COOLDOWN_REFUSED: &str = "unicast dial on cooldown after a rece
 /// punch or a `WebRTC` path-open lands in single-digit seconds when it lands
 /// at all.
 pub(super) const PATH_SELECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a pinned connection, one that rides multihop for a peer that the node could not dial
+/// directly, stays open with no send. It is shorter than the idle timeout of a direct connection: a
+/// route through other members costs the members that forward for it.
+pub(crate) const PINNED_IDLE: Duration = super::super::ceiling::EXTRA_IDLE;
+
+/// The error of a redial that the pool does not make: the peer is pinned, and a route that pinned it
+/// may be gone. The next send plans the dial with a fresh route.
+pub(super) const PINNED_REDIAL: &str = "pinned peer: the next send plans a fresh route";
 
 /// How long a connection stays busy after a send finished, if the peer has not read the frame. A
 /// reader that is slower than this is not protected: the connection can be evicted under its frame.

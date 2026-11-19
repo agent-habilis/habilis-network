@@ -12,8 +12,7 @@ const OPTS: WireOpts = {
   lookup: null,
   transport: null,
   relayUrls: null,
-  maxPeers: 0,
-  maxDirect: 0,
+  maxConnections: 0,
 }
 
 const OPEN: Command = { t: 'open', id: 1, opts: OPTS, lib: '/fake' }

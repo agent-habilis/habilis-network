@@ -7,7 +7,8 @@
 //! the link leaves its direct path, and a session that attaches inside the
 //! deadline gives the link a path again.
 //!
-//! Two members on a local relay, the default transport list. The joiner holds
+//! Two members on a local relay, the transport list `udp,webrtc,multihop,gossip`: the default
+//! before the relay became a payload transport. The joiner holds
 //! the rendezvous link: it has one link, below the release count of three.
 //! UDP is taken away from every connection of the process, so both ends of the
 //! rendezvous link lose IP. The block is a selection block only: it removes no
@@ -24,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Blocking, Inspect, Membership, Request};
-use habilis_network::protocol::Lookup;
+use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
@@ -32,6 +33,17 @@ use tokio::time;
 /// The probe deadline of 15 s and 10 s more: a link that stayed on the relay
 /// would be closed inside it, and a session round takes a few seconds.
 const WINDOW: Duration = Duration::from_secs(25);
+
+/// The scenario of this test is a mesh whose relay carries no payload: the relay policy closes a
+/// link that stays on the relay, and the `WebRTC` session takes its place. That is the transport
+/// list that was the default before the relay became a default transport and gossip left it, so
+/// the test names it. With the relay on, a link on the relay is allowed, and no session is owed.
+const OLD_DEFAULT: [Transport; 4] = [
+    Transport::Udp,
+    Transport::WebRtc,
+    Transport::Multihop,
+    Transport::Gossip,
+];
 
 fn logs() -> String {
     habilis_network_test_tracing::captured_logs()
@@ -82,7 +94,9 @@ impl Member {
         let options = membership::JoinOptions::default()
             .nick(Some(nick.to_owned()))
             .lookup(vec![Lookup::Relay]);
-        let options = options.relay_urls(vec![relay.to_string()]);
+        let relay_urls = vec![relay.to_string()];
+        let options = options.relay_urls(relay_urls);
+        let options = options.transport(OLD_DEFAULT.to_vec());
         Self::open(&options).await
     }
 
@@ -138,6 +152,8 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
     let guard = habilis_network_test_tracing::init_capturing(
         "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info",
     );
+    // The list has no relay: a cell that reaches a hop over the relay is refused, and said once.
+    habilis_network_test_tracing::allow_relay_cell_refusal();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;

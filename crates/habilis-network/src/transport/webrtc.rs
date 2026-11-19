@@ -47,7 +47,7 @@ pub(crate) mod signal_deadlines;
 pub(crate) mod udp_transport;
 pub(crate) mod web_rtc_signal_acceptor;
 
-pub use consts::{MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN};
+pub use consts::{MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN};
 pub use dial_signal::dial_signal;
 pub use ice_profile::IceProfile;
 pub use nudge_acceptor::NudgeAcceptor;
@@ -85,14 +85,15 @@ mod tests {
     use super::nudge_acceptor;
     use super::signal_deadlines::SignalDeadlines;
     use super::{
-        IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN, NudgeAcceptor,
-        UdpTransport, WebRtcSignalAcceptor, dial_signal, lane_needs, negotiate_session, rendezvous,
-        retry, session_policy, web_rtc_signal_acceptor,
+        IceProfile, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN, NudgeAcceptor, UdpTransport,
+        WebRtcSignalAcceptor, dial_signal, lane_needs, negotiate_session, rendezvous, retry,
+        session_policy, web_rtc_signal_acceptor,
     };
     use crate::daemon::handler_ctx;
     use crate::lookup::EndpointError;
     use crate::transport::admission::SignalAdmission;
     use crate::transport::probe::PathKind;
+    use crate::util::tuning::MAX_CONNECTIONS;
     use habilis_network_iroh_webrtc_transport::{MAX_ENVELOPE_BYTES, WebRtcHandle};
     use iroh::address_lookup::memory::MemoryLookup;
     use iroh::endpoint::Connection;
@@ -478,7 +479,7 @@ mod tests {
             2,
             async {
                 let (server, server_hub) = endpoint().await;
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let router = serve(&server, &server_hub, &admission);
 
                 let (client, _client_hub) = endpoint().await;
@@ -522,7 +523,7 @@ mod tests {
             2,
             async {
                 let (server, server_hub) = endpoint().await;
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let router = serve(&server, &server_hub, &admission);
 
                 let (client, _client_hub) = endpoint().await;
@@ -702,7 +703,7 @@ mod tests {
             2,
             async {
                 let (server, server_hub) = endpoint_with_lookup().await;
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let router = serve(&server, &server_hub, &admission);
 
                 let (client, client_hub) = endpoint_with_lookup().await;
@@ -757,11 +758,11 @@ mod tests {
             2,
             async {
                 let (server, server_hub) = endpoint_with_lookup().await;
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let router = serve(&server, &server_hub, &admission);
 
                 let (client, client_hub) = endpoint_with_lookup().await;
-                let client_admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let client_admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let client_router = serve(&client, &client_hub, &client_admission);
                 dial_signal::dial_signal_with(
                     &client,
@@ -818,7 +819,7 @@ mod tests {
                 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 
                 let (server, server_hub) = endpoint_with_lookup().await;
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let server_gossip = Gossip::builder().spawn(server.clone());
                 // One Router for both ALPNs: `Router::spawn` overrides the endpoint's
                 // ALPN list, so a second Router silently unregisters the first's.
@@ -954,7 +955,7 @@ mod tests {
                 let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
                 let client = with_relay(client_key, &client_hub, true).await;
 
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let server_gossip = Gossip::builder().spawn(server.clone());
                 let book = lookup::address_book(&server.clone());
                 let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
@@ -1102,7 +1103,7 @@ mod tests {
                     .accept(NUDGE_ALPN, NudgeAcceptor)
                     .accept(HOLD_ALPN, Hold(held_tx))
                     .spawn();
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let book = lookup::address_book(&high.clone());
                 let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
                     high_hub.clone(),
@@ -1205,7 +1206,7 @@ mod tests {
                 let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
                 let client = relay_only(client_key, &client_hub).await;
 
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let book = lookup::address_book(&server.clone());
                 let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
                     server_hub.clone(),
@@ -1318,7 +1319,7 @@ mod tests {
                 let client =
                     bind_with_relay(relay_url.clone(), client_key, &client_hub, true).await;
 
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let server_gossip = Gossip::builder().spawn(server.clone());
                 let book = lookup::address_book(&server.clone());
                 let signal: WebRtcSignalAcceptor = WebRtcSignalAcceptor::new(
@@ -1427,7 +1428,7 @@ mod tests {
             2,
             async {
                 let (server, server_hub) = endpoint().await;
-                let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+                let admission = SignalAdmission::new(MAX_CONNECTIONS);
                 let router = serve(&server, &server_hub, &admission);
 
                 let (client, _client_hub) = endpoint().await;
@@ -1789,11 +1790,11 @@ mod tests {
         use crate::util::clock::Instant;
 
         let (server, server_hub) = endpoint_with_lookup().await;
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let admission = SignalAdmission::new(MAX_CONNECTIONS);
         let router = serve(&server, &server_hub, &admission);
 
         let (client, client_hub) = endpoint_with_lookup().await;
-        let client_admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let client_admission = SignalAdmission::new(MAX_CONNECTIONS);
         // The round holds the slot as in production, and teaches the table its hub.
         let round = client_admission
             .try_admit(server.id(), &client_hub)
@@ -1920,7 +1921,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2032,7 +2033,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2153,7 +2154,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2240,7 +2241,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2273,6 +2274,92 @@ mod tests {
 
                 // The dial to a closed signal port would hold its slot for a long deadline.
                 state.webrtc_admission.close();
+                server.close().await;
+                endpoint.close().await;
+            },
+        );
+    }
+
+    /// **A pinned peer opens no session.** The pair rides multihop, and a session would take a unit
+    /// or evict at the cap, so no round is offered for it though a frame is held.
+    #[test]
+    fn a_pinned_peer_is_offered_no_session_though_a_frame_is_held() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::protocol::MeshId;
+                use crate::protocol::identity::Identity;
+                use crate::transport::ceiling::DialPlan;
+
+                let (endpoint, handle) = endpoint().await;
+                // Only the lower id offers unless a frame is held, and here the peer is the lower id.
+                // The id of our endpoint is random, so many seeds are tried.
+                let key = (1u16..=u16::MAX)
+                    .map(|seed| {
+                        let mut bytes = [0u8; 32];
+                        bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                        SecretKey::from_bytes(&bytes)
+                    })
+                    .find(|key| key.public() < endpoint.id())
+                    .expect("a key below ours");
+                let (server, server_hub) = endpoint_with(key).await;
+                let server_admission = SignalAdmission::new(8);
+                let router = serve(&server, &server_hub, &server_admission);
+
+                let gossip = irohgossip_Gossip::builder().spawn(endpoint.clone());
+                let topic = gossip
+                    .subscribe(proto::TopicId::from_bytes([7u8; 32]), vec![])
+                    .await
+                    .expect("subscribe to a peerless topic");
+                let (gossip_sender, _receiver) = topic.split();
+                let sender = transport::MeshSender::new(gossip_sender);
+                let mesh = MeshId::from("test");
+                let identity = Identity::generate();
+                let our_pubkey = identity.author_key();
+                let author = testing::nick("alice");
+                let sink = event::SilentSink;
+                let context = handler_ctx::HandlerCtx {
+                    sender: &sender,
+                    endpoint: &endpoint,
+                    mesh: &mesh,
+                    author: &author,
+                    identity: &identity,
+                    our_pubkey,
+                    max_connections: 16,
+                    rendezvous_id: testing::endpoint_id(9),
+                    external_msg_tx: None,
+                    sink: &sink,
+                };
+                let mut state = testing::fresh_state();
+                state.webrtc = Some(handle.clone());
+                state.local_udp_transport = UdpTransport::Absent;
+                state.unicast_pool = transport::UnicastPool::new(endpoint.clone(), false);
+                state
+                    .peer_endpoints
+                    .insert(testing::nick("bob"), server.addr());
+
+                // The ceiling is full and the peer is pinned to a multihop route.
+                state.webrtc_admission = SignalAdmission::new(1);
+                state.webrtc_admission.note_success(testing::endpoint_id(7));
+                assert_eq!(
+                    state.webrtc_admission.plan_dial(server.id(), true),
+                    DialPlan::Multihop,
+                    "the peer is pinned"
+                );
+                state.want_lane_session(server.id(), clock::Instant::now());
+                retry::retry_sessions(&mut state, &context);
+                assert!(
+                    !until(|| handle.has_session(&server.id())).await,
+                    "a pinned peer opens no session, though a frame is held for it"
+                );
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    0,
+                    "no round is offered for a pinned peer"
+                );
+
+                router.shutdown().await.expect("shutdown");
                 server.close().await;
                 endpoint.close().await;
             },
@@ -2325,7 +2412,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2413,7 +2500,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2523,7 +2610,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(9),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2611,7 +2698,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(99),
                     external_msg_tx: None,
                     sink: &sink,
@@ -2687,7 +2774,7 @@ mod tests {
                     author: &author,
                     identity: &identity,
                     our_pubkey,
-                    max_peers: 16,
+                    max_connections: 16,
                     rendezvous_id: testing::endpoint_id(99),
                     external_msg_tx: None,
                     sink: &sink,

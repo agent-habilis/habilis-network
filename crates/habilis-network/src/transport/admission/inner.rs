@@ -52,6 +52,9 @@ pub(crate) struct Inner {
     /// leaves the table at once, so this is what keeps the pair reading as the gossip rung while
     /// the event loop handles the loss of the link (see `SignalAdmission::selected_kind`).
     pub(crate) closed_on_rung: HashMap<EndpointId, Instant>,
+    /// The endpoint that this table serves, so that the pin of a peer reaches the path selector of
+    /// that endpoint. Set once by the pool.
+    pub(crate) local: Option<EndpointId>,
 }
 
 impl fmt::Debug for Inner {
@@ -64,6 +67,29 @@ impl fmt::Debug for Inner {
 }
 
 impl Inner {
+    /// Give the path selector of the endpoint the pin of `peer` as the ledger holds it now.
+    pub(crate) fn sync_pin(&self, peer: EndpointId) {
+        let Some(local) = self.local else {
+            return;
+        };
+        if self.ceiling.pinned(peer) {
+            habilis_network_iroh_transport_util::pin(local, peer);
+        } else {
+            habilis_network_iroh_transport_util::unpin(local, peer);
+        }
+    }
+
+    /// Release every pin of this table from the path selector.
+    pub(crate) fn release_pins(&mut self) {
+        let Some(local) = self.local else {
+            return;
+        };
+        for peer in self.ceiling.pins() {
+            habilis_network_iroh_transport_util::unpin(local, peer);
+        }
+        self.ceiling.clear_pins();
+    }
+
     pub(crate) fn slot(&mut self, peer: EndpointId) -> &mut Slot {
         self.slots.entry(peer).or_insert_with(Slot::new)
     }
@@ -95,6 +121,11 @@ impl Inner {
             if held || !hub.has_session(&peer) {
                 continue;
             }
+            let window = if self.ceiling.is_extra(peer) {
+                window.min(ceiling::EXTRA_IDLE)
+            } else {
+                window
+            };
             if self
                 .ceiling
                 .unused_for(peer, now)
@@ -109,11 +140,28 @@ impl Inner {
     }
 
     /// The connections and the sessions of the peers that `evictions` names, and the end of
-    /// their units in the ledger: the caller ends them once it has dropped the lock.
-    pub(crate) fn take_victims(&mut self, evictions: &ceiling::Admission) -> Victims {
-        let mut victims = Victims::default();
+    /// their units in the ledger: the caller ends them once it has dropped the lock. `cause` says
+    /// what made the ceiling evict, for the log line of the eviction.
+    pub(crate) fn take_victims(
+        &mut self,
+        evictions: &ceiling::Admission,
+        cause: &'static str,
+    ) -> Victims {
+        let shorts = evictions.newcomers.iter().map(iroh::PublicKey::fmt_short);
+        let newcomers: Vec<String> = shorts.map(|short| short.to_string()).collect();
+        let local: String = match self.local {
+            Some(id) => id.fmt_short().to_string(),
+            None => "unknown".to_owned(),
+        };
+        let mut victims = Victims {
+            cause,
+            newcomers: newcomers.join(","),
+            local,
+            ..Victims::default()
+        };
         for peer in &evictions.evict {
             self.ceiling.unregister_quic(*peer);
+            self.sync_pin(*peer);
             self.ceiling.unregister_session(*peer);
             let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
             self.we_evicted.note(*peer, Instant::now(), spread);
@@ -150,6 +198,7 @@ impl Inner {
         });
         if !alive {
             self.ceiling.unregister_quic(peer);
+            self.sync_pin(peer);
         }
     }
 

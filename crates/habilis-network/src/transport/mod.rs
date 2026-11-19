@@ -56,6 +56,7 @@ pub(crate) type IpcMessage<Cmd> = (Cmd, oneshot::Sender<String>);
 mod mesh_sender;
 mod send;
 
+pub(crate) use admission::LedgerView;
 pub use admission::SignalAdmission;
 pub(crate) use chunk_acceptor::{CHUNKS_ALPN, ChunkAcceptor, ChunkAsk};
 pub(crate) use direct_only_gossip::DirectOnlyGossip;
@@ -77,7 +78,6 @@ pub(crate) use send::{
     send_dialing_back,
 };
 pub(crate) use unicast_acceptor::{UnicastAcceptor, UnicastFrame};
-pub use webrtc::MAX_DIRECT_PEERS;
 pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, UdpTransport, WebRtcSignalAcceptor};
 
 /// ALPN for the unicast channel — a raw bidirectional QUIC stream with its own
