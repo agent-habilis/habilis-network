@@ -277,6 +277,7 @@ jobs:
           lookup::relay::tests::a_peer_endpoint_leaves_a_rung_that_refuses_the_relay_connection
           lookup::relay::tests::a_peer_endpoint_homes_on_the_next_rung_when_rung_0_is_down
           lookup::relay::tests::a_peer_endpoint_moves_to_the_next_rung_when_its_rung_dies
+          lookup::relay::tests::the_old_relay_connection_of_a_beacon_that_moved_in_place_closes_when_idle
 
       # Not covered by `--workspace` above: the loopback suite is behind
       # `required-features = ["native"]`, so a default-feature test run skips
