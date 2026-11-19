@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use crate::lookup::{ProbeAnswer, TransportHandles, build_endpoint};
 use crate::protocol::meshes::LookupOpts;
 use crate::util::clock::Instant;
-use crate::util::tuning::{RECLAIM_WINDOW, RENDEZVOUS_CLOSE, RENDEZVOUS_PROBE, heal_interval};
+use crate::util::tuning::{RECLAIM_WINDOW, RENDEZVOUS_CLOSE, heal_interval};
 
 use super::{RendezvousParams, rung_answer, rung_is_busy, rung_probes_are_blind};
 
@@ -367,24 +367,27 @@ impl RungWatch {
                 answer,
                 generation,
             });
-            if let Some(prober) = prober {
-                prober.close().await;
+            if let Some(prober) = prober
+                && time::timeout(RENDEZVOUS_CLOSE, prober.close())
+                    .await
+                    .is_err()
+            {
+                tracing::debug!(target: "habilis_network::beacon", port, "rung prober close timed out; abandoning it");
             }
         }));
     }
 
     /// Waits for the probe tasks that are out, so that every prober has closed its endpoint when
-    /// this returns. A prober that dials a silent rung gives up after [`RENDEZVOUS_PROBE`] and
-    /// then takes about 3 s to close, and the departure of a node would otherwise drop it open.
-    /// The bound is the dial and the close, which `NODE_LEAVE` leaves room for.
+    /// this returns. A prober that dials a silent rung gives up after `RENDEZVOUS_PROBE` and
+    /// then takes about 3 s to close, and more on a loaded host. Each task bounds its own dial
+    /// and its own close, so the wait has no total of its own: one total for all the tasks left
+    /// a slow close running, and the runtime drop then took its endpoint down open. A close that
+    /// passes its bound is dropped, and iroh logs the open endpoint; it has no close that skips
+    /// the log.
     pub(crate) async fn finish(&mut self) {
-        let tasks = mem::take(&mut self.tasks);
-        let _ = time::timeout(RENDEZVOUS_PROBE + RENDEZVOUS_CLOSE, async {
-            for task in tasks {
-                let _ = task.await;
-            }
-        })
-        .await;
+        for task in mem::take(&mut self.tasks) {
+            let _ = task.await;
+        }
     }
 
     /// The port of a rung below `own` that answered as the beacon of our own mesh, if one did.

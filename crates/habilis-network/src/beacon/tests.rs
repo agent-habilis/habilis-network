@@ -1138,6 +1138,40 @@ fn reading_a_busy_rung_at_setup_leaves_no_endpoint_open_when_the_runtime_drops()
     );
 }
 
+/// A rung probe dials a silent rung for `RENDEZVOUS_PROBE`, then closes its endpoint, which takes
+/// seconds more, and longer on a loaded host. The wait of the end of the run used one fixed total
+/// for all the probes, and past it the probe was left running: the runtime drop then took its
+/// endpoint down open, and iroh logged `Endpoint dropped without calling Endpoint::close`. The
+/// close is slower here than that total, and the wait must still end after it. The task stands
+/// for the probe, and its flag for the closed endpoint.
+#[test]
+fn the_end_of_the_run_waits_for_a_rung_probe_whose_close_is_slower_than_a_fixed_total() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        tokio_time::pause();
+        let (reports, _reports_rx) = mpsc::unbounded_channel();
+        let mut rungs = super::RungWatch::new(reports);
+        // The test and the task that stands for the slow close read the same flag.
+        let closed = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&closed);
+        rungs.tasks.push(task::spawn(async move {
+            tokio_time::sleep(
+                tuning::RENDEZVOUS_PROBE + tuning::RENDEZVOUS_CLOSE + std_Duration::from_secs(2),
+            )
+            .await;
+            flag.store(true, Ordering::SeqCst);
+        }));
+
+        rungs.finish().await;
+
+        assert!(
+            closed.load(Ordering::SeqCst),
+            "the end of the run left a rung probe running, with its endpoint open"
+        );
+    });
+}
+
 /// The control of the test above: a ladder with no busy rung binds no endpoint to read, so the
 /// runtime drop finds none open.
 #[cfg(feature = "host")]
