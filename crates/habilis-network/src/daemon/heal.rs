@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use iroh::RelayUrl;
 use tokio::sync::watch;
 
 use super::event_loop::tick_gap::TickGap;
@@ -268,7 +267,10 @@ pub(super) async fn try_resubscribe(
 /// Apply a bootstrap rung chosen **off the event loop** (the startup
 /// confirmation probe or the beacon's liveness self-monitor publishing
 /// through `rendezvous_params.rung_tx`). Cheap and non-blocking — the
-/// ladder walk already ran in the background task. If the new rung
+/// ladder walk already ran in the background task. A rung that the monitor
+/// of a beacon decided is applied only while that beacon is the one held:
+/// a beacon that was shed ends its monitor, but a decision that the monitor
+/// published at the same time can still arrive. If the new rung
 /// differs from the one we're homed on, re-pre-register `rendezvous_id`
 /// at it and drop the beacon so `maybe_cohost` rebuilds it homed on the
 /// new rung.
@@ -276,9 +278,20 @@ pub(super) fn apply_rung_change(
     state: &mut EventLoopState,
     params: &mut beacon::RendezvousParams,
     rendezvous: &mut Option<beacon::Rendezvous>,
-    rung_rx: &watch::Receiver<Option<RelayUrl>>,
+    rung_rx: &watch::Receiver<lookup::RungDecision>,
 ) {
-    let selected = rung_rx.borrow().clone();
+    let decision = rung_rx.borrow().clone();
+    if let Some(from) = decision.from
+        && rendezvous.as_ref().map(|held| held.generation) != Some(from)
+    {
+        tracing::debug!(
+            target: "habilis_network::beacon",
+            rung = ?decision.rung,
+            "a rung that the monitor of a retired beacon decided; ignored"
+        );
+        return;
+    }
+    let selected = decision.rung;
     if let lookup::RungRefresh::Rehome(new) =
         lookup::plan_rung_refresh(params.bootstrap_relay.as_ref(), selected)
     {
@@ -322,6 +335,8 @@ mod tests {
     use crate::beacon;
     #[cfg(feature = "host")]
     use crate::gossip::split;
+    #[cfg(feature = "host")]
+    use crate::lookup;
     #[cfg(feature = "host")]
     use crate::membership;
     #[cfg(feature = "host")]
@@ -384,7 +399,7 @@ mod tests {
                     lookups: meshes::LookupOpts::loopback(),
                     relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
-                    rung_tx: watch::channel(None).0,
+                    rung_tx: watch::channel(lookup::RungDecision::default()).0,
                 };
                 let parts = CtxParts {
                     endpoint: &node.endpoint,

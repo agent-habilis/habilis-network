@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use iroh::{Endpoint, EndpointAddr, RelayUrl, Watcher as _};
+use iroh::{Endpoint, EndpointAddr, Watcher as _};
 use iroh_gossip::api::{ApiError, Event, GossipReceiver, GossipTopic};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -845,7 +845,7 @@ struct EventLoop<Driver: NodeDriver> {
     rendezvous_params: beacon::RendezvousParams,
     /// Bootstrap rung chosen off-loop (startup probe + beacon
     /// self-monitor); the loop applies changes via the rung-update arm.
-    rung_rx: watch::Receiver<Option<RelayUrl>>,
+    rung_rx: watch::Receiver<lookup::RungDecision>,
     /// The startup probe behind `rung_rx`, released with the rendezvous.
     rung_probe: Option<lookup::StoppableTask>,
     /// The closes of the endpoints that read the busy rungs at setup.
@@ -919,7 +919,7 @@ struct Loop<'node, Driver: NodeDriver> {
     rendezvous: Option<beacon::Rendezvous>,
     rival_probe: Option<beacon::RivalProbe>,
     rendezvous_params: beacon::RendezvousParams,
-    rung_rx: watch::Receiver<Option<RelayUrl>>,
+    rung_rx: watch::Receiver<lookup::RungDecision>,
     rung_probe: Option<lookup::StoppableTask>,
     prober_closes: Vec<oneshot::Receiver<()>>,
     rung_reports: mpsc::UnboundedReceiver<beacon::RungReport>,

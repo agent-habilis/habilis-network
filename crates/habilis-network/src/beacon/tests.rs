@@ -930,6 +930,7 @@ async fn dead_beacon(endpoint: Endpoint) -> Rendezvous {
         lane: None,
         arrivals: mpsc::channel(1).1,
         released: false,
+        generation: lookup::Generation::next(),
     }
 }
 
@@ -947,7 +948,7 @@ fn public_params() -> RendezvousParams {
         lookups: LookupOpts::loopback(),
         relay_transport: PayloadPath::DirectOnly,
         bootstrap_relay: None,
-        rung_tx: watch::channel(None).0,
+        rung_tx: watch::channel(lookup::RungDecision::default()).0,
     }
 }
 
@@ -1089,8 +1090,13 @@ fn shed_and_wait_mid_rewalk_closes_the_monitor_probe_endpoint() {
 
     let errors = testing::errors_through_runtime_drop(async {
         let endpoint = loopback_endpoint().await;
-        let monitor =
-            lookup::spawn_relay_monitor(endpoint.clone(), vec![rung], watch::channel(None).0, None);
+        let monitor = lookup::spawn_relay_monitor(
+            endpoint.clone(),
+            vec![rung],
+            watch::channel(lookup::RungDecision::default()).0,
+            None,
+            lookup::Generation::next(),
+        );
         // Let the walk bind its probe and start waiting for the relay.
         tokio_time::sleep(std_Duration::from_millis(200)).await;
         let rendezvous = Rendezvous {
@@ -1100,6 +1106,7 @@ fn shed_and_wait_mid_rewalk_closes_the_monitor_probe_endpoint() {
             lane: None,
             arrivals: mpsc::channel(1).1,
             released: false,
+            generation: lookup::Generation::next(),
         };
 
         rendezvous.shed_and_wait().await;
@@ -1890,6 +1897,7 @@ fn a_live_beacon_keeps_the_slot_and_its_endpoint() {
             lane: None,
             arrivals: mpsc::channel(1).1,
             released: false,
+            generation: lookup::Generation::next(),
         });
 
         assert!(!releasable(&mut slot), "a live beacon is not releasable");

@@ -167,6 +167,7 @@ pub(crate) async fn claim_holder(
     let monitor_endpoint = endpoint.clone();
     let monitor_home = params.bootstrap_relay.clone();
     let monitor_rung_tx = params.rung_tx.clone();
+    let generation = lookup::Generation::next();
     let rendezvous_endpoint = endpoint.clone();
     // A bounded channel and `try_send`: a sign that is lost to a burst is one of many.
     let (arrivals_tx, arrivals) = mpsc::channel(32);
@@ -205,7 +206,13 @@ pub(crate) async fn claim_holder(
     // probing, backs off while relay-less. `None` when relay is disabled
     // (private / empty ladder).
     let monitor = monitors_relay.then(|| {
-        lookup::spawn_relay_monitor(monitor_endpoint, ladder, monitor_rung_tx, monitor_home)
+        lookup::spawn_relay_monitor(
+            monitor_endpoint,
+            ladder,
+            monitor_rung_tx,
+            monitor_home,
+            generation,
+        )
     });
 
     tracing::info!(target: "habilis_network::beacon", node = %peer.id().fmt_short(), "beacon role active: serving the rendezvous");
@@ -216,6 +223,7 @@ pub(crate) async fn claim_holder(
         lane,
         arrivals,
         released: false,
+        generation,
     });
     Held::Claimed
 }

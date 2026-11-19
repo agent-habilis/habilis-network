@@ -15,6 +15,7 @@
 use std::future;
 mod default_rung;
 mod return_watch;
+mod rung_decision;
 mod rung_follower;
 mod rung_path;
 mod rung_refresh;
@@ -32,6 +33,7 @@ use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, Watcher};
 use tokio::sync::watch;
 
 pub use default_rung::DefaultRung;
+pub(crate) use rung_decision::{Generation, RungDecision};
 use rung_follower::RungFollower;
 pub use rung_path::RungPath;
 pub(crate) use rung_refresh::RungRefresh;
@@ -285,7 +287,7 @@ enum Mover<'tx> {
     InPlace,
     /// The beacon publishes the rung. The event loop re-homes the beacon on it, and starts a new
     /// follower, so this one ends.
-    Publish(&'tx watch::Sender<Option<RelayUrl>>),
+    Publish(&'tx watch::Sender<RungDecision>, Generation),
 }
 
 /// Follow the ladder from `rung` until the endpoint closes or `stop`'s sender is dropped. The peer
@@ -352,20 +354,22 @@ async fn follow_rung(
             }
         }
         let until_read = follower.read_at().saturating_duration_since(Instant::now());
-        tokio::select! {
-            () = n0future_time::sleep(until_read) => {
-                let alive = home_connected(&status.get(), follower.rung()) && probes_answer(endpoint);
+        match next_wake(until_read, &mut round, endpoint, stop).await {
+            Wake::Read => {
+                let alive =
+                    home_connected(&status.get(), follower.rung()) && probes_answer(endpoint);
                 follower.read(alive, Instant::now());
             }
-            (answered, ended_at) = round_answers(&mut round) => {
+            Wake::Round(answered, ended_at) => {
                 if let Some(lower) = follower.round_ended(&answered, ended_at, Instant::now()) {
-                    let Some(next) = mover.take(endpoint, follower.rung(), lower, "lower").await else {
+                    let Some(next) = mover.take(endpoint, follower.rung(), lower, "lower").await
+                    else {
                         return;
                     };
                     follower.moved(next, Instant::now());
                 }
             }
-            () = ended(endpoint, stop) => {
+            Wake::Ended => {
                 cancel_round(&mut round).await;
                 return;
             }
@@ -373,6 +377,32 @@ async fn follow_rung(
         if let Some(below) = follower.round_due(Instant::now()) {
             round = Some(ReturnRound::spawn(below, times.probe));
         }
+    }
+}
+
+/// What the follower waited for between 2 passes of its loop.
+enum Wake {
+    /// The next liveness read is due.
+    Read,
+    /// The return round ended: the rungs that answered, and the time at which it ended.
+    Round(Vec<RelayUrl>, Instant),
+    /// The endpoint closed, or the stop was given.
+    Ended,
+}
+
+/// Wait until a read is due, the return round ends, or the follower ends. An end wins over a round
+/// that ended with it: a follower that was stopped (its beacon was shed) acts on nothing.
+async fn next_wake(
+    until_read: Duration,
+    round: &mut Option<ReturnRound>,
+    endpoint: &Endpoint,
+    stop: Option<&watch::Receiver<()>>,
+) -> Wake {
+    tokio::select! {
+        biased;
+        () = ended(endpoint, stop) => Wake::Ended,
+        (answered, ended_at) = round_answers(round) => Wake::Round(answered, ended_at),
+        () = n0future_time::sleep(until_read) => Wake::Read,
     }
 }
 
@@ -395,9 +425,12 @@ impl Mover<'_> {
                 endpoint.remove_relay(rung).await;
                 Some(next)
             }
-            Self::Publish(rung_tx) => {
+            Self::Publish(rung_tx, generation) => {
                 tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, kind, "beacon moves to another relay rung");
-                let _ = rung_tx.send(Some(next));
+                let _ = rung_tx.send(RungDecision {
+                    from: Some(generation),
+                    rung: Some(next),
+                });
                 None
             }
         }
@@ -883,11 +916,12 @@ fn next_relay_backoff(current: Duration) -> Duration {
 pub(crate) fn spawn_relay_monitor(
     endpoint: Endpoint,
     ladder: Vec<RelayUrl>,
-    rung_tx: watch::Sender<Option<RelayUrl>>,
+    rung_tx: watch::Sender<RungDecision>,
     home: Option<RelayUrl>,
+    generation: Generation,
 ) -> StoppableTask {
     StoppableTask::spawn(|stop| async move {
-        let mover = Mover::Publish(&rung_tx);
+        let mover = Mover::Publish(&rung_tx, generation);
         match home {
             Some(home) => {
                 follow_rung(
@@ -900,7 +934,9 @@ pub(crate) fn spawn_relay_monitor(
                 )
                 .await;
             }
-            None => monitor_relay_less(&ladder, &rung_tx, RELAY_RUNG_PROBE, &stop).await,
+            None => {
+                monitor_relay_less(&ladder, &rung_tx, generation, RELAY_RUNG_PROBE, &stop).await;
+            }
         }
     })
 }
@@ -911,7 +947,8 @@ pub(crate) fn spawn_relay_monitor(
 /// nested in its spawned future.
 async fn monitor_relay_less(
     ladder: &[RelayUrl],
-    rung_tx: &watch::Sender<Option<RelayUrl>>,
+    rung_tx: &watch::Sender<RungDecision>,
+    generation: Generation,
     probe: Duration,
     stop: &watch::Receiver<()>,
 ) {
@@ -927,7 +964,10 @@ async fn monitor_relay_less(
                 relay = %rung,
                 "relay-less beacon rediscovered a reachable rung"
             );
-            let _ = rung_tx.send(Some(rung));
+            let _ = rung_tx.send(RungDecision {
+                from: Some(generation),
+                rung: Some(rung),
+            });
             return;
         }
         tokio::select! {
@@ -942,8 +982,8 @@ async fn monitor_relay_less(
 mod tests {
     use super::{
         RELAY_LIVENESS_FAILS_TO_EVICT, RENDEZVOUS_RELAY_LADDER_URLS, RelayChoice, RelayUrl,
-        RungRefresh, next_relay_backoff, plan_rung_refresh, relay_ladder, select_bootstrap_rung,
-        select_first_reachable, should_evict_rung,
+        RungDecision, RungRefresh, next_relay_backoff, plan_rung_refresh, relay_ladder,
+        select_bootstrap_rung, select_first_reachable, should_evict_rung,
     };
     use crate::lookup::{TransportOpts, build_peer_endpoint, build_peer_webrtc};
     use crate::protocol::meshes::LookupOpts;
@@ -1449,7 +1489,7 @@ mod tests {
             let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(super::one_rung_mode(Some(&second)));
             let endpoint = builder.bind().await.expect("bind the beacon endpoint");
-            let (rung_tx, rung_rx) = watch::channel(Some(second.clone()));
+            let (rung_tx, rung_rx) = watch::channel(RungDecision::at_startup(Some(second.clone())));
             let (_stop, stopped) = watch::channel(());
             let hold = std_Duration::from_secs(3);
             let ladder = [first.clone(), second.clone()];
@@ -1462,7 +1502,7 @@ mod tests {
                     &ladder,
                     second,
                     return_times(hold),
-                    super::Mover::Publish(&rung_tx),
+                    super::Mover::Publish(&rung_tx, super::Generation::next()),
                     Some(&stopped),
                 ),
             )
@@ -1475,7 +1515,7 @@ mod tests {
                 "the monitor of a healthy rung 1 published nothing for 30 s"
             );
             assert_eq!(
-                *rung_rx.borrow(),
+                rung_rx.borrow().rung,
                 Some(first),
                 "the monitor publishes rung 0"
             );
@@ -1573,6 +1613,49 @@ mod tests {
         });
     }
 
+    /// **A follower that is stopped acts on no return round that ended at the same time.**
+    ///
+    /// The event loop stops the monitor of a beacon that it sheds. A round that ended before the
+    /// stop is read by the monitor after it, and a decision on it would move the registration of
+    /// the beacon that the loop holds next. Both are ready: the stop must win, every time.
+    #[test]
+    fn a_stop_wins_over_a_return_round_that_ended_with_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind an endpoint without a relay");
+            let (stop, stopped) = watch::channel(());
+            drop(stop);
+            for pass in 0..64 {
+                let task = n0future_task::spawn(async { (Vec::new(), time::Instant::now()) });
+                let mut round = Some(super::ReturnRound {
+                    stop: watch::channel(()).0,
+                    task,
+                });
+                while !round.as_ref().is_some_and(|round| round.task.is_finished()) {
+                    time::sleep(std_Duration::from_millis(1)).await;
+                }
+
+                let wake = super::next_wake(
+                    std_Duration::from_hours(1),
+                    &mut round,
+                    &endpoint,
+                    Some(&stopped),
+                )
+                .await;
+
+                assert!(
+                    matches!(wake, super::Wake::Ended),
+                    "pass {pass}: the follower read a round after it was stopped"
+                );
+                super::cancel_round(&mut round).await;
+            }
+            endpoint.close().await;
+        });
+    }
+
     /// **A return round that is stopped ends at once, and closes its probes.**
     ///
     /// iroh logs an error for an endpoint that is dropped open, and the test fails on it.
@@ -1638,7 +1721,7 @@ mod tests {
                 vec![first.clone()],
                 "the first home relay"
             );
-            let (rung_tx, rung_rx) = watch::channel(Some(first.clone()));
+            let (rung_tx, rung_rx) = watch::channel(RungDecision::at_startup(Some(first.clone())));
             let (_stop, stopped) = watch::channel(());
             let ladder = [first.clone(), second.clone()];
 
@@ -1650,7 +1733,7 @@ mod tests {
                     &ladder,
                     first,
                     return_times(std_Duration::from_hours(1)),
-                    super::Mover::Publish(&rung_tx),
+                    super::Mover::Publish(&rung_tx, super::Generation::next()),
                     Some(&stopped),
                 ),
             )
@@ -1662,7 +1745,7 @@ mod tests {
                 "the beacon stayed on its dead rung for 60 s"
             );
             assert_eq!(
-                *rung_rx.borrow(),
+                rung_rx.borrow().rung,
                 Some(second),
                 "the beacon moves to rung 1"
             );
@@ -1853,7 +1936,8 @@ mod tests {
                 vec![first.clone()],
                 "the first home relay"
             );
-            let (rung_tx, mut rung_rx) = watch::channel(Some(first.clone()));
+            let (rung_tx, mut rung_rx) =
+                watch::channel(RungDecision::at_startup(Some(first.clone())));
             let (_stop, stopped) = watch::channel(());
             let ladder = [first.clone(), second.clone()];
 
@@ -1864,7 +1948,7 @@ mod tests {
                 &ladder,
                 first.clone(),
                 return_times(std_Duration::from_hours(1)),
-                super::Mover::Publish(&rung_tx),
+                super::Mover::Publish(&rung_tx, super::Generation::next()),
                 Some(&stopped),
             );
             tokio::pin!(following);
@@ -1888,7 +1972,7 @@ mod tests {
             );
             assert!(later, "the beacon never left its dead rung");
             assert_eq!(
-                *rung_rx.borrow(),
+                rung_rx.borrow().rung,
                 Some(second),
                 "the beacon publishes the rung that came back"
             );

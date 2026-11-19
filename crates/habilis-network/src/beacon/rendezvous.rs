@@ -63,6 +63,9 @@ pub(crate) struct Rendezvous {
     /// Set by the release paths, which close the endpoint themselves. A drop with it unset is a
     /// beacon that nobody released, and closes the endpoint on its own.
     pub(crate) released: bool,
+    /// The monitor of this beacon. The event loop applies a rung only from this one: the monitor
+    /// of a beacon that was shed can still have a decision on its way.
+    pub(crate) generation: lookup::Generation,
 }
 
 /// A beacon's `WebRTC` answerer and the table that admits its sessions.
@@ -120,6 +123,7 @@ impl Rendezvous {
             lane,
             arrivals: mpsc::channel(1).1,
             released: false,
+            generation: lookup::Generation::next(),
         }
     }
 

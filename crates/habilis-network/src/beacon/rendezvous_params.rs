@@ -4,7 +4,7 @@ use tokio::sync::watch;
 
 use crate::protocol::meshes::LookupOpts;
 
-use crate::transport;
+use crate::{lookup, transport};
 /// Everything `ensure` needs to (re)build the rendezvous endpoint.
 /// Cheap to clone-hold for the event loop's lifetime.
 #[derive(Debug, Clone)]
@@ -47,7 +47,7 @@ pub(crate) struct RendezvousParams {
     /// change, updates [`Self::bootstrap_relay`], re-registers the
     /// rendezvous, and re-homes the beacon — so the heavy ladder walk
     /// never runs on the sole event loop.
-    pub(crate) rung_tx: watch::Sender<Option<RelayUrl>>,
+    pub(crate) rung_tx: watch::Sender<lookup::RungDecision>,
 }
 
 impl RendezvousParams {

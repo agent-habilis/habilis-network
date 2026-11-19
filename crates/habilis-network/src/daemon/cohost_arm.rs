@@ -697,7 +697,7 @@ mod tests {
             lookups: meshes::LookupOpts::loopback(),
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
-            rung_tx: watch::channel(None).0,
+            rung_tx: watch::channel(lookup::RungDecision::default()).0,
         }
     }
 
@@ -997,7 +997,7 @@ mod tests {
                 lookups: LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(None).0,
+                rung_tx: watch::channel(lookup::RungDecision::default()).0,
             };
 
             let endpoint = lookup::build_endpoint(
@@ -1094,7 +1094,7 @@ mod tests {
             lookups: LookupOpts::loopback(),
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
-            rung_tx: watch::channel(None).0,
+            rung_tx: watch::channel(lookup::RungDecision::default()).0,
         };
 
         // The holder: another member of the same room, on the only rung.
@@ -1283,7 +1283,7 @@ mod tests {
                     lookups: LookupOpts::loopback(),
                     relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
-                    rung_tx: watch::channel(None).0,
+                    rung_tx: watch::channel(lookup::RungDecision::default()).0,
                 }
             };
             let params = params_of(6);
@@ -1408,7 +1408,7 @@ mod tests {
                 lookups: meshes::LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(None).0,
+                rung_tx: watch::channel(lookup::RungDecision::default()).0,
             };
             // A beacon of another mesh holds the first rung: this member reads it as foreign and
             // binds the second.
@@ -1421,7 +1421,7 @@ mod tests {
                 lookups: meshes::LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(None).0,
+                rung_tx: watch::channel(lookup::RungDecision::default()).0,
             };
             let other_endpoint = loopback_endpoint().await;
             let other_book = lookup::address_book(&other_endpoint);
@@ -1917,7 +1917,7 @@ mod tests {
                 lookups: LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(None).0,
+                rung_tx: watch::channel(lookup::RungDecision::default()).0,
             };
 
             let endpoint = lookup::build_endpoint(
@@ -2023,7 +2023,7 @@ mod tests {
                 lookups: LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(None).0,
+                rung_tx: watch::channel(lookup::RungDecision::default()).0,
             };
 
             let endpoint = lookup::build_endpoint(
@@ -2337,6 +2337,87 @@ mod tests {
             settled >= RIVAL_RECHECK_ALONE,
             "the settled delay reaches the alone ceiling"
         );
+    }
+
+    /// **A rung that the monitor of a retired beacon decided is not applied.**
+    ///
+    /// A beacon that was shed ends its monitor, and a decision that the monitor published at the
+    /// same time can still reach the loop. The loop must not re-home the beacon that it holds now
+    /// on it: that beacon has a monitor of its own.
+    #[test]
+    fn a_rung_decision_of_a_retired_monitor_is_ignored() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rung_of = |host: &str| -> iroh::RelayUrl {
+                format!("https://{host}.example/")
+                    .parse()
+                    .expect("a test host forms a valid https URL")
+            };
+            let mut params = public_params();
+            params.bootstrap_relay = Some(rung_of("second"));
+            let mut state = testing::fresh_state();
+            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
+            let retired = lookup::Generation::next();
+            let (_tx, rx) = watch::channel(lookup::RungDecision {
+                from: Some(retired),
+                rung: Some(rung_of("first")),
+            });
+            let mut rendezvous = Some(beacon);
+
+            super::super::heal::apply_rung_change(&mut state, &mut params, &mut rendezvous, &rx);
+
+            assert_eq!(
+                params.bootstrap_relay,
+                Some(rung_of("second")),
+                "a retired monitor moved the rung of the beacon that it did not watch"
+            );
+            let held = rendezvous
+                .take()
+                .expect("a retired monitor shed the beacon that it did not watch");
+            held.shed_and_wait().await;
+        });
+    }
+
+    /// **The rung that the monitor of the held beacon decided, or the startup probe, is applied.**
+    #[test]
+    fn a_rung_decision_of_the_held_beacon_or_of_the_startup_probe_is_applied() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rung_of = |host: &str| -> iroh::RelayUrl {
+                format!("https://{host}.example/")
+                    .parse()
+                    .expect("a test host forms a valid https URL")
+            };
+            for from_monitor in [true, false] {
+                let mut params = public_params();
+                params.bootstrap_relay = Some(rung_of("second"));
+                let mut state = testing::fresh_state();
+                let endpoint = loopback_endpoint().await;
+                let beacon = beacon::Rendezvous::for_test(endpoint.clone(), None);
+                let from = from_monitor.then_some(beacon.generation);
+                let (_tx, rx) = watch::channel(lookup::RungDecision {
+                    from,
+                    rung: Some(rung_of("first")),
+                });
+                let mut rendezvous = Some(beacon);
+
+                super::super::heal::apply_rung_change(
+                    &mut state,
+                    &mut params,
+                    &mut rendezvous,
+                    &rx,
+                );
+                endpoint.close().await;
+
+                assert_eq!(
+                    params.bootstrap_relay,
+                    Some(rung_of("first")),
+                    "the rung is applied (from the monitor: {from_monitor})"
+                );
+                assert!(
+                    rendezvous.is_none(),
+                    "the beacon is shed for a re-home (from the monitor: {from_monitor})"
+                );
+            }
+        });
     }
 
     /// A rehome is a fresh arbitration epoch, so the backoff restarts with it.

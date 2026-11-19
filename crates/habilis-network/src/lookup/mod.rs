@@ -57,7 +57,8 @@ pub use capability::{NetworkCapability, probe as capability_probe};
 pub use error::EndpointError;
 pub use relay::{DefaultRung, RENDEZVOUS_RELAY_LADDER, RungPath, probe_ladder, relay_ladder};
 pub(crate) use relay::{
-    RungRefresh, StoppableTask, plan_rung_refresh, select_bootstrap_rung, spawn_relay_monitor,
+    Generation, RungDecision, RungRefresh, StoppableTask, plan_rung_refresh, select_bootstrap_rung,
+    spawn_relay_monitor,
 };
 pub use transport_handles::TransportHandles;
 pub use transport_opts::TransportOpts;
