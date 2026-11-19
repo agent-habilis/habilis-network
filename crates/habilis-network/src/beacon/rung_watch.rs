@@ -94,6 +94,12 @@ pub(crate) struct RungWatch {
     /// as a whole, so the rung stays out of the book until it answers as ours. Silence is not
     /// here: a host too loaded to answer reads the same, and its beacon is found by the dial.
     pub(crate) refused: BTreeSet<u16>,
+    /// The rungs that the walk read as serving the beacon of our own mesh, and has not read
+    /// otherwise since. Only these are offered to iroh for the rendezvous id
+    /// ([`Self::offered_rungs`]): a rung that nobody has proven to be ours can be taken by the
+    /// beacon of another mesh whose ladder shares the port, and a dial that meets it ends on its
+    /// identity.
+    pub(crate) ours: BTreeSet<u16>,
     pub(crate) reports: mpsc::UnboundedSender<RungReport>,
     /// The probe tasks that are out. A task reports before it closes its prober, so the loop that
     /// ends has to wait for them: [`Self::finish`].
@@ -111,6 +117,7 @@ impl RungWatch {
             own_counted: None,
             foreign: BTreeSet::new(),
             refused: BTreeSet::new(),
+            ours: BTreeSet::new(),
             reports,
             tasks: Vec::new(),
         }
@@ -125,17 +132,33 @@ impl RungWatch {
     pub(crate) fn clear_foreign(&mut self, port: u16) {
         self.foreign.remove(&port);
         self.refused.remove(&port);
+        self.ours.insert(port);
+    }
+
+    /// Our beacon on `port` is gone (shed, or released to re-probe): the rung is not ours any more,
+    /// and the next registration must not offer it. Another mesh whose ladder shares the port can
+    /// bind it, and only a later reading says what holds it.
+    pub(crate) fn release_rung(&mut self, port: u16) {
+        self.ours.remove(&port);
     }
 
     /// The walk read `port` as held by a foreign listener.
     pub(crate) fn mark_foreign(&mut self, port: u16) {
         self.foreign.insert(port);
+        self.ours.remove(&port);
     }
 
-    /// The rungs that stay out of the book: those that the walk read as held by a foreign listener,
-    /// and those that answered the last probe without an identity ([`Self::refused`]).
-    pub(crate) fn withheld_rungs(&self) -> Vec<u16> {
-        self.foreign.union(&self.refused).copied().collect()
+    /// The rungs that the book offers for the rendezvous id: those that the walk read as ours,
+    /// and that no later reading took back ([`Self::foreign`], [`Self::refused`]). A rung that was
+    /// never read, or whose reading was not "ours", stays out until a probe says it is ours.
+    pub(crate) fn offered_rungs(&self) -> Vec<u16> {
+        let mut offered: Vec<u16> = Vec::new();
+        for port in &self.ours {
+            if !self.foreign.contains(port) && !self.refused.contains(port) {
+                offered.push(*port);
+            }
+        }
+        offered
     }
 
     /// Whether the last probe of `port` was answered without an identity.
@@ -196,6 +219,7 @@ impl RungWatch {
         };
         if report.answer == ProbeAnswer::Refused {
             self.refused.insert(report.port);
+            self.ours.remove(&report.port);
         } else {
             self.refused.remove(&report.port);
         }
@@ -215,6 +239,7 @@ impl RungWatch {
     pub(crate) fn forget(&mut self) {
         self.readings.clear();
         self.refused.clear();
+        self.ours.clear();
         self.generation_floor = self.next_generation;
         self.own_misses = 0;
         self.own_counted = None;

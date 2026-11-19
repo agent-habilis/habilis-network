@@ -58,9 +58,9 @@ use crate::{beacon, gossip, lifecycle};
 
 use super::app::NodeDriver;
 use super::cohost_arm::{
-    CohostArm, claims_at_startup, may_cohost, maybe_cohost, maybe_reclaim, note_rival_holds,
-    offer_to_the_new_holder, probes_before_claim, release_rendezvous, schedule_rival_recheck,
-    shed_rival_beacon_if_due, verdict_after_known_holders,
+    CohostArm, claims_at_startup, maybe_cohost, maybe_reclaim, note_rival_holds,
+    offer_to_the_new_holder, probes_before_claim, reads_ladder_while_unmeshed, release_rendezvous,
+    schedule_rival_recheck, shed_rival_beacon_if_due, verdict_after_known_holders,
 };
 #[cfg(feature = "host")]
 use super::config::RuntimeConfig;
@@ -1411,24 +1411,15 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             &mut self.rival_probe,
         )
         .await;
-        // Outside the reclaim window and before the grace, no walk acts on the reading:
-        // a joiner that is not meshed yet applies it itself.
-        if !self.state.standing.contains(&Standing::Meshed)
-            && !may_cohost(
-                self.cohost,
-                self.state.standing.contains(&Standing::Meshed),
-                self.started,
-            )
-            && !self.rendezvous_params.bind_ports.is_empty()
-        {
-            beacon::read_ladder(
-                &self.rendezvous_params,
-                context.endpoint,
-                &self.state.address_book,
-                &mut self.state.rungs,
-            )
-            .await;
-        }
+        read_ladder_while_unmeshed(
+            &mut self.state,
+            &self.rendezvous_params,
+            self.cohost,
+            self.started,
+            self.rendezvous.is_some(),
+            context.endpoint,
+        )
+        .await;
     }
 
     async fn beacon_closed(&mut self) {
@@ -1484,6 +1475,15 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             )
             .await;
         }
+        read_ladder_while_unmeshed(
+            &mut self.state,
+            &self.rendezvous_params,
+            self.cohost,
+            self.started,
+            self.rendezvous.is_some(),
+            context.endpoint,
+        )
+        .await;
         probe::regraft_due(&mut self.state, &context).await;
         probe::refill_isolated(&mut self.state, &context).await;
         webrtc::session_policy::detach_sessions_under_udp(&mut self.state, &context);
@@ -1984,6 +1984,37 @@ struct MaintenanceIntervals {
     /// Periodic relay link-state re-broadcast (our own measured links), so peers
     /// keep a fresh routing graph.
     linkstate: time::Interval,
+}
+
+/// Outside the reclaim window and before the grace, no walk acts on the reading: a joiner that is
+/// not meshed yet applies it itself. The book offers no rung that was not read as ours, so this is
+/// how the joiner learns the rung that the beacon binds: the bind check says which rungs are busy
+/// at once, a probe reads each new one, and the rung that answers as ours is admitted. A rung that
+/// says nothing is asked again, not admitted. It runs on each report of a probe and on each
+/// reclaim tick, so the beacon of the mesh is found within a tick of its bind, not after a heal
+/// tick.
+async fn read_ladder_while_unmeshed(
+    state: &mut EventLoopState,
+    params: &beacon::RendezvousParams,
+    cohost: CoHostPolicy,
+    started: Instant,
+    holds_beacon: bool,
+    endpoint: &Endpoint,
+) {
+    let meshed = state.standing.contains(&Standing::Meshed);
+    let reclaim_open = state
+        .reclaim_until
+        .is_some_and(|deadline| Instant::now() < deadline);
+    if reads_ladder_while_unmeshed(
+        cohost,
+        meshed,
+        started,
+        params.bind_ports.len(),
+        holds_beacon,
+        reclaim_open,
+    ) {
+        beacon::read_ladder(params, endpoint, &state.address_book, &mut state.rungs).await;
+    }
 }
 
 /// Build the maintenance tickers, eating the first immediate tick on

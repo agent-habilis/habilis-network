@@ -9,7 +9,7 @@ use crate::util::clock::Instant;
 use crate::util::tuning::RENDEZVOUS_CLOSE;
 use tokio::sync::oneshot;
 
-use super::rung_ladder::{admit_rung, forget_rungs, settle_on_rung};
+use super::rung_ladder::{forget_rungs, settle_on_rung};
 use super::{
     Rendezvous, RendezvousLane, RendezvousParams, RivalProbe, RungRead, RungWatch, claim,
     releasable, rendezvous, rung_is_busy, spawn_rival_probe,
@@ -114,9 +114,13 @@ pub(crate) async fn read_ladder(
                 rungs.mark_foreign(port);
                 forget_rungs(params, peer, peer_book, |rung| rung == port).await;
             }
+            // Not in the book: nobody proved the rung to be ours, and a foreign beacon on a loaded
+            // host reads silent before it reads foreign. A beacon of ours on a loaded host answers
+            // a later probe, so the rung is asked again until it answers or has said nothing for
+            // the whole window.
             RungRead::Silent => {
                 if !rungs.refused(port) {
-                    admit_rung(params, peer, peer_book, port).await;
+                    rungs.ask(params, node, port, true);
                 }
             }
             RungRead::Unknown => rungs.ask(params, node, port, true),

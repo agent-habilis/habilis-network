@@ -454,11 +454,11 @@ fn the_late_report_of_a_probe_that_was_given_up_does_not_stop_its_replacement() 
     });
 }
 
-/// A rung whose listener answered and gave no identity stays out of the book until it answers
-/// as ours. A rung that said nothing is not kept out: a host too loaded to answer holds our
-/// beacon on it all the same.
+/// A rung whose listener answered and gave no identity is not offered until the walk reads it as
+/// ours again. A rung that said nothing is not offered either, and the walk admits it to the book
+/// by itself: a host too loaded to answer holds our beacon on it all the same.
 #[test]
-fn a_refused_rung_is_withheld_until_it_answers_as_ours() {
+fn a_refused_rung_is_not_offered_until_the_walk_reads_it_as_ours() {
     use super::{RungReport, RungWatch};
     use crate::lookup::ProbeAnswer;
 
@@ -477,29 +477,42 @@ fn a_refused_rung_is_withheld_until_it_answers_as_ours() {
             },
             Instant::now(),
         );
-        watch.withheld_rungs()
+        watch.offered_rungs()
     };
     let no_rungs: Vec<u16> = Vec::new();
 
     assert_eq!(
-        note(&mut rungs, ProbeAnswer::Refused),
+        rungs.offered_rungs(),
+        no_rungs,
+        "a rung that nobody read is not offered"
+    );
+    rungs.clear_foreign(port);
+    assert_eq!(
+        rungs.offered_rungs(),
         vec![port],
-        "a refused rung is withheld after the first refusal"
+        "a rung that the walk read as ours is offered"
+    );
+    assert_eq!(
+        note(&mut rungs, ProbeAnswer::Refused),
+        no_rungs,
+        "a refusal takes the rung back"
     );
     assert_eq!(
         note(&mut rungs, ProbeAnswer::NoAnswer),
         no_rungs,
-        "a no-answer report keeps the rung withheld"
+        "a report of no answer does not offer the rung"
     );
+    rungs.clear_foreign(port);
     assert_eq!(
-        note(&mut rungs, ProbeAnswer::Refused),
+        rungs.offered_rungs(),
         vec![port],
-        "a second refusal keeps the rung withheld"
+        "the rung is offered once the walk reads it as ours again"
     );
+    rungs.mark_foreign(port);
     assert_eq!(
-        note(&mut rungs, ProbeAnswer::Ours),
+        rungs.offered_rungs(),
         no_rungs,
-        "the rung is released once it answers as ours"
+        "a rung that the walk read as foreign is not offered"
     );
 }
 
@@ -905,7 +918,7 @@ async fn probe_for(rx: oneshot::Receiver<bool>) -> (RivalProbe, Endpoint) {
     let probe = RivalProbe {
         rx,
         task: n0future_task::spawn(future::pending()),
-        endpoint: Some(endpoint.clone()),
+        endpoints: vec![endpoint.clone()],
         cancel: None,
     };
     (probe, endpoint)
@@ -975,7 +988,7 @@ fn a_dropped_rival_probe_closes_its_endpoint() {
         let probe = spawn_rival_probe(&params, SecretKey::generate().public())
             .await
             .expect("a probe with a rung to dial");
-        let prober = probe.endpoint.clone().expect("the probe dials");
+        let prober = probe.endpoints.first().cloned().expect("the probe dials");
         tokio_time::sleep(std_Duration::from_millis(200)).await;
 
         drop(probe);
@@ -990,6 +1003,66 @@ fn a_dropped_rival_probe_closes_its_endpoint() {
         assert!(
             prober.is_closed(),
             "a dropped probe left its endpoint open; its last handle logs the ungraceful-abort error"
+        );
+    });
+}
+
+/// A ladder probe has a prober for each busy rung, and a probe that is dropped closes every one.
+#[test]
+fn a_dropped_ladder_probe_closes_the_prober_of_every_busy_rung() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let silent: Vec<_> = (0..2)
+            .map(|_| {
+                net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0))
+                    .expect("a silent loopback socket")
+            })
+            .collect();
+        let mut params = public_params();
+        let mut silent_ports: Vec<u16> = Vec::new();
+        for socket in &silent {
+            let address: net::SocketAddr = socket.local_addr().expect("its address");
+            silent_ports.push(address.port());
+        }
+        params.bind_ports = silent_ports;
+        let probe = spawn_rival_probe(&params, SecretKey::generate().public())
+            .await
+            .expect("a probe with rungs to dial");
+        let probers = probe.endpoints.clone();
+        assert_eq!(probers.len(), 2, "one prober for each busy rung");
+        tokio_time::sleep(std_Duration::from_millis(200)).await;
+
+        drop(probe);
+
+        for _ in 0..600 {
+            if probers.iter().all(Endpoint::is_closed) {
+                break;
+            }
+            tokio_time::sleep(std_Duration::from_millis(10)).await;
+        }
+        assert!(
+            probers.iter().all(Endpoint::is_closed),
+            "a dropped ladder probe left a prober open"
+        );
+    });
+}
+
+/// A ladder that nobody holds is free at once: there is no listener to ask, and no prober to build.
+#[test]
+fn the_rival_probe_of_a_free_ladder_reads_free_at_once() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let (squat, ports) = ladder_of_two();
+        drop(squat);
+        let mut params = public_params();
+        params.bind_ports = ports;
+        let mut probe = spawn_rival_probe(&params, SecretKey::generate().public()).await;
+        let started = Instant::now();
+        let verdict =
+            n0future_time::timeout(std_Duration::from_secs(5), probe_verdict(&mut probe)).await;
+        assert!(matches!(verdict, Ok(false)), "a free ladder: {verdict:?}");
+        assert!(
+            started.elapsed() < std_Duration::from_millis(500),
+            "a free ladder took {:?} to read",
+            started.elapsed()
         );
     });
 }
@@ -1028,7 +1101,7 @@ fn abort_and_close_waits_out_a_probe_mid_handshake() {
         let probe = spawn_rival_probe(&params, SecretKey::generate().public())
             .await
             .expect("a probe with a rung to dial");
-        let prober = probe.endpoint.clone().expect("the probe dials");
+        let prober = probe.endpoints.first().cloned().expect("the probe dials");
         // Let the handshake start, so there is a connection to drain.
         tokio_time::sleep(std_Duration::from_millis(200)).await;
 
@@ -1065,7 +1138,7 @@ fn abort_and_close_lets_a_probe_finish_closing_its_own_endpoint() {
         let probe = RivalProbe {
             rx: oneshot::channel().1,
             task,
-            endpoint: Some(prober.clone()),
+            endpoints: vec![prober.clone()],
             cancel: None,
         };
 
@@ -1274,6 +1347,352 @@ fn a_claim_leaves_the_endpoint_knowing_only_the_rung_it_bound() {
     });
 }
 
+/// What a joiner met on a ladder of two rungs, see [`dial_of_the_rendezvous_after_the_bind`].
+struct DialOfTheRendezvous {
+    /// How the dial that started before the beacon bound ended, if the test started one.
+    early: Option<Result<(), String>>,
+    /// How the dial that started after the joiner read the ladder ended.
+    result: Result<(), String>,
+    /// The rungs that the book of the joiner named for the id before it read the ladder.
+    booked_before_the_read: Vec<u16>,
+    /// The rungs that the book of the joiner named for the id when the dial ended.
+    booked: Vec<u16>,
+    /// The rung that the beacon of the mesh bound, and the rung that the other mesh holds.
+    own: u16,
+    shared: u16,
+    /// From the bind of the beacon to the moment when the book named its rung.
+    found_after: std_Duration,
+}
+
+/// A joiner registers the rendezvous at setup, when no rung is busy, and dials the id. The beacon
+/// of its mesh binds a rung. With `other_mesh_holds`, another mesh whose ladder shares the first
+/// rung holds it, and the beacon binds the second. With `dial_before_bind`, the dial starts before
+/// the beacon binds. The joiner reads the ladder as the event loop does while it is not meshed:
+/// the bind check, a probe for each busy rung, and the rung that answers as ours is admitted.
+async fn dial_of_the_rendezvous_after_the_bind(
+    other_mesh_holds: bool,
+    dial_before_bind: bool,
+) -> DialOfTheRendezvous {
+    let (squat, ports) = ladder_of_two();
+    drop(squat);
+    let mut params = public_params();
+    params.bind_ports = ports.clone();
+
+    let dialer = loopback_endpoint().await;
+    let book = lookup::address_book(&dialer);
+    // Setup read no busy rung: nothing is offered.
+    let offered = setup::rungs_offered_at_setup(&[]);
+    setup::register_rendezvous(&book, &params, &offered);
+
+    let other_secret = SecretKey::generate();
+    let mut other = public_params();
+    other.id = other_secret.public();
+    other.secret = other_secret;
+    other.bind_ports = vec![ports[0]];
+    let other_peer = loopback_endpoint().await;
+    let other_book = lookup::address_book(&other_peer);
+    let mut other_beacon = None;
+    let mut other_probe = None;
+    if other_mesh_holds {
+        assert!(
+            claim::ensure(
+                &other,
+                &other_peer,
+                &other_book,
+                &mut other_beacon,
+                false,
+                &mut other_probe,
+            )
+            .await,
+            "the other mesh claims the first rung"
+        );
+    }
+
+    let dial = |from: Endpoint, id| {
+        tokio_task::spawn(async move {
+            from.connect(id, iroh_gossip::ALPN)
+                .await
+                .map(|_connection| ())
+                .map_err(|error| format!("{error:#}"))
+        })
+    };
+    let early_dial = dial_before_bind.then(|| dial(dialer.clone(), params.id));
+
+    let member = loopback_endpoint().await;
+    let member_book = lookup::address_book(&member);
+    let mut beacon = None;
+    let mut probe = None;
+    let claimed = claim::ensure(
+        &params,
+        &member,
+        &member_book,
+        &mut beacon,
+        false,
+        &mut probe,
+    )
+    .await;
+    let bound = Instant::now();
+    let own_index: usize = beacon
+        .as_ref()
+        .and_then(|held| held.rung_in(&ports))
+        .expect("the beacon is bound on a rung of the ladder");
+    let own: u16 = ports[own_index];
+
+    let (reports, mut arrivals) = mpsc::unbounded_channel();
+    let mut watch = super::RungWatch::new(reports);
+    let booked_before_the_read = booked_rungs(&book, params.id);
+    for _ in 0..6 {
+        super::read_ladder(&params, &dialer, &book, &mut watch).await;
+        if booked_rungs(&book, params.id) == vec![own] {
+            break;
+        }
+        if let Ok(Some(report)) =
+            n0future_time::timeout(std_Duration::from_secs(5), arrivals.recv()).await
+        {
+            watch.note(report, Instant::now());
+        }
+    }
+    let found_after = bound.elapsed();
+
+    let early = match early_dial {
+        Some(early) => Some(
+            tokio_time::timeout(std_Duration::from_secs(10), early)
+                .await
+                .expect("the dial ends in 10 s")
+                .expect("the dial task ends"),
+        ),
+        None => None,
+    };
+    let result = tokio_time::timeout(std_Duration::from_secs(10), dial(dialer.clone(), params.id))
+        .await
+        .expect("the dial ends in 10 s")
+        .expect("the dial task ends");
+    let booked = booked_rungs(&book, params.id);
+
+    watch.finish().await;
+    if let Some(held) = beacon.take() {
+        held.shed_and_wait().await;
+    }
+    if let Some(held) = other_beacon.take() {
+        held.shed_and_wait().await;
+    }
+    member.close().await;
+    other_peer.close().await;
+    dialer.close().await;
+    assert!(claimed, "the mesh binds a rung of its ladder");
+    DialOfTheRendezvous {
+        early,
+        result,
+        booked_before_the_read,
+        booked,
+        own,
+        shared: ports[0],
+        found_after,
+    }
+}
+
+/// The control: no other mesh holds a rung. The joiner offers no rung at setup, so it learns the
+/// rung of the beacon by its read of the ladder, within a probe, which is well under a heal tick.
+#[test]
+fn a_joiner_finds_a_beacon_that_binds_after_its_setup_within_one_probe() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let met = dial_of_the_rendezvous_after_the_bind(false, false).await;
+        assert_eq!(met.result, Ok(()), "the dial of the rendezvous");
+        assert_eq!(
+            met.booked,
+            vec![met.own],
+            "the book names the rung of the beacon"
+        );
+        assert!(
+            met.found_after < std_Duration::from_secs(2),
+            "the book named the rung of the beacon after {:?}",
+            met.found_after
+        );
+    });
+}
+
+/// Another mesh holds a rung of the ladder of the joiner, a rung that was free at setup. The dial
+/// of the rendezvous connects at the first try, and the rung of the other mesh never enters the
+/// book. Before the fix the book offered the whole ladder, and the dial ended on the answer of the
+/// other mesh with `UnknownIssuer`: the warning of the 24-mesh load test, which runs 24 ladders of 8
+/// ports in one host.
+#[test]
+fn a_dial_of_the_rendezvous_does_not_meet_another_mesh_that_holds_a_rung_free_at_setup() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let met = dial_of_the_rendezvous_after_the_bind(true, false).await;
+        assert_eq!(
+            met.result,
+            Ok(()),
+            "the dial of the rendezvous ended on the answer of the other mesh"
+        );
+        assert_ne!(met.shared, met.own, "the beacon binds the second rung");
+        assert!(
+            met.booked_before_the_read.is_empty(),
+            "the book offered a rung that nobody read as ours, among them the rung of the other \
+             mesh ({})",
+            met.shared
+        );
+        assert_eq!(
+            met.booked,
+            vec![met.own],
+            "the book names the rung of the other mesh ({})",
+            met.shared
+        );
+    });
+}
+
+/// The same, with a dial that starts before the beacon binds. The book offers nothing then, so
+/// that dial ends at once on the absence of an address, and not on the answer of the other mesh. The
+/// gossip actor takes that end as "no address yet" and dials again when it has one
+/// (`dial_had_no_address`). The dial after the read of the ladder reaches the beacon.
+#[test]
+fn a_dial_that_starts_before_the_beacon_binds_has_no_address_and_not_another_identity() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let met = dial_of_the_rendezvous_after_the_bind(true, true).await;
+        let early = met
+            .early
+            .expect("the test started a dial before the bind")
+            .expect_err("a dial with no address cannot connect");
+        assert!(
+            early.contains("No addressing information"),
+            "the early dial ended on something else than a missing address: {early}"
+        );
+        assert_eq!(met.result, Ok(()), "the dial after the read of the ladder");
+        assert_eq!(
+            met.booked,
+            vec![met.own],
+            "the book names the rung of the beacon, and no other"
+        );
+    });
+}
+
+/// The verdict of one rival probe of a ladder of two rungs. Another mesh whose ladder shares a rung
+/// holds one, and the beacon of this mesh holds the other. With `foreign_lower`, the other mesh holds
+/// the lower port.
+async fn rival_verdict_past_another_meshs_rung(foreign_lower: bool) -> Option<bool> {
+    let (squat, mut ports) = ladder_of_two();
+    drop(squat);
+    ports.sort_unstable();
+    if !foreign_lower {
+        ports.reverse();
+    }
+    let mut params = public_params();
+    params.bind_ports = ports.clone();
+
+    let other_secret = SecretKey::generate();
+    let mut other = public_params();
+    other.id = other_secret.public();
+    other.secret = other_secret;
+    other.bind_ports = vec![ports[0]];
+    let other_peer = loopback_endpoint().await;
+    let other_book = lookup::address_book(&other_peer);
+    let mut other_beacon = None;
+    let mut other_probe = None;
+    assert!(
+        claim::ensure(
+            &other,
+            &other_peer,
+            &other_book,
+            &mut other_beacon,
+            false,
+            &mut other_probe,
+        )
+        .await,
+        "the other mesh claims its rung"
+    );
+    let member = loopback_endpoint().await;
+    let member_book = lookup::address_book(&member);
+    let mut beacon = None;
+    let mut probe = None;
+    let claimed = claim::ensure(
+        &params,
+        &member,
+        &member_book,
+        &mut beacon,
+        false,
+        &mut probe,
+    )
+    .await;
+    assert!(
+        claimed,
+        "the mesh binds the free rung past the rung of the other mesh"
+    );
+
+    let node = SecretKey::generate().public();
+    let mut rival = spawn_rival_probe(&params, node).await;
+    let verdict =
+        n0future_time::timeout(std_Duration::from_secs(20), probe_verdict(&mut rival)).await;
+
+    if let Some(held) = beacon.take() {
+        held.shed_and_wait().await;
+    }
+    if let Some(held) = other_beacon.take() {
+        held.shed_and_wait().await;
+    }
+    member.close().await;
+    other_peer.close().await;
+    verdict.ok()
+}
+
+/// The rival probe of a private ladder asks whether anybody serves the rendezvous id on any rung.
+/// A probe that dials the whole ladder through one endpoint takes the answer of another mesh that
+/// holds a shared rung for the answer of the id: the identity does not match, the probe reads
+/// foreign, and the verdict says "free" while the beacon of this mesh is live on another rung. Which
+/// answer comes first is the luck of the ports, so the test asks 8 fresh ladders, in both orders of
+/// ports. Each rung has its own probe, and any rung that answers as ours is a rival.
+#[test]
+fn the_rival_probe_of_a_ladder_finds_the_beacon_past_the_rung_of_another_mesh() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let mut verdicts = Vec::new();
+        for round in 0..8 {
+            verdicts.push(rival_verdict_past_another_meshs_rung(round % 2 == 0).await);
+        }
+        assert!(
+            verdicts.iter().all(|verdict| *verdict == Some(true)),
+            "the probe read the rendezvous as free while the beacon of the mesh is live: {verdicts:?}"
+        );
+    });
+}
+
+/// A rung that says nothing is not offered. A foreign beacon on a loaded host can read as silent
+/// before it reads as foreign, and a rung in the book that nobody proved to be ours ends a dial on the
+/// identity of another mesh, and no later registration takes it out. The read asks the rung again,
+/// and a beacon of this mesh on a loaded host answers a later probe as ours.
+#[test]
+fn a_silent_rung_stays_out_of_the_book_and_is_asked_again() {
+    use super::{RungReport, RungWatch};
+    use crate::lookup::ProbeAnswer;
+
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let silent =
+            net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0)).expect("a silent loopback socket");
+        let rung = silent.local_addr().expect("its address").port();
+        let mut params = public_params();
+        params.bind_ports = vec![rung];
+        let peer = loopback_endpoint().await;
+        let book = lookup::address_book(&peer);
+        let (reports, _arrivals) = mpsc::unbounded_channel();
+        let mut watch = RungWatch::new(reports);
+        watch.note(
+            RungReport {
+                port: rung,
+                answer: ProbeAnswer::NoAnswer,
+                generation: 1,
+            },
+            Instant::now(),
+        );
+
+        super::read_ladder(&params, &peer, &book, &mut watch).await;
+
+        let booked: Vec<u16> = booked_rungs(&book, params.id);
+        let asked_again = watch.in_flight.contains_key(&rung);
+        watch.finish().await;
+        peer.close().await;
+        assert!(booked.is_empty(), "the book names a rung that said nothing");
+        assert!(asked_again, "a rung that said nothing is asked again");
+    });
+}
+
 /// A member that knows a holder does not walk the ladder, and its book names the rung of the
 /// holder that it read last. When the holder moves to another rung, the member reads the
 /// ladder again without claiming, and the book names the new rung.
@@ -1368,11 +1787,10 @@ fn a_rung_that_this_member_binds_is_no_longer_foreign() {
         }
         peer.close().await;
         assert_eq!(outcome, super::Held::Claimed, "the free rung is claimed");
-        let no_rungs: Vec<u16> = Vec::new();
         assert_eq!(
-            rungs.withheld_rungs(),
-            no_rungs,
-            "the rung of our own beacon is still read as foreign"
+            rungs.offered_rungs(),
+            vec![rung],
+            "the rung of our own beacon is still read as foreign, or is not offered"
         );
     });
 }
@@ -2192,4 +2610,13 @@ fn a_rung_watch_that_asks_and_then_finishes_leaves_no_open_endpoint() {
         !errors.contains("Endpoint dropped without calling"),
         "the probe's endpoint reached the runtime drop open:\n{errors}"
     );
+}
+
+/// The ports that the book of `peer` holds for the endpoint `id`.
+fn booked_rungs(book: &memory::MemoryLookup, id: iroh::EndpointId) -> Vec<u16> {
+    let info: Option<EndpointInfo> = book.get_endpoint_info(id);
+    let Some(info) = info else {
+        return Vec::new();
+    };
+    info.ip_addrs().map(net::SocketAddr::port).collect()
 }

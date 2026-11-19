@@ -128,12 +128,31 @@ fn spawn_startup_rung_confirmation(
     }))
 }
 
+/// The rungs of the ladder that a member offers in the rendezvous address it registers at setup,
+/// from what each busy rung answered to a probe: only a rung read as ours. A rung that nobody has
+/// read can be the rung of another mesh, whose beacon would end the dial with its own identity.
+/// A rung that says nothing, or refuses, is not offered either: the member reads the ladder while
+/// it is not meshed (`read_ladder_while_unmeshed`, for every policy, a `discover` session included),
+/// admits the rung that answers as ours, and admits a silent rung that is not refused.
+pub(crate) fn rungs_offered_at_setup(read: &[(u16, ProbeAnswer)]) -> Vec<u16> {
+    read.iter()
+        .filter(|(_, answer)| matches!(answer, ProbeAnswer::Ours))
+        .map(|(port, _)| *port)
+        .collect()
+}
+
 /// Pre-register `rendezvous_id`'s address so a cold joiner reaches it
 /// with **zero address-lookup wait** — a creator-independent bootstrap
 /// that needs no discovery query to make the first dial:
 ///
-/// - **loopback-only**: every loopback ladder rung (iroh's node-id dial
-///   reaches whichever rung our beacon bound; see `crate::beacon`).
+/// - **loopback-only**: the loopback ladder rungs of `offered`, those that
+///   were read as serving our beacon (iroh's node-id dial reaches whichever
+///   of them our beacon bound; see `crate::beacon`). A rung that nobody has
+///   proven to be ours stays out: other meshes on the host derive ladders
+///   from their own seeds, the ports can coincide, and a dial that meets the
+///   beacon of another mesh ends on its identity. The member reads the busy
+///   rungs of the ladder (`beacon::read_ladder`) and admits the rung that
+///   answers as ours, a few hundred ms after the beacon binds.
 /// - **reachable across machines**: the seed-derived `rendezvous_id` at
 ///   **every rung** of the relay choice, and at the rung of the walk
 ///   (`params.bootstrap_relay`). The beacon homes on one rung of the ladder
@@ -151,35 +170,18 @@ fn spawn_startup_rung_confirmation(
 /// with the rival probe's dial target: the probe asks whether anyone serves
 /// the identity *a joiner would reach*, so the two must name the same place or
 /// it is answering a different question.
-/// The rungs a member leaves out of the rendezvous address it registers at setup, from what each
-/// busy rung answered to a probe. A member that walks the ladder (every policy but `Never`) keeps
-/// only a rung read as ours: its walk reads the rest and admits one that turns out to be ours, and
-/// a foreign listener never fails its dial. A member that never walks (`CoHostPolicy::Never`, the
-/// `discover` session) leaves out only a rung read as foreign: it reads no rung later, and a rung
-/// that refused or said nothing may be the beacon it came for, starting or loaded.
-fn rungs_withheld_at_setup(policy: CoHostPolicy, read: &[(u16, ProbeAnswer)]) -> Vec<u16> {
-    read.iter()
-        .filter(|(_, answer)| match policy {
-            CoHostPolicy::Never => matches!(answer, ProbeAnswer::Foreign),
-            CoHostPolicy::Eager | CoHostPolicy::EagerProbed | CoHostPolicy::Deferred => {
-                !matches!(answer, ProbeAnswer::Ours)
-            }
-        })
-        .map(|(port, _)| *port)
-        .collect()
-}
-
 pub(crate) fn register_rendezvous(
     book: &memory::MemoryLookup,
     params: &RendezvousParams,
-    withheld: &[u16],
+    offered: &[u16],
 ) {
     // Relay disabled (not in the allowlist) or private without a port ladder:
     // nothing to pre-register — joiners resolve the rendezvous id via
     // mDNS/DHT only.
-    // Without the rungs in `withheld`: a dial of the id tries every address that the endpoint knows
-    // for it, and a listener of another program on one of them fails the dial as a whole.
-    let Some(address) = beacon::rendezvous_addr_without(params, withheld) else {
+    // Only the rungs in `offered`: a dial of the id tries every address that the endpoint knows
+    // for it, and a listener of another identity on one of them (another mesh whose ladder shares
+    // the port, or another program) ends the dial with its answer.
+    let Some(address) = beacon::rendezvous_addr_offering(params, offered) else {
         return;
     };
     if params.bind_ports.is_empty() {
@@ -524,9 +526,6 @@ struct SetupBuild<'build> {
     )]
     multihop: bool,
     transports: lookup::TransportOpts,
-    /// The caller's co-host override, read before the policy is final: what a joiner registers
-    /// for the rendezvous depends on whether it will walk the ladder.
-    cohost: Option<CoHostPolicy>,
     /// The caller's ALPN handlers, moved out exactly once by whichever of
     /// create/join runs. Interior mutability because they are boxed trait
     /// objects — not `Clone` — and `SetupBuild` is threaded by reference.
@@ -1548,7 +1547,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         protocols: sync::Mutex::new(protocols),
         rung_tx: &rung_tx,
         relay_transport,
-        cohost: cohost_override,
     };
     let Assembled {
         mesh_id,
@@ -1842,7 +1840,9 @@ async fn setup_create(
     // Creator has no peers yet — bootstrap is empty.
     let topic = split::subscribe_mesh(&gossip, topic_id, rdv.id, []).await?;
 
-    register_rendezvous(&address_book, &rdv, &beacon::busy_rungs(&rdv));
+    // The creator offers no rung: its own beacon binds one, and `claim` settles the endpoint and the
+    // book on it. A rung that nobody has read as ours can be the rung of another mesh.
+    register_rendezvous(&address_book, &rdv, &[]);
 
     Ok(Assembled {
         mesh_id,
@@ -1919,8 +1919,8 @@ async fn setup_join(
     // this registered address — the loopback port ladder (loopback-only) or
     // the chosen relay rung (reachable across machines).
     let read = beacon::read_busy_rungs(&rdv, SETUP_RUNG_READ).await;
-    let withheld = rungs_withheld_at_setup(build.cohost.unwrap_or(cohost), &read.answers);
-    register_rendezvous(&address_book, &rdv, &withheld);
+    let offered = rungs_offered_at_setup(&read.answers);
+    register_rendezvous(&address_book, &rdv, &offered);
     // We subscribe, background-connect to the rendezvous, and — for a plain
     // join — `daemon::run` defers co-hosting our own (same seed-id) rendezvous
     // until we are meshed, so we never register a duplicate `rendezvous_id` on
@@ -3333,11 +3333,11 @@ mod tests {
     use crate::transport::PayloadPath;
     use crate::{embed, lookup, membership, transport};
     use tokio::time;
-    /// A walking member keeps only the rung read as ours; the `discover` session, which never
-    /// walks, leaves out only a rung read as foreign: a silent or refusing one may be its beacon.
+    /// A member offers only the rung read as ours, whatever its policy: a rung that nobody read, a
+    /// silent rung, a refusing rung and a foreign rung stay out of the book until a read admits them.
     #[test]
-    fn what_a_member_leaves_out_at_setup_follows_its_walk() {
-        use super::{CoHostPolicy, ProbeAnswer, rungs_withheld_at_setup};
+    fn what_a_member_offers_at_setup_is_the_rungs_read_as_ours() {
+        use super::{ProbeAnswer, rungs_offered_at_setup};
 
         let _guard = ::habilis_network_test_tracing::init();
         let read = [
@@ -3347,19 +3347,13 @@ mod tests {
             (11743, ProbeAnswer::Ours),
         ];
         assert_eq!(
-            rungs_withheld_at_setup(CoHostPolicy::Never, &read),
-            vec![4161],
-            "a never policy withholds the rungs of its walk at setup"
+            rungs_offered_at_setup(&read),
+            vec![11743],
+            "only the rung read as ours is offered"
         );
-        assert_eq!(
-            rungs_withheld_at_setup(CoHostPolicy::Deferred, &read),
-            vec![4161, 5511, 8450],
-            "a deferred policy withholds its rungs at setup"
-        );
-        assert_eq!(
-            rungs_withheld_at_setup(CoHostPolicy::Eager, &read),
-            vec![4161, 5511, 8450],
-            "an eager policy withholds its rungs at setup"
+        assert!(
+            rungs_offered_at_setup(&[]).is_empty(),
+            "a ladder that nobody read offers no rung"
         );
     }
 

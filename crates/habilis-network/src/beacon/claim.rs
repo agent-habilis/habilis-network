@@ -152,7 +152,7 @@ pub(crate) async fn claim_holder(
         Some(index) => settle_on_rung(params, peer, peer_book, params.bind_ports[index]).await,
         None => replace_peer_addr(
             peer_book,
-            holder_entry(endpoint.addr(), params, &rungs.withheld_rungs()),
+            holder_entry(endpoint.addr(), params, &rungs.offered_rungs()),
         ),
     }
     let topic_id = params.topic_id;

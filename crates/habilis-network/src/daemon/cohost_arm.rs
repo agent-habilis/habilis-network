@@ -116,6 +116,22 @@ pub(super) fn may_cohost(cohost: CoHostPolicy, meshed: bool, started: Instant) -
         CoHostPolicy::Deferred => meshed || started.elapsed() >= tuning::cohost_grace(),
     }
 }
+/// Does this member read the busy rungs of a private ladder by itself? A member that is not meshed
+/// and may not co-host yet has no walk that acts on a probe report, and its book offers only the
+/// rungs that were read as ours: the read finds the rung of the beacon. It holds for every policy
+/// that may not co-host, a `discover` session (`Never`) included: the session dials the beacon and
+/// has no other way to learn its rung.
+pub(super) fn reads_ladder_while_unmeshed(
+    cohost: CoHostPolicy,
+    meshed: bool,
+    started: Instant,
+    ladder_len: usize,
+    holds_beacon: bool,
+    reclaim_open: bool,
+) -> bool {
+    let walk_acts = may_cohost(cohost, meshed, started) && reclaim_open;
+    !meshed && !holds_beacon && !walk_acts && ladder_len > 0
+}
 /// The co-host decision inputs a heal/reclaim tick needs: which policy
 /// governs this session, the rendezvous params to (re)claim under, and
 /// (for the unmeshed-joiner grace `maybe_cohost` alone reads) when the
@@ -360,11 +376,14 @@ fn shed_beacon(
         target: "habilis_network::gossip",
         "beacon shed: a lower rung of the ladder answers as our mesh"
     );
+    if let Some(index) = held.rung_in(&params.bind_ports) {
+        state.rungs.release_rung(params.bind_ports[index]);
+    }
     state.beacon_closing = Some(held.shed_then());
     state.next_rival_recheck = None;
     state.cancel_rendezvous_round();
     state.address_book.remove_endpoint_info(params.id);
-    super::setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
+    super::setup::register_rendezvous(&state.address_book, params, &state.rungs.offered_rungs());
     state.rendezvous_flags.remove(&RendezvousFlag::Linked);
     state.forget_rendezvous_verdict();
     state.arm_reclaim(Instant::now());
@@ -626,6 +645,9 @@ pub(super) fn shed_rival_beacon_if_due(
     // timeout — the zombie both stalls the post-shed re-graft and leaves
     // a poisoned pool entry under the shared id.
     if let Some(held) = rendezvous.take() {
+        if let Some(index) = held.rung_in(&arm.params.bind_ports) {
+            state.rungs.release_rung(arm.params.bind_ports[index]);
+        }
         state.beacon_closing = Some(held.shed_then());
     }
     state.next_rival_recheck = None;
@@ -638,7 +660,7 @@ pub(super) fn shed_rival_beacon_if_due(
     super::setup::register_rendezvous(
         &state.address_book,
         arm.params,
-        &state.rungs.withheld_rungs(),
+        &state.rungs.offered_rungs(),
     );
     // Don't wait for that `NeighborDown` either — clear the link flag now
     // (mirroring the hard resume edge), or a yielding node's heal ticks
@@ -666,7 +688,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::beacon::claim;
-    use crate::daemon::{config, state};
+    use crate::daemon::{cohost_arm, config, state};
     use crate::protocol::meshes;
     use crate::transport::PayloadPath;
     use crate::util::{clock, tuning};
@@ -676,6 +698,112 @@ mod tests {
     use std::{future, net};
     use tokio::sync::{mpsc, oneshot, watch};
     use tokio::time;
+    /// A `discover` session never co-hosts and dials the beacon, and its book offers only the
+    /// rungs that were read as ours, so it reads the ladder while it is not meshed, as a joiner.
+    #[test]
+    fn a_discover_session_reads_the_ladder_while_it_is_not_meshed() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let started = clock::Instant::now();
+        assert!(
+            cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Never,
+                false,
+                started,
+                8,
+                false,
+                false
+            ),
+            "a discover session that is not meshed reads the ladder"
+        );
+        assert!(
+            !cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Never,
+                true,
+                started,
+                8,
+                false,
+                false
+            ),
+            "a meshed session reads no ladder"
+        );
+        assert!(
+            !cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Never,
+                false,
+                started,
+                0,
+                false,
+                false
+            ),
+            "a public mesh has no ladder"
+        );
+        assert!(
+            cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Deferred,
+                false,
+                started,
+                8,
+                false,
+                false
+            ),
+            "a deferred joiner that is not meshed reads the ladder"
+        );
+        assert!(
+            !cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Eager,
+                false,
+                started,
+                8,
+                false,
+                true
+            ),
+            "an eager member walks the ladder while the reclaim window is open"
+        );
+    }
+
+    /// An eager joiner walks the ladder only while the reclaim window is open (6 s). After that
+    /// no walk acts on a probe report until the heal tick, 15 s later, and the book offers only the
+    /// rungs read as ours: a probe that timed out on a loaded host left the joiner with no address
+    /// for the 30 s that iroh-gossip waits before it warns. It reads the ladder by itself then.
+    #[test]
+    fn an_eager_joiner_without_a_proven_rung_reads_the_ladder_when_the_walk_is_over() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let started = clock::Instant::now();
+        assert!(
+            cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Eager,
+                false,
+                started,
+                8,
+                false,
+                false
+            ),
+            "the walk is over: the joiner reads the ladder"
+        );
+        assert!(
+            !cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Eager,
+                false,
+                started,
+                8,
+                false,
+                true
+            ),
+            "the walk acts while the reclaim window is open"
+        );
+        assert!(
+            !cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Eager,
+                false,
+                started,
+                8,
+                true,
+                false
+            ),
+            "a member that holds the beacon does not read its own rung"
+        );
+    }
+
     /// A shed cuts the rendezvous a browser reached us through, and the tab
     /// has nothing else: its roster empties mid-transfer. Observed as a
     /// terminal cycling claim and release while a tab saw no peers at all.
@@ -1566,6 +1694,33 @@ mod tests {
             self.state.rungs.finish().await;
             self.endpoint.close().await;
         }
+    }
+
+    /// The rung of a beacon that was shed is not ours any more: another mesh whose ladder shares the
+    /// port can bind it, and each heal tick registers what the watch offers. A rung that stays in
+    /// `ours` after the shed goes back into the book with the next registration.
+    #[test]
+    fn a_shed_beacon_leaves_its_rung_out_of_what_the_book_offers() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut holder = HolderOnTheSecondRung::new().await;
+            let shed_rung = holder.params.bind_ports[1];
+            // The loop binds through its own watch, which then reads the rung of its beacon as ours.
+            holder.state.rungs.clear_foreign(shed_rung);
+            let (lower_endpoint, lower_beacon) = holder.another_member_takes_the_first_rung().await;
+
+            holder.heal_tick().await;
+
+            let shed = holder.rendezvous.is_none();
+            let offered = holder.state.rungs.offered_rungs();
+            Box::pin(holder.close()).await;
+            lower_beacon.shed_and_wait().await;
+            lower_endpoint.close().await;
+            assert!(shed, "the holder on the second rung did not shed");
+            assert!(
+                !offered.contains(&shed_rung),
+                "the rung {shed_rung} of the shed beacon is still offered: {offered:?}"
+            );
+        });
     }
 
     /// A holder on a rung above a live one yields it. A split of two beacons on one ladder came

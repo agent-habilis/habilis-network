@@ -107,7 +107,7 @@ pub(super) async fn run_heal(
         // is re-validated off-loop by the beacon's liveness self-monitor,
         // so a rung that died during the freeze self-corrects — no inline
         // ladder walk on the event loop here.
-        setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
+        setup::register_rendezvous(&state.address_book, params, &state.rungs.offered_rungs());
         if webrtc::rendezvous::rendezvous_graftable(state) {
             gossip::heal::tick_heal_hard(context.endpoint, params.id, context.sender).await;
         }
@@ -348,9 +348,9 @@ pub(crate) fn apply_rung_change(
 }
 
 /// Register the rendezvous at the rung of `params` for joiners. The one place that reads which
-/// rungs of the ladder are withheld, for both ways of applying a rung.
+/// rungs of the ladder are offered, for both ways of applying a rung.
 fn register_the_rung(state: &EventLoopState, params: &beacon::RendezvousParams) {
-    setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
+    setup::register_rendezvous(&state.address_book, params, &state.rungs.offered_rungs());
 }
 
 #[cfg(test)]
