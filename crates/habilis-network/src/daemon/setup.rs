@@ -2655,6 +2655,14 @@ mod tests {
         }
     }
 
+    /// A restart of `state`, the way the setup takes it: [`super::hold_member_key`] tries the lock again for
+    /// `KEY_LOCK_RETRY`. A start that tries it once fails while a child that another test spawns still holds a
+    /// copy of the lock file, between its fork and its exec.
+    async fn start_again(state: &Path) -> anyhow::Result<RunKeys> {
+        let key_lock = super::hold_member_key(Some(state)).await?;
+        super::run_keys_holding(Some(state), key_lock, &super::NEVER_CANCELLED)
+    }
+
     /// The owner binding reads the path that the keys came from. A start with no state file of its
     /// own keeps its pair under the default path of the mesh, and the explicit state file is `None`
     /// there: a binding that read that field alone stamped nothing, and a later owner of the same
@@ -2705,22 +2713,24 @@ mod tests {
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn each_start_records_its_run_in_the_key_file() {
-        let dir = TempDir::new("habilis-run-recorded");
-        let state = dir.path().join("session.json");
-        let first =
-            ended(super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the first start"));
-        let second =
-            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the second start");
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = TempDir::new("habilis-run-recorded");
+            let state = dir.path().join("session.json");
+            let first = ended(
+                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the first start"),
+            );
+            let second = start_again(&state).await.expect("the second start");
 
-        let bytes = fs::read(state.with_extension("key")).expect("the key file");
-        let named = bytes
-            .get(40..48)
-            .and_then(|tail| <[u8; 8]>::try_from(tail).ok())
-            .map(u64::from_le_bytes);
+            let bytes = fs::read(state.with_extension("key")).expect("the key file");
+            let named = bytes
+                .get(40..48)
+                .and_then(|tail| <[u8; 8]>::try_from(tail).ok())
+                .map(u64::from_le_bytes);
 
-        assert_eq!(first.run, 1, "the first start is run 1");
-        assert_eq!(second.run, 2, "the second start is run 2");
-        assert_eq!(named, Some(second.run), "the key file names the last run");
+            assert_eq!(first.run, 1, "the first start is run 1");
+            assert_eq!(second.run, 2, "the second start is run 2");
+            assert_eq!(named, Some(second.run), "the key file names the last run");
+        });
     }
 
     /// The wait for the run lock holds no thread of the runtime: while another start keeps the lock for 700 ms, a
@@ -2839,36 +2849,38 @@ mod tests {
     #[test]
     fn a_restart_with_no_state_file_keeps_its_member_key_in_the_default_state_path() {
         use crate::protocol::{MeshId, Nickname};
-        let dir = TempDir::new("habilis-default-state");
-        let base = dir.path();
-        let (mesh, author) = (MeshId::from("test"), Nickname::from("alice"));
-        let explicit = dir.path().join("explicit.json");
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = TempDir::new("habilis-default-state");
+            let base = dir.path();
+            let (mesh, author) = (MeshId::from("test"), Nickname::from("alice"));
+            let explicit = dir.path().join("explicit.json");
 
-        let path = |state: Option<&Path>, on: bool| {
-            super::keys_state_path(state, Some(base), &mesh, &author, on).expect("a state path")
-        };
-        let default = path(None, true).expect("the flag asks for the default state path");
-        let first = ended(
-            super::run_keys(Some(&default), &super::NEVER_CANCELLED).expect("the first start"),
-        );
-        let second = super::run_keys(Some(&default), &super::NEVER_CANCELLED).expect("the restart");
+            let path = |state: Option<&Path>, on: bool| {
+                super::keys_state_path(state, Some(base), &mesh, &author, on).expect("a state path")
+            };
+            let default = path(None, true).expect("the flag asks for the default state path");
+            let first = ended(
+                super::run_keys(Some(&default), &super::NEVER_CANCELLED).expect("the first start"),
+            );
+            let second = start_again(&default).await.expect("the restart");
 
-        assert!(
-            default.starts_with(base),
-            "the default path is under the runtime base"
-        );
-        assert_eq!(
-            member_of(&first),
-            member_of(&second),
-            "the restart made a new member key"
-        );
-        assert_eq!(second.run, first.run + 1, "the run counts on");
-        assert!(path(None, false).is_none(), "no flag keeps ephemeral keys");
-        assert_eq!(
-            path(Some(&explicit), true).as_deref(),
-            Some(explicit.as_path()),
-            "an explicit state file wins"
-        );
+            assert!(
+                default.starts_with(base),
+                "the default path is under the runtime base"
+            );
+            assert_eq!(
+                member_of(&first),
+                member_of(&second),
+                "the restart made a new member key"
+            );
+            assert_eq!(second.run, first.run + 1, "the run counts on");
+            assert!(path(None, false).is_none(), "no flag keeps ephemeral keys");
+            assert_eq!(
+                path(Some(&explicit), true).as_deref(),
+                Some(explicit.as_path()),
+                "an explicit state file wins"
+            );
+        });
     }
 
     /// The run counter file is read like the key file: no link is followed, a file that is not a regular file is
@@ -2972,33 +2984,35 @@ mod tests {
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_member_whose_run_file_is_deleted_restarts_from_the_clock() {
-        let _guard = ::habilis_network_test_tracing::init();
-        ::habilis_network_test_tracing::expect_warn(
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn(
             "habilis_network::lifecycle",
             "run counter file is unreadable",
         );
-        let dir = TempDir::new("habilis-run-deleted");
-        let state = dir.path().join("session.json");
-        let first =
-            ended(super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the first start"));
-        let second = ended(
-            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the second start"),
-        );
-        assert_eq!(
-            (first.run, second.run),
-            (1, 2),
-            "the first starts count 1, 2"
-        );
-        fs::remove_file(state.with_extension("run")).expect("the run file is deleted");
+        ::habilis_network_test_tracing::run(guard, async {
+            let dir = TempDir::new("habilis-run-deleted");
+            let state = dir.path().join("session.json");
+            let first = ended(
+                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the first start"),
+            );
+            let second = ended(start_again(&state).await.expect("the second start"));
+            assert_eq!(
+                (first.run, second.run),
+                (1, 2),
+                "the first starts count 1, 2"
+            );
+            fs::remove_file(state.with_extension("run")).expect("the run file is deleted");
 
-        let third = super::run_keys(Some(&state), &super::NEVER_CANCELLED)
-            .expect("the start after the deletion");
+            let third = start_again(&state)
+                .await
+                .expect("the start after the deletion");
 
-        assert!(
-            third.run > 1_000_000_000,
-            "the run after a deleted file is {}, below the runs that peers hold",
-            third.run
-        );
+            assert!(
+                third.run > 1_000_000_000,
+                "the run after a deleted file is {}, below the runs that peers hold",
+                third.run
+            );
+        });
     }
 
     /// A first start has no run file and no member key: the count starts at 1, with no warning.
@@ -3018,49 +3032,49 @@ mod tests {
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_pair_of_files_from_another_owner_is_not_reused() {
-        let _guard = ::habilis_network_test_tracing::init();
-        ::habilis_network_test_tracing::expect_warn(
-            "habilis_network::lifecycle",
-            "from another owner",
-        );
-        let dir = TempDir::new("habilis-owner");
-        let state = dir.path().join("session.json");
-        let first = ended(super::bind_to_owner(
-            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
-            Some(&state),
-            Some(100),
-        ));
-        let restart = ended(super::bind_to_owner(
-            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("restart"),
-            Some(&state),
-            Some(100),
-        ));
-        assert_eq!(
-            member_of(&first),
-            member_of(&restart),
-            "the same owner keeps the member key"
-        );
-        assert_eq!(restart.run, 2, "and the run counter goes on");
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "from another owner");
+        ::habilis_network_test_tracing::run(guard, async {
+            let dir = TempDir::new("habilis-owner");
+            let state = dir.path().join("session.json");
+            let first = ended(super::bind_to_owner(
+                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
+                Some(&state),
+                Some(100),
+            ));
+            let restart = ended(super::bind_to_owner(
+                start_again(&state).await.expect("restart"),
+                Some(&state),
+                Some(100),
+            ));
+            assert_eq!(
+                member_of(&first),
+                member_of(&restart),
+                "the same owner keeps the member key"
+            );
+            assert_eq!(restart.run, 2, "and the run counter goes on");
 
-        let reused_pid = ended(super::bind_to_owner(
-            super::run_keys(Some(&state), &super::NEVER_CANCELLED)
-                .expect("a start of another process"),
-            Some(&state),
-            Some(200),
-        ));
+            let reused_pid = ended(super::bind_to_owner(
+                start_again(&state)
+                    .await
+                    .expect("a start of another process"),
+                Some(&state),
+                Some(200),
+            ));
 
-        assert_ne!(
-            member_of(&first),
-            member_of(&reused_pid),
-            "another owner start time is a new member"
-        );
-        assert_eq!(reused_pid.run, 1, "and its run counter starts again");
-        let next = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the start after");
-        assert_eq!(
-            member_of(&reused_pid),
-            member_of(&next),
-            "the new member key is kept, for the restarts of the new owner"
-        );
+            assert_ne!(
+                member_of(&first),
+                member_of(&reused_pid),
+                "another owner start time is a new member"
+            );
+            assert_eq!(reused_pid.run, 1, "and its run counter starts again");
+            let next = start_again(&state).await.expect("the start after");
+            assert_eq!(
+                member_of(&reused_pid),
+                member_of(&next),
+                "the new member key is kept, for the restarts of the new owner"
+            );
+        });
     }
 
     /// An owner whose start time cannot be read gets no reuse of an old pair: the safe side. A pair
@@ -3069,28 +3083,28 @@ mod tests {
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn with_no_start_time_an_old_pair_is_not_reused_and_a_new_one_is_kept() {
-        let _guard = ::habilis_network_test_tracing::init();
-        ::habilis_network_test_tracing::expect_warn(
-            "habilis_network::lifecycle",
-            "from another owner",
-        );
-        let dir = TempDir::new("habilis-owner-none");
-        let state = dir.path().join("session.json");
-        let made = ended(super::bind_to_owner(
-            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
-            Some(&state),
-            None,
-        ));
-        let old = super::run_keys(Some(&state), &super::NEVER_CANCELLED)
-            .expect("a start with the pair of the first");
-        let checked = super::bind_to_owner(old.clone(), Some(&state), None);
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "from another owner");
+        ::habilis_network_test_tracing::run(guard, async {
+            let dir = TempDir::new("habilis-owner-none");
+            let state = dir.path().join("session.json");
+            let made = ended(super::bind_to_owner(
+                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
+                Some(&state),
+                None,
+            ));
+            let old = start_again(&state)
+                .await
+                .expect("a start with the pair of the first");
+            let checked = super::bind_to_owner(old.clone(), Some(&state), None);
 
-        assert_eq!(made.run, 1, "a pair made by this start is kept");
-        assert_ne!(
-            member_of(&old),
-            member_of(&checked),
-            "an old pair is not reused with no start time to check"
-        );
+            assert_eq!(made.run, 1, "a pair made by this start is kept");
+            assert_ne!(
+                member_of(&old),
+                member_of(&checked),
+                "an old pair is not reused with no start time to check"
+            );
+        });
     }
 
     /// The member key survives a restart and the session key does not: the session key signs the
@@ -3098,32 +3112,34 @@ mod tests {
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_restart_keeps_the_member_key_and_changes_the_session_key() {
-        let dir = env::temp_dir().join(format!("habilis-run-keys-{}", process::id()));
-        fs::create_dir_all(&dir).expect("a temp dir");
-        let state = dir.join("session.json");
-        let first =
-            ended(super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"));
-        let second = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("restart");
-        assert_eq!(
-            member_of(&first),
-            member_of(&second),
-            "the restart keeps the member key"
-        );
-        assert_ne!(
-            first.session.author_key(),
-            second.session.author_key(),
-            "the restart makes a new session key"
-        );
-        assert_ne!(
-            first.session.author_key(),
-            member_of(&first),
-            "the session key is not the member key"
-        );
-        assert_eq!(
-            (first.run, second.run),
-            (1, 2),
-            "the run number counts the starts"
-        );
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = env::temp_dir().join(format!("habilis-run-keys-{}", process::id()));
+            fs::create_dir_all(&dir).expect("a temp dir");
+            let state = dir.join("session.json");
+            let first =
+                ended(super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"));
+            let second = start_again(&state).await.expect("restart");
+            assert_eq!(
+                member_of(&first),
+                member_of(&second),
+                "the restart keeps the member key"
+            );
+            assert_ne!(
+                first.session.author_key(),
+                second.session.author_key(),
+                "the restart makes a new session key"
+            );
+            assert_ne!(
+                first.session.author_key(),
+                member_of(&first),
+                "the session key is not the member key"
+            );
+            assert_eq!(
+                (first.run, second.run),
+                (1, 2),
+                "the run number counts the starts"
+            );
+        });
     }
 
     /// Two live daemons cannot be one member: the second start of a state path that a live start
@@ -3192,32 +3208,88 @@ mod tests {
     #[test]
     fn a_start_after_the_holder_is_gone_works_even_while_a_child_of_it_lives() {
         use std::io::{BufRead, BufReader};
-        let dir = env::temp_dir().join(format!("habilis-key-lock-child-{}", process::id()));
-        fs::create_dir_all(&dir).expect("a temp dir");
-        let state = dir.join("child.json");
-        let first = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start");
-        let first_member = member_of(&first);
-        // The child says that it runs: before its exec it still holds a copy of every descriptor of this
-        // process, the lock file too, and a holder that is dropped in that gap leaves the lock held for it.
-        let mut child: process::Child = process::Command::new("sh")
-            .args(["-c", "echo ready; sleep 30"])
-            .stdout(process::Stdio::piped())
-            .spawn()
-            .expect("a child that outlives the holder");
-        let mut ready = String::new();
-        let pipe = child.stdout.take().expect("a pipe");
-        BufRead::read_line(&mut BufReader::new(pipe), &mut ready)
-            .expect("the child says that it runs");
-        drop(first);
-        let second = super::run_keys(Some(&state), &super::NEVER_CANCELLED);
-        child.kill().expect("the child is stopped");
-        child.wait().expect("the child is reaped");
-        let second = second.expect("the child does not keep the lock");
-        assert_eq!(
-            (member_of(&second), second.run),
-            (first_member, 2),
-            "the restart keeps the member key and takes the next run"
-        );
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = env::temp_dir().join(format!("habilis-key-lock-child-{}", process::id()));
+            fs::create_dir_all(&dir).expect("a temp dir");
+            let state = dir.join("child.json");
+            let first =
+                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start");
+            let first_member = member_of(&first);
+            // The child says that it runs: before its exec it still holds a copy of every descriptor of this
+            // process, the lock file too, and a holder that is dropped in that gap leaves the lock held for it.
+            let mut child: process::Child = process::Command::new("sh")
+                .args(["-c", "echo ready; sleep 30"])
+                .stdout(process::Stdio::piped())
+                .spawn()
+                .expect("a child that outlives the holder");
+            let mut ready = String::new();
+            let pipe = child.stdout.take().expect("a pipe");
+            BufRead::read_line(&mut BufReader::new(pipe), &mut ready)
+                .expect("the child says that it runs");
+            drop(first);
+            let second = start_again(&state).await;
+            child.kill().expect("the child is stopped");
+            child.wait().expect("the child is reaped");
+            let second = second.expect("the child does not keep the lock");
+            assert_eq!(
+                (member_of(&second), second.run),
+                (first_member, 2),
+                "the restart keeps the member key and takes the next run"
+            );
+        });
+    }
+
+    /// A restart waits out a child that another thread spawns. Between its fork and its exec the child holds a
+    /// copy of every descriptor of this process, the lock file too, so the lock stays held for a moment after its
+    /// holder drops. Each test of this binary that spawns a child opens that gap, and a restart that tried the
+    /// lock once failed in it. Here the child stays in the gap for 1 s.
+    #[cfg(all(unix, feature = "host"))]
+    #[expect(
+        unsafe_code,
+        reason = "`CommandExt::pre_exec`: only a hook between the fork and the exec keeps the child in that gap"
+    )]
+    #[test]
+    fn a_restart_waits_out_a_child_that_holds_a_copy_of_the_lock_until_its_exec() {
+        use std::io::{self, Read as _, Write as _};
+        use std::os::unix::process::CommandExt as _;
+        use std::time::Duration;
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = TempDir::new("habilis-key-lock-fork-gap");
+            let state = dir.path().join("session.json");
+            let first =
+                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the first start");
+            let first_member = member_of(&first);
+            let (mut forked, mut forked_tx) = io::pipe().expect("a pipe");
+            let mut command = process::Command::new("true");
+            // SAFETY: the hook makes 1 write and 1 sleep, and touches no lock or allocator of the parent.
+            unsafe {
+                command.pre_exec(move || {
+                    forked_tx.write_all(b"f")?;
+                    thread::sleep(Duration::from_secs(1));
+                    Ok(())
+                });
+            }
+            let spawner = thread::spawn(move || command.status());
+            let mut byte = [0u8; 1];
+            forked
+                .read_exact(&mut byte)
+                .expect("the child says that it forked");
+
+            drop(ended(first));
+            let second = start_again(&state).await;
+
+            let status = spawner.join().expect("the spawner ends");
+            assert!(
+                status.as_ref().is_ok_and(process::ExitStatus::success),
+                "the child runs: {status:?}"
+            );
+            let second = second.expect("the restart waits until the child has done its exec");
+            assert_eq!(
+                (member_of(&second), second.run),
+                (first_member, 2),
+                "the restart keeps the member key and takes the next run"
+            );
+        });
     }
 
     /// The failure this prevents: a restarted session starts its slices again at version 1. Each
@@ -3230,41 +3302,41 @@ mod tests {
         use crate::protocol::{Channel, MeshId, Message, MessageBody};
         use crate::testing;
         use crate::util::clock::Instant;
-        let dir = env::temp_dir().join(format!("habilis-restart-actor-{}", process::id()));
-        fs::create_dir_all(&dir).expect("a temp dir");
-        let state = dir.join("session.json");
-        let mesh = MeshId::from("💬test");
-        let author = testing::nick("alice");
-        let write = |keys: &RunKeys, version: u8| {
-            let body = MessageBody::try_new(&format!(r#"{{"version":{version},"value":{{}}}}"#))
-                .expect("a slice body");
-            Message::new_channel_event(&mesh, &author, body, Channel::State).sign(&keys.session)
-        };
-        let before = write(
-            &super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
-            5,
-        );
-        let after = write(
-            &super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("restart"),
-            1,
-        );
-        let mut replica = SliceStore::new(
-            Channel::State,
-            SliceLimits::default(),
-            worst_frame_overhead(),
-        );
-        assert!(
-            matches!(
-                replica.ingest(&before, true, Instant::now()),
-                SliceIngest::Applied
-            ),
-            "the replica takes the first run"
-        );
-        let outcome = replica.ingest(&after, true, Instant::now());
-        assert!(
-            matches!(outcome, SliceIngest::Applied),
-            "the replica takes the restarted run, got {outcome:?}: the session key is new"
-        );
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = env::temp_dir().join(format!("habilis-restart-actor-{}", process::id()));
+            fs::create_dir_all(&dir).expect("a temp dir");
+            let state = dir.join("session.json");
+            let mesh = MeshId::from("💬test");
+            let author = testing::nick("alice");
+            let write = |keys: &RunKeys, version: u8| {
+                let body =
+                    MessageBody::try_new(&format!(r#"{{"version":{version},"value":{{}}}}"#))
+                        .expect("a slice body");
+                Message::new_channel_event(&mesh, &author, body, Channel::State).sign(&keys.session)
+            };
+            let before = write(
+                &super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
+                5,
+            );
+            let after = write(&start_again(&state).await.expect("restart"), 1);
+            let mut replica = SliceStore::new(
+                Channel::State,
+                SliceLimits::default(),
+                worst_frame_overhead(),
+            );
+            assert!(
+                matches!(
+                    replica.ingest(&before, true, Instant::now()),
+                    SliceIngest::Applied
+                ),
+                "the replica takes the first run"
+            );
+            let outcome = replica.ingest(&after, true, Instant::now());
+            assert!(
+                matches!(outcome, SliceIngest::Applied),
+                "the replica takes the restarted run, got {outcome:?}: the session key is new"
+            );
+        });
     }
 
     use crate::daemon::node::SignalHandling;
