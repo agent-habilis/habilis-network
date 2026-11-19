@@ -251,7 +251,8 @@ struct HomingTimes {
 
 impl HomingTimes {
     /// The times of a real member: the process tuning, so that a test of the whole daemon can set
-    /// them short.
+    /// them short. They are read once, when a follower starts, so
+    /// [`tuning::init`](crate::util::tuning::init) must run before any monitor starts.
     fn live() -> Self {
         Self {
             probe: RELAY_RUNG_PROBE,
@@ -338,9 +339,9 @@ impl MoveKind {
 /// backoff of the relay-less monitor (30 s to 5 min) after the outage, while the peers stay. The
 /// rendezvous address names every rung, so a beacon on its dead rung costs a joiner nothing.
 ///
-/// On a later rung, the member probes the rungs below it each `RELAY_RETURN_PROBE_INTERVAL`, in a
+/// On a later rung, the member probes the rungs below it each [`RELAY_RETURN_PROBE_INTERVAL`](tuning::RELAY_RETURN_PROBE_INTERVAL), in a
 /// task beside the liveness reads, so a slow round never holds back a read. It returns to the
-/// lowest rung that answered every round for `RELAY_RETURN_HOLD`. A round that finds no lower
+/// lowest rung that answered every round for [`RELAY_RETURN_HOLD`](tuning::RELAY_RETURN_HOLD). A round that finds no lower
 /// rung doubles the wait to the next round, up to [`RELAY_REPROBE_BACKOFF_MAX`].
 async fn follow_rung(
     endpoint: &Endpoint,
@@ -979,7 +980,7 @@ fn next_relay_backoff(current: Duration) -> Duration {
 ///   publish the rung it picks; the event loop re-homes the beacon on it.
 ///   A walk that picks the same rung, or finds no rung, publishes nothing,
 ///   and the beacon goes on following on its rung. On a later rung, move the relay of the beacon
-///   in place to the lowest rung below it once it answered every round for `RELAY_RETURN_HOLD`,
+///   in place to the lowest rung below it once it answered every round for [`RELAY_RETURN_HOLD`](tuning::RELAY_RETURN_HOLD),
 ///   and tell the event loop ([`RungChange::Moved`]). The beacon is not shed and not claimed again,
 ///   and the monitor goes on following. The rendezvous address names every rung, and the
 ///   connection to the old relay stays until the home moves, so a joiner reaches the beacon all

@@ -591,7 +591,8 @@ impl Default for Tuning {
 static TUNING: sync::OnceLock<Tuning> = sync::OnceLock::new();
 
 /// Install the process tuning, once, at daemon startup (from the parsed CLI
-/// flags). A second call is ignored; if never called (in-process: library API or MCP), `current`
+/// flags). It must run before anything reads a value that it sets: the relay follower reads its
+/// times once, when it starts, so a call after a follower started does not reach that follower. A second call is ignored; if never called (in-process: library API or MCP), `current`
 /// returns [`Tuning::DEFAULTS`].
 ///
 /// # Examples
