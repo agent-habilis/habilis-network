@@ -157,6 +157,7 @@ mod tests {
         return_every: Duration::from_mins(1),
         return_backoff_max: Duration::from_mins(5),
         return_hold: Duration::from_mins(3),
+        settle: Duration::from_secs(10),
     };
 
     fn rung(host: &str) -> RelayUrl {

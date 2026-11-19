@@ -309,7 +309,7 @@ pub(crate) fn apply_rung_change(
                 "the beacon moved to another relay rung in place; registering the rung"
             );
             params.bootstrap_relay = new;
-            setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
+            register_the_rung(state, params);
         }
         return;
     }
@@ -323,7 +323,7 @@ pub(crate) fn apply_rung_change(
             "bootstrap relay rung changed; re-registering rendezvous and re-homing the beacon"
         );
         params.bootstrap_relay = new;
-        setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
+        register_the_rung(state, params);
         // Release the beacon so `maybe_cohost` → `beacon::ensure` rebuilds it
         // homed on the new rung at the next heal/reclaim tick — `shed`, not a
         // plain drop. The old endpoint is still open and still homed on the
@@ -345,6 +345,12 @@ pub(crate) fn apply_rung_change(
         // taken against the old one is not about this identity at all.
         state.forget_rendezvous_verdict();
     }
+}
+
+/// Register the rendezvous at the rung of `params` for joiners. The one place that reads which
+/// rungs of the ladder are withheld, for both ways of applying a rung.
+fn register_the_rung(state: &EventLoopState, params: &beacon::RendezvousParams) {
+    setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
 }
 
 #[cfg(test)]

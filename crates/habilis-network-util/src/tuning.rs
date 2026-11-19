@@ -227,6 +227,91 @@ pub fn cohost_grace() -> Duration {
     current().cohost_grace
 }
 
+/// The live value of how often a member reads the liveness of its relay rung, after any override in the process tuning.
+///
+/// # Examples
+///
+/// The value is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::relay_liveness_interval;
+/// use std::time::Duration;
+///
+/// assert!(relay_liveness_interval() > Duration::ZERO);
+/// ```
+#[must_use]
+pub fn relay_liveness_interval() -> Duration {
+    current().relay_liveness_interval
+}
+
+/// The live value of how often a member on a later rung probes the rungs below it, after any override in the process tuning.
+///
+/// # Examples
+///
+/// The value is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::relay_return_probe_interval;
+/// use std::time::Duration;
+///
+/// assert!(relay_return_probe_interval() > Duration::ZERO);
+/// ```
+#[must_use]
+pub fn relay_return_probe_interval() -> Duration {
+    current().relay_return_probe_interval
+}
+
+/// The live value of how long a lower rung must answer before a member returns to it, after any override in the process tuning.
+///
+/// # Examples
+///
+/// The value is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::relay_return_hold;
+/// use std::time::Duration;
+///
+/// assert!(relay_return_hold() > Duration::ZERO);
+/// ```
+#[must_use]
+pub fn relay_return_hold() -> Duration {
+    current().relay_return_hold
+}
+
+/// The live value of the longest wait between two probe rounds that found no lower rung, after any override in the process tuning.
+///
+/// # Examples
+///
+/// The value is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::relay_reprobe_backoff_max;
+/// use std::time::Duration;
+///
+/// assert!(relay_reprobe_backoff_max() > Duration::ZERO);
+/// ```
+#[must_use]
+pub fn relay_reprobe_backoff_max() -> Duration {
+    current().relay_reprobe_backoff_max
+}
+
+/// The live value of how long a move in place waits for the new relay to become the home, after any override in the process tuning.
+///
+/// # Examples
+///
+/// The value is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::relay_home_settle;
+/// use std::time::Duration;
+///
+/// assert!(relay_home_settle() > Duration::ZERO);
+/// ```
+#[must_use]
+pub fn relay_home_settle() -> Duration {
+    current().relay_home_settle
+}
+
 /// How long a ping round collects pongs before the daemon
 /// emits its `ping_report`. Long enough for a relayed round-trip
 /// across the mesh; hidden flag `--ping-window-secs` so tests don't
@@ -340,6 +425,16 @@ pub struct Tuning {
     pub peerinfo_refresh_min: Duration,
     /// How much a live member adds to the refresh period.
     pub peerinfo_refresh_per_peer: Duration,
+    /// How often a member reads the liveness of its relay rung.
+    pub relay_liveness_interval: Duration,
+    /// How often a member on a later relay rung probes the rungs below it.
+    pub relay_return_probe_interval: Duration,
+    /// How long a lower relay rung must answer every round before a member returns to it.
+    pub relay_return_hold: Duration,
+    /// The longest wait between two probe rounds that found no lower relay rung.
+    pub relay_reprobe_backoff_max: Duration,
+    /// How long a move in place waits for the new relay to become the home.
+    pub relay_home_settle: Duration,
 }
 
 impl Tuning {
@@ -406,6 +501,41 @@ impl Tuning {
         self
     }
 
+    /// Set how often a member reads the liveness of its relay rung.
+    #[must_use]
+    pub fn relay_liveness_interval(mut self, relay_liveness_interval: Duration) -> Self {
+        self.relay_liveness_interval = relay_liveness_interval;
+        self
+    }
+
+    /// Set how often a member on a later rung probes the rungs below it.
+    #[must_use]
+    pub fn relay_return_probe_interval(mut self, relay_return_probe_interval: Duration) -> Self {
+        self.relay_return_probe_interval = relay_return_probe_interval;
+        self
+    }
+
+    /// Set how long a lower rung must answer before a member returns to it.
+    #[must_use]
+    pub fn relay_return_hold(mut self, relay_return_hold: Duration) -> Self {
+        self.relay_return_hold = relay_return_hold;
+        self
+    }
+
+    /// Set the longest wait between two probe rounds that found no lower rung.
+    #[must_use]
+    pub fn relay_reprobe_backoff_max(mut self, relay_reprobe_backoff_max: Duration) -> Self {
+        self.relay_reprobe_backoff_max = relay_reprobe_backoff_max;
+        self
+    }
+
+    /// Set how long a move in place waits for the new relay to become the home.
+    #[must_use]
+    pub fn relay_home_settle(mut self, relay_home_settle: Duration) -> Self {
+        self.relay_home_settle = relay_home_settle;
+        self
+    }
+
     /// Set how long a member waits before it asks for the rendezvous again.
     #[must_use]
     pub fn rendezvous_periodic_return(mut self, rendezvous_periodic_return: Duration) -> Self {
@@ -444,6 +574,11 @@ impl Tuning {
         topic_mdns_only: false,
         peerinfo_refresh_min: PEERINFO_REFRESH_MIN,
         peerinfo_refresh_per_peer: PEERINFO_REFRESH_PER_PEER,
+        relay_liveness_interval: RELAY_LIVENESS_INTERVAL,
+        relay_return_probe_interval: RELAY_RETURN_PROBE_INTERVAL,
+        relay_return_hold: RELAY_RETURN_HOLD,
+        relay_reprobe_backoff_max: RELAY_REPROBE_BACKOFF_MAX,
+        relay_home_settle: RELAY_HOME_SETTLE,
     };
 }
 
@@ -985,6 +1120,12 @@ pub const RELAY_RETURN_PROBE_INTERVAL: Duration = Duration::from_mins(1);
 /// hold. That is by design: the member has to leave its rung anyway, and the lowest rung that
 /// answers is the rung that every member picks.
 pub const RELAY_RETURN_HOLD: Duration = Duration::from_mins(3);
+
+/// How long a member that moved its relay in place waits for the new relay to become its home
+/// before a read of the new rung counts as a failure. The old relay stays the home until the new
+/// one connects, so a read in that time finds the new rung not connected, and 2 such reads would
+/// walk the ladder and shed a healthy beacon.
+pub const RELAY_HOME_SETTLE: Duration = Duration::from_secs(30);
 
 /// Timeout for *one attempt* of the private-mode rendezvous identity
 /// probe. When a ladder rung is `AddrInUse`, a member probes it to tell

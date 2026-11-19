@@ -32,7 +32,9 @@ pub(crate) enum RungChange {
 /// the probe at startup, and the monitor of each beacon.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RungDecision {
-    /// The monitor that picked the rung. `None` for the probe at startup, which no beacon owns.
+    /// The monitor that picked the rung. `None` for the probe at startup, which no beacon owns: its
+    /// decision is applied whichever beacon is held. The window is short, one probe at the start
+    /// of the process.
     pub(crate) from: Option<Generation>,
     /// The rung to home on. `None` when no rung answers.
     pub(crate) rung: Option<RelayUrl>,
