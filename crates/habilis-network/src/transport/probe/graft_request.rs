@@ -40,7 +40,7 @@ pub(crate) struct GraftTarget {
 pub(crate) fn graft_request(
     state: &mut EventLoopState,
     target: GraftTarget,
-    max_peers: usize,
+    max_connections: usize,
     now: Instant,
     paced: bool,
 ) -> GraftRequest {
@@ -51,7 +51,7 @@ pub(crate) fn graft_request(
     if peer == rendezvous_id {
         return GraftRequest::Join;
     }
-    state.note_link_count(state.linked_endpoints.len(), max_peers, now);
+    state.note_link_count(state.linked_endpoints.len(), max_connections, now);
     if paced && state.starved_join_due(now) {
         // A `Join` is not refused, so it ignores the backoff of the peer.
         GraftRequest::Join

@@ -28,6 +28,8 @@ pub mod runtime;
 // One embedded membership of a mesh, over `runtime`: what the C ABI, the
 // browser peer and the chat example share, so they resolve a mesh one way.
 pub mod membership;
+// A read-only snapshot of the connections of a node, for a tool that draws the topology.
+pub mod topology;
 
 pub(crate) mod beacon;
 // The blob-offload side-channel, re-exported through [`ops::blob`]. Its own

@@ -450,7 +450,7 @@ mod tests {
                 author: &self.author,
                 identity: &self.identity,
                 our_pubkey: self.our_pubkey,
-                max_peers: 16,
+                max_connections: 16,
                 rendezvous_id: testing::endpoint_id(9),
                 external_msg_tx: None,
                 sink: &self.sink,

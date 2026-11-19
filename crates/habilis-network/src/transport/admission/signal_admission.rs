@@ -15,8 +15,8 @@ use crate::util::tuning;
 
 use super::inner::RUNG_CLOSE_MEMORY;
 use super::{
-    AdmissionGuard, BusyGuard, ConnectionHook, Inner, Refusal, RefusalBackoff, Round, Sessions,
-    sampler,
+    AdmissionGuard, BusyGuard, ConnectionHook, Inner, LedgerView, Refusal, RefusalBackoff, Round,
+    Sessions, sampler,
 };
 use tokio::sync::mpsc;
 
@@ -91,6 +91,7 @@ impl SignalAdmission {
                 path_sink: None,
                 gossip: None,
                 closed_on_rung: HashMap::new(),
+                local: None,
             })),
             cap,
             // the flag is shared by the table and the gossip watch
@@ -260,6 +261,11 @@ impl SignalAdmission {
         if !outgoing && inner.we_evicted.holds(&peer, now) {
             return Err(Refusal::Evicted);
         }
+        // The remote side of a pinned pair is not pinned on its own side, and offers. A session
+        // would take a unit, or evict a peer, at the ceiling that pinned the pair.
+        if !outgoing && inner.ceiling.pinned(peer) {
+            return Err(Refusal::Pinned);
+        }
         if inner.ceiling.refuses()
             && !inner.ceiling.holds(peer)
             && inner.ceiling.units() + inner.rounds_in_flight() >= self.cap
@@ -406,7 +412,7 @@ impl SignalAdmission {
         let mut inner = self.lock();
         inner.refused.forget(&peer);
         let evictions = inner.ceiling.register_session(peer, Instant::now());
-        let victims = inner.take_victims(&evictions);
+        let victims = inner.take_victims(&evictions, "a session");
         drop(inner);
         victims.end();
     }
@@ -428,6 +434,7 @@ impl SignalAdmission {
     pub(crate) fn close(&self) {
         let mut inner = self.lock();
         inner.closed = true;
+        inner.release_pins();
         for slot in inner.slots.values() {
             if let Some(Round::Running(abort)) = &slot.round {
                 abort.abort();
@@ -482,12 +489,14 @@ impl SignalAdmission {
         }
         inner.slot(peer).conns.push(handle);
         inner.sync_gossip();
-        let evictions = if connection.alpn() == transport::UNICAST_ALPN {
+        let evictions: ceiling::Admission = if connection.alpn() != transport::UNICAST_ALPN {
+            ceiling::Admission::default()
+        } else if connection.side().is_client() {
             inner.ceiling.register_quic(peer, Instant::now())
         } else {
-            ceiling::Admission::default()
+            inner.ceiling.register_inbound(peer, Instant::now())
         };
-        let victims = inner.take_victims(&evictions);
+        let victims = inner.take_victims(&evictions, "a connection");
         if !inner.sampler_running {
             inner.sampler_running = true;
             sampler::spawn_sampler(Arc::downgrade(&self.inner), tuning::SLOT_SWEEP);
@@ -497,6 +506,63 @@ impl SignalAdmission {
             self.watch_for_eviction(connection.clone());
         }
         victims.end();
+    }
+
+    /// Whether `peer` is pinned to multihop: a dial planned it, or its pinned connection is open.
+    pub(crate) fn is_pinned(&self, peer: EndpointId) -> bool {
+        self.lock().ceiling.pinned(peer)
+    }
+
+    /// Whether `peer` holds an extra: a connection or a session that took no unit (see
+    /// [`ceiling::Ceiling::is_extra`]).
+    pub(crate) fn is_extra(&self, peer: EndpointId) -> bool {
+        self.lock().ceiling.is_extra(peer)
+    }
+
+    /// The pinned peers that hold their connection now.
+    pub(crate) fn pinned_peers(&self) -> Vec<EndpointId> {
+        self.lock().ceiling.pinned_connected()
+    }
+
+    /// `peer` is the rendezvous of the mesh: a member at its ceiling may still return to it and hold
+    /// it. The link takes no unit, no admission evicts it, and a visit is never refused for the
+    /// ceiling (see [`ceiling::Ceiling::set_rendezvous`]).
+    pub(crate) fn set_rendezvous(&self, peer: EndpointId) {
+        self.lock().ceiling.set_rendezvous(peer);
+    }
+
+    /// The endpoint that this table serves. The pin of a peer reaches its path selector.
+    pub(crate) fn set_local(&self, local: EndpointId) {
+        self.lock().local = Some(local);
+    }
+
+    /// How a new dial to `peer` goes, decided under the lock of the table so that parallel dials
+    /// cannot all take the last unit. `route` says whether multihop reaches the peer. A pinned peer
+    /// reaches the path selector of the endpoint before the dial starts.
+    pub(crate) fn plan_dial(&self, peer: EndpointId, route: bool) -> ceiling::DialPlan {
+        let mut inner = self.lock();
+        let plan = inner.ceiling.plan_dial(peer, route);
+        inner.sync_pin(peer);
+        plan
+    }
+
+    /// Whether a dial that no send asked for may take a unit for `peer` now (see
+    /// [`ceiling::Ceiling::has_room`]). It reserves nothing.
+    pub(crate) fn has_room(&self, peer: EndpointId) -> bool {
+        self.lock().ceiling.has_room(peer)
+    }
+
+    /// Reserve a unit for a dial that no send asked for, or refuse it when the ceiling is full (see
+    /// [`ceiling::Ceiling::reserve_proactive`]).
+    pub(crate) fn reserve_proactive(&self, peer: EndpointId) -> bool {
+        self.lock().ceiling.reserve_proactive(peer)
+    }
+
+    /// The dial of `peer` that [`Self::plan_dial`] planned ended without a connection.
+    pub(crate) fn release_dial(&self, peer: EndpointId) {
+        let mut inner = self.lock();
+        inner.ceiling.release_dial(peer);
+        inner.sync_pin(peer);
     }
 
     /// When `conn` closes, whatever the reason, the peer leaves the ledger unless it holds another
@@ -580,7 +646,10 @@ impl SignalAdmission {
     pub(crate) fn set_neighbors(&self, neighbors: &HashSet<EndpointId>) {
         let mut inner = self.lock();
         let evictions = inner.ceiling.set_neighbors(neighbors, Instant::now());
-        let victims = inner.take_victims(&evictions);
+        for peer in neighbors {
+            inner.sync_pin(*peer);
+        }
+        let victims = inner.take_victims(&evictions, "a gossip neighbor");
         drop(inner);
         victims.end();
     }
@@ -626,6 +695,36 @@ impl SignalAdmission {
                 direct: true,
                 answered: true,
             });
+        }
+    }
+
+    /// The ledger of direct connections, read at one instant.
+    pub(crate) fn ledger(&self) -> LedgerView {
+        let inner = self.lock();
+        let ceiling = &inner.ceiling;
+        let units: usize = ceiling.units();
+        let over_ceiling: usize = ceiling.over_ceiling();
+        let connections: usize = ceiling.connections();
+        let total_cap: usize = ceiling.total_cap();
+        let quic_peers: Vec<EndpointId> = ceiling.quic_peers();
+        let session_peers: Vec<EndpointId> = ceiling.session_peers();
+        let pinned: Vec<EndpointId> = ceiling.pinned_connected();
+        let held: Vec<EndpointId> = quic_peers.iter().chain(&session_peers).copied().collect();
+        let extras: Vec<EndpointId> = held
+            .into_iter()
+            .filter(|peer| ceiling.is_extra(*peer))
+            .collect();
+        LedgerView {
+            local: inner.local,
+            cap: self.cap,
+            units,
+            over_ceiling,
+            connections,
+            total_cap,
+            quic_peers,
+            session_peers,
+            pinned,
+            extras,
         }
     }
 

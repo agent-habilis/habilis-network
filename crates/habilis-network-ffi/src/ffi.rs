@@ -285,9 +285,7 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             .lookup(lookup)
             .transport(transport)
             .relay_urls(relay_urls);
-        let parsed: JoinOptions = limited
-            .max_peers(options.max_peers)
-            .max_direct(options.max_direct);
+        let parsed: JoinOptions = limited.max_connections(options.max_connections);
         match Mesh::open(&parsed) {
             Ok(opened) => {
                 // The nickname the engine settled on — not `nick` above, which is

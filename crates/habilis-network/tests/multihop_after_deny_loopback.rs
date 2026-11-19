@@ -243,6 +243,7 @@ fn a_pair_that_denied_each_other_still_gets_a_message_through_a_third_member() {
         // it does not. It is part of the scenario. The test does not wait for it: waiting made the
         // test twice as long and let timers fire that no other run reaches.
         habilis_network_test_tracing::allow_warn(STUCK_TARGET, STUCK_TEXT);
+        habilis_network_test_tracing::allow_relay_cell_refusal();
 
         // The rung is read on bob's pooled connection to carol. A probe goes out each second,
         // because it is traffic that makes the engine try a better path.

@@ -62,7 +62,7 @@ impl Member {
         }
     }
 
-    async fn create(nick: &str, relay: &RelayUrl, max_peers: usize) -> Self {
+    async fn create(nick: &str, relay: &RelayUrl, max_connections: usize) -> Self {
         let options = membership::JoinOptions::default()
             .nick(Some(nick.to_owned()))
             .lookup(vec![Lookup::Relay]);
@@ -75,16 +75,16 @@ impl Member {
                 Transport::Relay,
             ])
             .relay_urls(relay_urls)
-            .max_peers(max_peers);
+            .max_connections(max_connections);
         Self::open(&options).await
     }
 
-    async fn join(nick: &str, creator: &Self, max_peers: usize) -> Self {
+    async fn join(nick: &str, creator: &Self, max_connections: usize) -> Self {
         let mesh = creator.membership.node.mesh_id().to_string();
         let options = membership::JoinOptions::default()
             .nick(Some(nick.to_owned()))
             .mesh(Some(mesh));
-        let options = options.max_peers(max_peers);
+        let options = options.max_connections(max_connections);
         Self::open(&options).await
     }
 
@@ -122,18 +122,18 @@ impl Member {
     }
 }
 
-/// `count` members on a local relay, each with the active view cap `max_peers`.
-async fn mesh(count: usize, max_peers: usize) -> (Vec<Member>, task::JoinHandle<()>) {
+/// `count` members on a local relay, each with the active view cap `max_connections`.
+async fn mesh(count: usize, max_connections: usize) -> (Vec<Member>, task::JoinHandle<()>) {
     let (relay, server) = test_relay::spawn_plain().await.expect("local relay");
     let keep = tokio::spawn(async move {
         let _server = server;
         let forever: future::Pending<()> = future::pending();
         forever.await;
     });
-    let first = Member::create("m0", &relay, max_peers).await;
+    let first = Member::create("m0", &relay, max_connections).await;
     let mut members = Vec::with_capacity(count);
     for index in 1..count {
-        members.push(Member::join(&format!("m{index}"), &first, max_peers).await);
+        members.push(Member::join(&format!("m{index}"), &first, max_connections).await);
     }
     members.insert(0, first);
     (members, keep)

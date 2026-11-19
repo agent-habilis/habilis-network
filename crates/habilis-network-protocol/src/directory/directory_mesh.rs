@@ -80,10 +80,11 @@ pub fn directory_config(lookups: LookupOpts) -> MeshConfig {
         lookups,
         password: None,
         issuer_pubkey: None,
-        // Lookup only, whatever the advertised mesh chose: the directory is
-        // a separate rendezvous mesh that carries advertisements, not data.
-        transport: TransportPolicy::default(),
-        // The directory rendezvous always uses gossip — it is how advertisers
-        // and discoverers meet.
+        // Whatever the advertised mesh chose: the directory is a separate rendezvous mesh that
+        // carries advertisements, not data. It always uses gossip, which is how advertisers and
+        // discoverers meet, and never the relay for payload, which its lookups may not have.
+        transport: TransportPolicy::default()
+            .relay_transport(false)
+            .gossip(true),
     }
 }

@@ -43,7 +43,7 @@ async fn spawn_bot(topic: &str, nick: &str) -> Bot {
 
     let config = setup_mesh(
         kind,
-        SetupParams::new(author.clone(), SilentSink::default()).max_peers(16),
+        SetupParams::new(author.clone(), SilentSink::default()).max_connections(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");

@@ -33,16 +33,16 @@ pub(crate) async fn regraft_due(state: &mut EventLoopState, context: &HandlerCtx
 /// come before every browser, each group ordered by id, and `pick` indexes the
 /// first group and wraps. A fixed pick would send every member below G to the
 /// same few peers, and a full peer evicts a random neighbor on each join, so the
-/// caller passes a random one. `None` once the active view holds `max_peers` (G)
+/// caller passes a random one. `None` once the active view holds `max_connections` (G)
 /// links, or when nobody is free.
 pub(crate) fn next_fill(
     state: &EventLoopState,
-    max_peers: usize,
+    max_connections: usize,
     rendezvous_id: EndpointId,
     now: Instant,
     pick: usize,
 ) -> Option<iroh::EndpointAddr> {
-    if state.linked_endpoints.len() >= max_peers {
+    if state.linked_endpoints.len() >= max_connections {
         return None;
     }
     let peer_addresses = state.member_addresses();
@@ -75,8 +75,13 @@ pub(crate) fn next_fill(
 pub(crate) async fn fill_active_view(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let now = Instant::now();
     let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
-    let Some(address) = next_fill(state, context.max_peers, context.rendezvous_id, now, pick)
-    else {
+    let Some(address) = next_fill(
+        state,
+        context.max_connections,
+        context.rendezvous_id,
+        now,
+        pick,
+    ) else {
         return;
     };
     graft_one(state, context, address, now).await;
@@ -86,7 +91,7 @@ pub(crate) async fn fill_active_view(state: &mut EventLoopState, context: &Handl
 /// that the fill tick would pick, and none while the node holds a link or the window is closed.
 pub(crate) fn isolated_candidate(
     state: &EventLoopState,
-    max_peers: usize,
+    max_connections: usize,
     rendezvous_id: EndpointId,
     now: Instant,
     pick: usize,
@@ -94,7 +99,7 @@ pub(crate) fn isolated_candidate(
     if !state.isolated_refill_due(now) {
         return None;
     }
-    next_fill(state, max_peers, rendezvous_id, now, pick)
+    next_fill(state, max_connections, rendezvous_id, now, pick)
 }
 
 /// A node that lost every link asks one other known peer per reclaim tick (400 ms) while the
@@ -104,9 +109,13 @@ pub(crate) fn isolated_candidate(
 pub(crate) async fn refill_isolated(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let now = Instant::now();
     let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
-    let Some(address) =
-        isolated_candidate(state, context.max_peers, context.rendezvous_id, now, pick)
-    else {
+    let Some(address) = isolated_candidate(
+        state,
+        context.max_connections,
+        context.rendezvous_id,
+        now,
+        pick,
+    ) else {
         return;
     };
     tracing::info!(target: transport::LOG_TARGET, peer = %address.id, "no link left: asking another known peer");
@@ -133,13 +142,13 @@ pub(crate) async fn graft_one(
 pub(crate) fn retry_candidates(
     state: &EventLoopState,
     rendezvous_id: EndpointId,
-    max_peers: usize,
+    max_connections: usize,
     distrust_links: bool,
 ) -> Vec<iroh::EndpointAddr> {
     retry_candidates_at(
         state,
         rendezvous_id,
-        max_peers,
+        max_connections,
         distrust_links,
         Instant::now(),
     )
@@ -149,12 +158,12 @@ pub(crate) fn retry_candidates(
 pub(crate) fn retry_candidates_at(
     state: &EventLoopState,
     rendezvous_id: EndpointId,
-    max_peers: usize,
+    max_connections: usize,
     distrust_links: bool,
     now: Instant,
 ) -> Vec<iroh::EndpointAddr> {
     // A graft is the reason for a session, and none runs at G.
-    if !distrust_links && state.linked_endpoints.len() >= max_peers {
+    if !distrust_links && state.linked_endpoints.len() >= max_connections {
         return Vec::new();
     }
     let peer_addresses = state.member_addresses();

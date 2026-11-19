@@ -168,7 +168,7 @@ async fn run_peer(kind: SetupKind, author: protocol::Nickname) -> anyhow::Result
     let config = setup_mesh(
         kind,
         SetupParams::new(author.clone(), SilentSink::default())
-            .max_peers(16)
+            .max_connections(16)
             .live_count(live_count),
     )
     .await?;

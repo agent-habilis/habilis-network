@@ -10,8 +10,7 @@ const BASE: WireOpts = {
   lookup: null,
   transport: null,
   relayUrls: null,
-  maxPeers: 0,
-  maxDirect: 0,
+  maxConnections: 0,
 }
 
 /** Hands out a distinct fake address per buffer and remembers which was which. */
@@ -31,8 +30,8 @@ describe('encodeOpts', () => {
   // is the layout assert on `HabilisNetworkOpts` in crates/habilis-network-ffi/src/ffi.rs; a
   // linked C consumer keeps passing the old struct when it moves, so both
   // sides must be edited together.
-  test('the struct is the 72 bytes the C header lays out', () => {
-    expect(OPTS_BYTES).toBe(72)
+  test('the struct is the 64 bytes the C header lays out', () => {
+    expect(OPTS_BYTES).toBe(64)
   })
 
   test('null selectors and empty lists encode as NULL pointers', () => {
@@ -62,20 +61,11 @@ describe('encodeOpts', () => {
     expect(Array.from(topic ?? [])).toEqual([...new TextEncoder().encode('tea-time'), 0])
   })
 
-  test('max_peers follows the last list', () => {
-    const { struct } = encodeOpts({ ...BASE, maxPeers: 12 }, fakePointers().pointerOf)
+  test('max_connections follows the last list', () => {
+    const { struct } = encodeOpts({ ...BASE, maxConnections: 12 }, fakePointers().pointerOf)
     const view = new DataView(struct.buffer)
+    expect(struct.byteLength).toBe(64)
     expect(view.getBigUint64(56, true)).toBe(12n)
-  })
-
-  test('max_direct follows max_peers', () => {
-    const { struct } = encodeOpts(
-      { ...BASE, maxPeers: 12, maxDirect: 7 },
-      fakePointers().pointerOf,
-    )
-    const view = new DataView(struct.buffer)
-    expect(view.getBigUint64(56, true)).toBe(12n)
-    expect(view.getBigUint64(64, true)).toBe(7n)
   })
 
   test('the three lists land at their offsets as comma strings', () => {

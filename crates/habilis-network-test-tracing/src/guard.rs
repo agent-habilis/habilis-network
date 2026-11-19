@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::filter::{EnvFilter, LevelFilter, Targets};
+use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{Context, SubscriberExt as _};
 use tracing_subscriber::{Layer, fmt as tracing_fmt};
@@ -44,9 +44,14 @@ thread_local! {
 /// The end of the name of a thread that a runtime of this crate starts for a test.
 const WORKER: &str = "/worker";
 
-/// The target of the DNS resolver that reads `/etc/hosts`. Its WARN is about a line of the file on the machine, such
-/// as a host name with no address on a CI runner, and not about the code under test.
-const HOSTS_FILE: &str = "hickory_resolver::hosts";
+/// The WARN messages that report the state of the host and not of the code under test: the target,
+/// and the text that the message holds. The resolver of iroh warns about a line of the hosts file
+/// that it cannot parse, such as the line of a CI runner, and no test can fix that line. The layer
+/// drops these events: every other WARN and every ERROR still fails a test.
+const HOST_MESSAGES: [(&str, &str); 1] = [(
+    "hickory_resolver::hosts",
+    "could not parse an IP from hosts file",
+)];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -177,6 +182,31 @@ pub fn allow_warn(target: &str, text: &str) {
         seen: false,
         optional: true,
     });
+}
+
+/// The target of the multihop forwarder, the module that logs its refusals.
+const FORWARDER_TARGET: &str = "habilis_network_iroh_multihop_transport::underlay";
+
+/// Allow the WARN of the multihop forwarder for a cell that came over the relay, as
+/// [`allow_warn`] does: it may come, or not. Call it in a test of a mesh whose transport list has
+/// no `relay`: the policy then refuses payload on the relay, as it must, and the first cells of a hop
+/// can reach the forwarder before the connection has its direct path, or a cut pair still has its
+/// relay path. A mesh whose list has the `relay` accepts such cells and never says this. Only the
+/// refusal for that reason is allowed: a refusal for another reason, and any other WARN, still
+/// fail the test.
+///
+/// # Panics
+///
+/// Panics if the calling thread is not the thread of a live guard.
+///
+/// # Examples
+///
+/// ```no_run
+/// let _guard = habilis_network_test_tracing::init();
+/// habilis_network_test_tracing::allow_relay_cell_refusal();
+/// ```
+pub fn allow_relay_cell_refusal() {
+    allow_warn(FORWARDER_TARGET, "reason=\"cell arrived over the relay\"");
 }
 
 /// Whether the test of the calling thread has logged a WARN from `target` (a
@@ -316,12 +346,9 @@ where
             .with_ansi(mode == Mode::Stderr)
             .with_writer(writer)
             .with_filter(filter);
-        let caught: Targets = Targets::new()
-            .with_default(LevelFilter::WARN)
-            .with_target(HOSTS_FILE, LevelFilter::ERROR);
         let layers = tracing_subscriber::registry()
             .with(print)
-            .with(Catch.with_filter(caught));
+            .with(Catch.with_filter(LevelFilter::WARN));
         layers
             .try_init()
             .expect("another global tracing subscriber is installed");
@@ -586,6 +613,12 @@ impl<S: Subscriber> Layer<S> for Catch {
         let metadata = event.metadata();
         let level = *metadata.level();
         let target = metadata.target().to_owned();
+        let of_the_host = HOST_MESSAGES
+            .iter()
+            .any(|(from, text)| target_is_within(&target, from) && fields.text.contains(text));
+        if level == Level::WARN && of_the_host {
+            return;
+        }
         let logged = || Logged {
             level,
             target: target.clone(),

@@ -723,9 +723,10 @@ mod tests {
         params: &beacon::RendezvousParams,
         endpoint: iroh::Endpoint,
     ) -> (Option<beacon::Rendezvous>, impl Sized) {
-        use crate::transport::{MAX_DIRECT_PEERS, SignalAdmission};
+        use crate::transport::SignalAdmission;
+        use crate::util::tuning::MAX_CONNECTIONS;
         let handle = lookup::build_webrtc_handle(params.id);
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let admission = SignalAdmission::new(MAX_CONNECTIONS);
         let tab = iroh::SecretKey::generate().public();
         let round = admission.try_admit(tab, &handle).expect("a free slot");
         let rendezvous = beacon::Rendezvous::for_test(endpoint, Some((handle, admission)));
@@ -1028,7 +1029,7 @@ mod tests {
                 author: &author,
                 identity: &identity,
                 our_pubkey,
-                max_peers: 16,
+                max_connections: 16,
                 rendezvous_id: params.id,
                 external_msg_tx: None,
                 sink: &sink,
@@ -1135,7 +1136,7 @@ mod tests {
             author: &author,
             identity: &identity,
             our_pubkey,
-            max_peers: 16,
+            max_connections: 16,
             rendezvous_id: params.id,
             external_msg_tx: None,
             sink: &sink,
@@ -1327,7 +1328,7 @@ mod tests {
                 author: &author,
                 identity: &identity,
                 our_pubkey,
-                max_peers: 16,
+                max_connections: 16,
                 rendezvous_id: params.id,
                 external_msg_tx: None,
                 sink: &sink,
@@ -1522,7 +1523,7 @@ mod tests {
                 author: &author,
                 identity: &identity,
                 our_pubkey,
-                max_peers: 16,
+                max_connections: 16,
                 rendezvous_id: self.params.id,
                 external_msg_tx: None,
                 sink: &sink,
@@ -1948,7 +1949,7 @@ mod tests {
                 author: &author,
                 identity: &identity,
                 our_pubkey,
-                max_peers: 16,
+                max_connections: 16,
                 rendezvous_id: params.id,
                 external_msg_tx: None,
                 sink: &sink,
@@ -2054,7 +2055,7 @@ mod tests {
                 author: &author,
                 identity: &identity,
                 our_pubkey,
-                max_peers: 16,
+                max_connections: 16,
                 rendezvous_id: params.id,
                 external_msg_tx: None,
                 sink: &sink,

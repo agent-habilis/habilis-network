@@ -6,7 +6,7 @@ use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network::iroh::protocol::Router;
 use habilis_network::net::direct::{
-    IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN, NudgeAcceptor,
+    IceProfile, MAX_CONNECTIONS, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN, NudgeAcceptor,
     PROBE_DEADLINE, PayloadPath, SignalAdmission, UdpTransport, WebRtcHandle, WebRtcSignalAcceptor,
     build_peer_webrtc, dial_signal, pair_needs_lane, wait_direct,
 };
@@ -133,7 +133,7 @@ impl StreamNode {
                 endpoint.clone(),
                 producers.clone(),
                 endpoint_id,
-                SignalAdmission::new(MAX_DIRECT_PEERS),
+                SignalAdmission::new(MAX_CONNECTIONS),
                 ice,
             );
             router = router.accept(MESH_WEBRTC_SIGNAL_ALPN, acceptor);

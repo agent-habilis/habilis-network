@@ -1931,7 +1931,7 @@ fn a_rendezvous_does_not_dial_its_own_peer() {
         let peer = loopback_endpoint().await;
         let (gossip, router, _book) = lookup::build_mesh(
             peer.clone(),
-            tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+            tuning::MAX_CONNECTIONS,
             None,
             None,
             habilis_network_iroh_transport_util::ProtocolSet::default(),
@@ -1992,7 +1992,7 @@ fn a_holder_reaches_its_own_public_rendezvous_without_lookups() {
         let peer = loopback_endpoint().await;
         let (gossip, router, _book) = lookup::build_mesh(
             peer.clone(),
-            tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+            tuning::MAX_CONNECTIONS,
             None,
             None,
             habilis_network_iroh_transport_util::ProtocolSet::default(),
@@ -2054,7 +2054,7 @@ fn a_member_that_links_to_the_beacon_is_reported_to_its_holder() {
         let peer = loopback_endpoint().await;
         let (gossip, router, _book) = lookup::build_mesh(
             peer.clone(),
-            tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+            tuning::MAX_CONNECTIONS,
             None,
             None,
             habilis_network_iroh_transport_util::ProtocolSet::default(),

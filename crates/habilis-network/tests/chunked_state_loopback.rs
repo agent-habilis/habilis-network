@@ -97,7 +97,7 @@ async fn spawn(topic: &str, name: &str) -> Node<Member> {
         Nickname::try_new(name).expect("a nickname"),
         SilentSink::default(),
     )
-    .max_peers(16);
+    .max_connections(16);
     let loop_config = setup_mesh(kind, params).await.expect("a joined mesh");
     Node::spawn(loop_config, Member, None, SignalHandling::Leave)
 }

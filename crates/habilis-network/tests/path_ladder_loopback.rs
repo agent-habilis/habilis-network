@@ -399,6 +399,8 @@ async fn cut_webrtc_between(first: &Member, second: &Member) {
 #[test]
 fn the_multihop_rung_forwards_through_a_third_member() {
     let guard = habilis_network_test_tracing::init();
+    // The list has no relay: a cell that reaches a hop over the relay is refused, and said once.
+    habilis_network_test_tracing::allow_relay_cell_refusal();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];

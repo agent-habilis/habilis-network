@@ -11,7 +11,7 @@ use crate::protocol::AuthorKey;
 use crate::protocol::messages::{Verified, WireFrame, sole_addressee};
 use crate::transport::outbox::Resend;
 use crate::transport::pool::{COOLDOWN_REFUSED, UnicastPool, WarmSend};
-use crate::transport::probe::PathKind;
+use crate::transport::probe::{self, PathKind};
 use crate::transport::{MeshSender, webrtc};
 
 use crate::util::clock;
@@ -65,9 +65,11 @@ pub async fn deliver(
                 .map_err(SendError::internal)?;
             Ok(Delivered::Done)
         }
-        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, &state.unicast_pool)
-            .await
-            .map_err(SendError::internal),
+        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, &state.unicast_pool, || {
+            probe::route_to(state, eid)
+        })
+        .await
+        .map_err(SendError::internal),
     }
 }
 
@@ -146,9 +148,11 @@ pub async fn deliver_to(
     state: &EventLoopState,
 ) -> Result<Delivered, SendError> {
     let (eid, bytes) = resolve_to(to, message, state)?;
-    send_unicast(eid, bytes, &state.unicast_pool)
-        .await
-        .map_err(SendError::internal)
+    send_unicast(eid, bytes, &state.unicast_pool, || {
+        probe::route_to(state, eid)
+    })
+    .await
+    .map_err(SendError::internal)
 }
 
 /// The decision of [`deliver_to`], without the send: the endpoint that carries the frame, and the
@@ -358,10 +362,15 @@ fn directly_meshed(key: &AuthorKey, state: &EventLoopState) -> bool {
 /// the sends that follow. The error of the dial or of the wait is the send's outcome, through the
 /// handle — there is no fallback. A cold peer on the dial-failure cooldown is refused at once. A
 /// warm connection needs no dial, so the cooldown does not apply to it.
+///
+/// `route` gives the multihop route to the peer, and the send reads it only when it dials: at the
+/// ceiling of direct connections, a dial that has a route rides multihop and evicts nobody (see
+/// [`UnicastPool::plan_dial`]).
 pub(super) async fn send_unicast(
     eid: EndpointId,
     bytes: WireFrame,
     pool: &UnicastPool,
+    route: impl FnOnce() -> Option<iroh::TransportAddr>,
 ) -> Result<Delivered> {
     let warm = pool.send_if_warm(eid, bytes.clone().into_bytes()).await;
     match warm {
@@ -373,7 +382,7 @@ pub(super) async fn send_unicast(
             }
             // The guard of the dial of this peer is taken here, before the spawn: a second send
             // finds this dial in flight even when it ends at once.
-            let registration = pool.register_dial(eid);
+            let registration = pool.register_planned_dial(eid, route);
             let (outcome_tx, outcome) = oneshot::channel();
             let pool = pool.clone();
             task::spawn(async move {
@@ -436,7 +445,9 @@ async fn send_courtesy(
         WarmSend::Cold if dial_back || state.linked_endpoints.contains(&eid) => {
             state
                 .unicast_pool
-                .dial_and_send_in_background(eid, bytes.into_bytes())
+                .dial_and_send_in_background(eid, bytes.into_bytes(), || {
+                    probe::route_to(state, eid)
+                })
                 .await
         }
         WarmSend::Cold | WarmSend::Refused => false,

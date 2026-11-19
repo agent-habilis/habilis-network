@@ -43,10 +43,8 @@ export interface JoinOpts {
    * derived id like `transport`. Ignored when joining by id.
    */
   relayUrls?: string[]
-  /** Active-view cap (G). Omit for the engine default, 32. */
-  maxPeers?: number
-  /** Ceiling of direct connections (C). Omit for the engine default, 64. */
-  maxDirect?: number
+  /** Cap on the direct connections of the node, and the gossip active view. Omit for the engine default, 16. */
+  maxConnections?: number
 }
 
 export interface CreateOpts {
@@ -72,10 +70,8 @@ export interface CreateOpts {
    * Needs `'relay'` in `lookup`, and is part of the mesh id.
    */
   relayUrls?: string[]
-  /** Active-view cap (G). Omit for the engine default, 32. */
-  maxPeers?: number
-  /** Ceiling of direct connections (C). Omit for the engine default, 64. */
-  maxDirect?: number
+  /** Cap on the direct connections of the node, and the gossip active view. Omit for the engine default, 16. */
+  maxConnections?: number
 }
 
 /**

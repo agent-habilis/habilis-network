@@ -61,3 +61,43 @@ pub(crate) fn plan_relay_dials(
     }
     dials
 }
+
+/// Pure: the pinned peers that the topology has no route to now. A pinned connection exists only
+/// for its route, so the connection of such a peer closes and the next send follows the normal
+/// rule: a free unit dials direct, a full ceiling with a route pins, and a full ceiling with none
+/// evicts. `pinned` holds each pinned peer with whether a route to it exists.
+pub(crate) fn lost_pinned(pinned: impl IntoIterator<Item = (EndpointId, bool)>) -> Vec<EndpointId> {
+    let mut lost: Vec<EndpointId> = pinned
+        .into_iter()
+        .filter(|(_, has_route)| !has_route)
+        .map(|(peer, _)| peer)
+        .collect();
+    lost.sort_unstable();
+    lost
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::testing;
+
+    #[test]
+    fn a_pinned_peer_with_no_route_is_lost_and_one_with_a_route_is_kept() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (kept, lost, also_lost) = (
+            testing::endpoint_id(1),
+            testing::endpoint_id(2),
+            testing::endpoint_id(3),
+        );
+        let mut expected = vec![lost, also_lost];
+        expected.sort_unstable();
+        assert_eq!(
+            super::lost_pinned([(kept, true), (lost, false), (also_lost, false)]),
+            expected,
+            "only the pinned peers with no route are lost"
+        );
+        assert!(
+            super::lost_pinned([(kept, true)]).is_empty(),
+            "a pinned peer with a route is kept"
+        );
+    }
+}

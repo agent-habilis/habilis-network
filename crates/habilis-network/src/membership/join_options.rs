@@ -12,7 +12,6 @@ use crate::runtime::{
     CreateParams, JoinParams, Node, Resolved, SetupKind, SetupParams, SignalHandling,
     derive_topic_mesh_config, setup_mesh,
 };
-use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
 use anyhow::Result;
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -68,9 +67,10 @@ pub struct JoinOptions {
     pub lookup: Vec<Lookup>,
     /// What may carry payload: any of `udp`, `webrtc`, `multihop`, `gossip`, `relay`, with
     /// `udp` or `webrtc` among them, and `udp` with `multihop`. Empty ⇒
-    /// `udp,webrtc,multihop,gossip`, so all data is peer to peer (through other members
-    /// when no direct path exists, and through the mesh topic when no member routes) and the
-    /// relay serves lookup only. A list names what it carries: without `gossip` there is none.
+    /// `udp,webrtc,multihop,relay`: data goes peer to peer, through other members when no
+    /// direct path exists, and over the relay as the last path. Without a relay lookup the
+    /// default has no `relay`. A list names what it carries: without `relay` the relay serves
+    /// lookup only, and without `gossip` there is none.
     /// `relay`, or
     /// a list without `udp`,
     /// needs `relay` in `lookup`. Part of the mesh id, so a joiner inherits
@@ -82,10 +82,9 @@ pub struct JoinOptions {
     /// different meshes. Empty ⇒ the default ladder. Ignored when joining
     /// by id.
     pub relay_urls: Vec<String>,
-    /// Active-view cap (G); `0` takes the engine default.
-    pub max_peers: usize,
-    /// Ceiling of direct connections (C); `0` takes the engine default.
-    pub max_direct: usize,
+    /// Cap on the direct connections of the node, and the size of the gossip active view; `0`
+    /// takes the engine default.
+    pub max_connections: usize,
 }
 
 impl JoinOptions {
@@ -138,17 +137,10 @@ impl JoinOptions {
         self
     }
 
-    /// Set the peer cap.
+    /// Set the cap on the direct connections of the node.
     #[must_use]
-    pub fn max_peers(mut self, max_peers: usize) -> Self {
-        self.max_peers = max_peers;
-        self
-    }
-
-    /// Set the direct-session cap.
-    #[must_use]
-    pub fn max_direct(mut self, max_direct: usize) -> Self {
-        self.max_direct = max_direct;
+    pub fn max_connections(mut self, max_connections: usize) -> Self {
+        self.max_connections = max_connections;
         self
     }
 }
@@ -251,11 +243,6 @@ pub async fn join<S: NodeSink + 'static>(
         .transpose()
         .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
     let (kind, author) = resolve_kind(options, nickname)?;
-    let max_peers = if options.max_peers == 0 {
-        GOSSIP_ACTIVE_VIEW_CAPACITY
-    } else {
-        options.max_peers
-    };
 
     // A browser has no UDP socket, so the loopback ladder a selector-less create
     // resolves to is a mesh of exactly one, forever — and it fails *silently*:
@@ -279,9 +266,7 @@ pub async fn join<S: NodeSink + 'static>(
     let (inbound_tx, inbound) = mpsc::channel(INBOUND_CAP);
     let config = setup_mesh(
         kind,
-        SetupParams::new(author, sink)
-            .max_peers(max_peers)
-            .max_direct(options.max_direct),
+        SetupParams::new(author, sink).max_connections(options.max_connections),
     )
     .await?;
 
@@ -571,18 +556,27 @@ mod tests {
     }
 
     /// The relay's two roles are two lists: `relay` in `lookup` finds peers
-    /// through it, `relay` in `transport` lets payload ride it. The second is
-    /// off unless named, and meaningless without the first.
+    /// through it, `relay` in `transport` lets payload ride it. With no `transport` list the
+    /// second is on whenever the first is, and meaningless without it.
     #[test]
-    fn relay_transport_is_off_unless_named_and_needs_the_relay_lookup() {
+    fn relay_transport_is_on_by_default_with_the_relay_lookup_and_needs_it() {
         let _guard = ::habilis_network_test_tracing::init();
-        let lookup_only = create_config(&JoinOptions {
+        let by_default = create_config(&JoinOptions {
             lookup: all_lookups(),
             ..options()
         });
         assert!(
+            by_default.transport.allows(Transport::Relay),
+            "the relay transport is on by default with the relay lookup"
+        );
+        let lookup_only = create_config(&JoinOptions {
+            lookup: all_lookups(),
+            transport: vec![Transport::Udp],
+            ..options()
+        });
+        assert!(
             !lookup_only.transport.allows(Transport::Relay),
-            "the relay transport stays off when only the relay lookup is named"
+            "the relay transport stays off when the list does not name it"
         );
 
         let relayed = create_config(&JoinOptions {
@@ -776,6 +770,7 @@ mod tests {
         let (plain, _) = resolve_kind(
             &JoinOptions {
                 topic: Some("standup".to_owned()),
+                transport: vec![Transport::Udp],
                 ..options()
             },
             None,

@@ -127,8 +127,7 @@ async fn spawn(mesh: &Mesh, name: &str, cohost: CoHostPolicy) -> (Node<Inert>, A
     // each member's sink is shared with the node that writes to it, and the test reads it
     let sink = Arc::new(Joined::default());
     let params = SetupParams::new(nick(name), Arc::clone(&sink))
-        .max_peers(16)
-        .max_direct(0)
+        .max_connections(16)
         .cohost(cohost);
     let config = setup_mesh(
         SetupKind::Join {

@@ -46,12 +46,12 @@ pub enum Transport {
     /// Reach a peer with no other path through the frames of the mesh's own gossip topic. It
     /// rides the links that other paths carry, so the list names `udp` or `webrtc` next to it.
     Gossip,
-    /// Let payload also fall back to the relay when no direct path exists. Off by default: the
-    /// relay is kept for lookup alone — the bootstrap dial, JSEP signalling and the NAT-traversal
-    /// frames of a freshly opened connection still cross it — and every payload lane refuses to
-    /// send while the relay is the only path to a peer. A pair with no direct path stays unlinked
-    /// for payload rather than relayed. Meaningless without a relay lookup, so rejected together
-    /// with [`RelayChoice::Disabled`](crate::RelayChoice).
+    /// Let payload also fall back to the relay when no direct path exists. On by default.
+    /// Without it the relay is kept for lookup alone — the bootstrap dial, JSEP signalling and
+    /// the NAT-traversal frames of a freshly opened connection still cross it — and every
+    /// payload lane refuses to send while the relay is the only path to a peer. A pair with no
+    /// direct path then stays unlinked for payload rather than relayed. Meaningless without a
+    /// relay lookup, so rejected together with [`RelayChoice::Disabled`](crate::RelayChoice).
     Relay,
 }
 
@@ -131,15 +131,15 @@ pub struct TransportPolicy {
 }
 
 impl Default for TransportPolicy {
-    /// `udp,webrtc,multihop,gossip`: every direct path, multi-hop and gossip, the relay for
-    /// lookup alone.
+    /// `udp,webrtc,multihop,relay`: every direct path, multi-hop, and the relay as the last
+    /// path for payload. Gossip is off.
     fn default() -> Self {
         Self {
             transports: BTreeSet::from([
                 Transport::Udp,
                 Transport::WebRtc,
                 Transport::Multihop,
-                Transport::Gossip,
+                Transport::Relay,
             ]),
         }
     }
@@ -236,8 +236,8 @@ impl TryFrom<&[Transport]> for TransportPolicy {
     type Error = ConfigError;
 
     /// The policy a `transport` list names. Empty ⇒ the default,
-    /// `udp,webrtc,multihop,gossip`. A list names exactly what it carries: `udp,webrtc,multihop`
-    /// has no gossip.
+    /// `udp,webrtc,multihop,relay`. A list names exactly what it carries: `udp,webrtc,multihop`
+    /// has no relay.
     ///
     /// # Errors
     /// A [`ConfigError::Invalid`] when the list is non-empty and names neither `udp`

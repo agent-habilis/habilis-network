@@ -1,6 +1,6 @@
 //! The sessions of the multihop underlay do not churn when a node knows more members than its cap.
 //!
-//! Four members without `udp`, and `max_peers` 2, so the cap of every underlay is 2 and every
+//! Four members without `udp`, and `max_connections` 2, so the cap of every underlay is 2 and every
 //! member knows three others. The underlay of a node without `udp` wants a session to each known
 //! member. A session of the underlay is a route edge, so its table refuses a newcomer at the cap and
 //! evicts nobody; when it evicted, the evicted member was dialed again and the sessions swung (measured
@@ -80,7 +80,7 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
                 Transport::Relay,
             ])
             .relay_urls(relay_urls)
-            .max_peers(CAP);
+            .max_connections(CAP);
         let creator: Membership = membership::join(&options, first_sink)
             .await
             .expect("open the first member");
@@ -93,7 +93,7 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
             let member_options: membership::JoinOptions = membership::JoinOptions::default()
                 .nick(Some(format!("m{index}")))
                 .mesh(Some(mesh.clone()))
-                .max_peers(CAP);
+                .max_connections(CAP);
             members.push(
                 membership::join(&member_options, sink)
                     .await

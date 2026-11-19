@@ -30,10 +30,10 @@ use std::{fmt, ops, sync};
 pub struct SetupParams {
     /// This member's nickname, the author of every message it sends.
     pub author: Nickname,
-    /// G: the gossip active-view cap. `0` takes `tuning::GOSSIP_ACTIVE_VIEW_CAPACITY`.
-    pub max_peers: usize,
-    /// C: the ceiling of direct connections. `0` takes [`crate::transport::MAX_DIRECT_PEERS`].
-    pub max_direct: usize,
+    /// The cap on the direct connections of the node: gossip neighbors, `WebRTC` sessions and
+    /// unicast connections together. It is also the size of the gossip active view. `0` takes
+    /// [`tuning::MAX_CONNECTIONS`](crate::util::tuning::MAX_CONNECTIONS).
+    pub max_connections: usize,
     /// The consumer's per-user runtime base (see
     /// [`runtime_base`](crate::util::runtime_base)) — the root the socket, the
     /// default state file, and the default log dir live under. Supplied rather
@@ -85,8 +85,7 @@ impl SetupParams {
     pub fn new<S: NodeSink + 'static>(author: Nickname, sink: S) -> Self {
         Self {
             author,
-            max_peers: 0,
-            max_direct: 0,
+            max_connections: 0,
             runtime_base: None,
             state_file: None,
             // trait object: the loop and the setup share the sink through this Arc
@@ -113,16 +112,13 @@ impl SetupParams {
         }
     }
 
-    /// Set the ceiling of peers in the mesh.
+    /// Set the cap on the direct connections of the node.
     #[must_use]
-    pub fn max_peers(self, max_peers: usize) -> Self {
-        Self { max_peers, ..self }
-    }
-
-    /// Set the ceiling of direct connections.
-    #[must_use]
-    pub fn max_direct(self, max_direct: usize) -> Self {
-        Self { max_direct, ..self }
+    pub fn max_connections(self, max_connections: usize) -> Self {
+        Self {
+            max_connections,
+            ..self
+        }
     }
 
     /// Set the per-user runtime base.

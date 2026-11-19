@@ -64,6 +64,11 @@ pub(crate) fn ensure_direct(
         }
         return false;
     }
+    // At its ceiling the node probes nobody: a probe evicts nobody, and a verdict that it did not
+    // run is none. The alive tick asks again when a unit is free.
+    if !state.unicast_pool.has_room_for_unprompted_dial(peer) {
+        return false;
+    }
     state.direct.insert(peer, DirectState::Pending);
     let pool = state.unicast_pool.clone();
     let tx = state.direct_proven.clone();
@@ -125,7 +130,7 @@ pub(crate) async fn request_graft(
             peer,
             rendezvous: context.rendezvous_id,
         },
-        context.max_peers,
+        context.max_connections,
         Instant::now(),
         paced,
     ) {
@@ -149,7 +154,12 @@ pub(crate) async fn graft_proven(
     if peer == context.rendezvous_id && !state.rendezvous_wanted() {
         return;
     }
-    if !state.linked_endpoints.contains(&peer) && state.linked_endpoints.len() < context.max_peers {
+    // The rendezvous is asked for at the cap too: a member at its cap may return to it and hold it,
+    // and the link takes no unit (see `Ceiling::set_rendezvous`). Without it, once every member
+    // let go of the rendezvous, nobody could return and a late joiner saw an empty mesh.
+    if !state.linked_endpoints.contains(&peer)
+        && (peer == context.rendezvous_id || state.linked_endpoints.len() < context.max_connections)
+    {
         state.note_relink(peer, Instant::now());
         if let Err(error) = request_graft(state, context, peer, true).await {
             tracing::warn!(target: transport::LOG_TARGET, %peer, %error, "graft request failed");
@@ -175,7 +185,7 @@ pub(crate) async fn retry_direct(
 ) {
     // Every alive tick, so that the clock of a starved node does not outlive its cause.
     let now = Instant::now();
-    state.note_link_count(state.linked_endpoints.len(), context.max_peers, now);
+    state.note_link_count(state.linked_endpoints.len(), context.max_connections, now);
     state.settle_graft_backoff(now);
     if state.relay_transport.relay_allowed() {
         regraft::fill_active_view(state, context).await;
@@ -186,7 +196,7 @@ pub(crate) async fn retry_direct(
     let (lane, rest): (Vec<_>, Vec<_>) = regraft::retry_candidates(
         state,
         context.rendezvous_id,
-        context.max_peers,
+        context.max_connections,
         distrust_links,
     )
     .into_iter()

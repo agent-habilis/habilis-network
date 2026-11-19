@@ -60,6 +60,7 @@ mod admission_guard;
 mod busy_guard;
 mod connection_hook;
 mod inner;
+mod ledger_view;
 mod refusal;
 mod refusal_backoff;
 mod round;
@@ -72,6 +73,7 @@ pub(crate) use admission_guard::AdmissionGuard;
 pub(crate) use busy_guard::BusyGuard;
 pub(crate) use connection_hook::ConnectionHook;
 pub(crate) use inner::Inner;
+pub(crate) use ledger_view::LedgerView;
 pub(crate) use refusal::Refusal;
 pub(crate) use refusal_backoff::RefusalBackoff;
 pub(crate) use round::Round;
@@ -103,6 +105,7 @@ mod tests {
     use super::{Refusal, RefusalBackoff, Sessions, SignalAdmission, sampler};
     #[cfg(feature = "iroh-test-utils")]
     use crate::lookup::test_relay;
+    use crate::transport::ceiling::DialPlan;
     use crate::transport::payload_path;
     use habilis_network_iroh_gossip_transport::hub::Hub as habilisnetworkirohgossiptransport_Hub;
     #[cfg(feature = "iroh-test-utils")]
@@ -717,6 +720,112 @@ mod tests {
         );
     }
 
+    /// A pin that a closed table leaves would hold a peer on multihop in the path selector of an
+    /// endpoint that the table no longer serves, and the same endpoint id can come back. Closing the
+    /// table releases the pins, and a pin that a neighbor makes void is released too.
+    #[test]
+    fn closing_the_table_and_a_new_neighbor_release_the_pins_of_the_selector() {
+        use habilis_network_iroh_transport_util as selector;
+        let _guard = ::habilis_network_test_tracing::init();
+        let admission = SignalAdmission::new(1);
+        admission.note_success(peer(1));
+        let local = peer(100);
+        admission.set_local(local);
+        let (far, near) = (peer(2), peer(3));
+        assert_eq!(
+            admission.plan_dial(far, true),
+            DialPlan::Multihop,
+            "the far peer is pinned"
+        );
+        assert_eq!(
+            admission.plan_dial(near, true),
+            DialPlan::Multihop,
+            "the near peer is pinned"
+        );
+        assert!(
+            selector::is_pinned(local, far) && selector::is_pinned(local, near),
+            "the selector reads both pins"
+        );
+        admission.set_neighbors(&HashSet::from([near]));
+        assert!(
+            !selector::is_pinned(local, near),
+            "a peer that becomes a gossip neighbor is released from the selector"
+        );
+        admission.close();
+        assert!(
+            !selector::is_pinned(local, far),
+            "closing the table releases the pins of the selector"
+        );
+    }
+
+    /// The offer of a pinned peer is refused: this node rides multihop for the pair, and a session
+    /// would take a unit, or evict a peer, at the ceiling that pinned it. The remote side of the pair
+    /// is not pinned on its own side, so it reads the pair as proven and offers. Our own offer is a
+    /// send and is not refused here.
+    #[test]
+    fn an_offer_from_a_pinned_peer_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let admission = SignalAdmission::new(1);
+        let hub = FakeHub::default();
+        admission.note_success(peer(1));
+        let pinned = peer(2);
+        assert_eq!(
+            admission.plan_dial(pinned, true),
+            DialPlan::Multihop,
+            "the peer is pinned"
+        );
+        assert_eq!(
+            admission.try_admit(pinned, &hub).err(),
+            Some(Refusal::Pinned),
+            "an offer of a pinned peer is refused"
+        );
+        assert!(
+            admission.try_admit_offer(pinned, &hub).is_ok(),
+            "our own offer for a held frame is a send, and the pin check is not for it"
+        );
+        assert!(
+            admission.try_admit(peer(3), &hub).is_ok(),
+            "an offer of an unpinned peer is admitted"
+        );
+    }
+
+    /// A session that found no free unit and no peer to evict took no unit. It idles out after
+    /// the extra idle, which is shorter than the window of a direct session.
+    #[test]
+    fn a_session_that_took_no_unit_idles_out_after_the_extra_idle() {
+        use crate::transport::ceiling::EXTRA_IDLE;
+        let _guard = ::habilis_network_test_tracing::init();
+        let admission = SignalAdmission::new(1);
+        let hub = FakeHub::default();
+        drop(admission.try_admit(peer(1), &hub).expect("room"));
+        hub.attach(peer(1));
+        admission.note_success(peer(1));
+        let _busy = admission.busy(peer(1));
+        hub.attach(peer(2));
+        admission.note_success(peer(2));
+        assert!(
+            admission.is_extra(peer(2)),
+            "the second session is an extra"
+        );
+        let start = Instant::now();
+
+        let mut inner = admission.lock();
+        assert!(
+            inner
+                .take_idle(
+                    start + EXTRA_IDLE.saturating_sub(Duration::from_secs(1)),
+                    tuning::DIRECT_IDLE_BACKSTOP
+                )
+                .is_empty(),
+            "one second short of the extra idle"
+        );
+        assert_eq!(
+            inner.take_idle(start + EXTRA_IDLE, tuning::DIRECT_IDLE_BACKSTOP),
+            vec![peer(2)],
+            "the extra goes after the extra idle, and the busy unit stays"
+        );
+    }
+
     /// One source of truth for idle: the ledger's last use. A session goes a window after the last
     /// use of its peer, not a window after the first look of the sweep, and not a window after
     /// its connection closed, which would add a second window to the idle close of the connection.
@@ -1312,12 +1421,12 @@ mod tests {
         );
     }
 
-    /// When every candidate is busy the newcomer is still admitted: the count is over the
-    /// ceiling by the busy connections, the gauge says so, and nothing is evicted. When the
-    /// sends end, the next admission evicts again.
+    /// When every candidate is busy the newcomer is still admitted, as an extra: it takes no unit,
+    /// so the count stays at the ceiling, and nothing is evicted. When the sends end, the next
+    /// admission evicts again, and the extra is not its victim.
     #[cfg(feature = "iroh-test-utils")]
     #[test]
-    fn when_every_connection_is_busy_the_newcomer_is_admitted_over_the_ceiling() {
+    fn when_every_connection_is_busy_the_newcomer_is_admitted_as_an_extra() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,
@@ -1326,7 +1435,7 @@ mod tests {
                 let (first, _first_conn) = fixture.dial().await;
                 let busy = fixture.admission.busy(first);
 
-                let (_second, _second_conn) = fixture.dial().await;
+                let (second, _second_conn) = fixture.dial().await;
 
                 assert!(
                     fixture
@@ -1335,10 +1444,17 @@ mod tests {
                         .is_none(),
                     "nobody is evicted while the only candidate is busy"
                 );
+                assert!(
+                    fixture.admission.is_extra(second),
+                    "the newcomer took no unit: it is an extra"
+                );
                 assert_eq!(
-                    fixture.admission.over_ceiling(),
-                    1,
-                    "the newcomer is over the ceiling by one"
+                    (
+                        fixture.admission.direct_units(),
+                        fixture.admission.over_ceiling()
+                    ),
+                    (1, 0),
+                    "the count stays at the ceiling, and nothing is over it"
                 );
 
                 drop(busy);

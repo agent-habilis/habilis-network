@@ -113,14 +113,14 @@ pub(crate) async fn claim_holder(
 
     // The rendezvous pseudo-node's active view is overlay plumbing, not the
     // member peer cap, so it stays at the shipped default rather than
-    // tracking `--max-peers`.
+    // tracking `--max-connections`.
     // The rendezvous pseudo-node accepts no unicast — it is not a peer.
     // A *public* rendezvous answers JSEP (`build_rendezvous_endpoint` put
     // the transport on the endpoint): a browser-shaped peer has no other
     // way onto a mesh whose relay is lookup only.
     let (gossip, router, book) = build_mesh(
         endpoint.clone(),
-        tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+        tuning::MAX_CONNECTIONS,
         None,
         lane.clone().map(|(handle, admission)| {
             (

@@ -1,7 +1,7 @@
 //! A `WebRTC`-only mesh larger than the direct-peer ceiling must still give
 //! every member the full roster.
 //!
-//! Each node holds at most `MAX_DIRECT_PEERS` (16) sessions. The rendezvous
+//! Each node holds at most `MAX_CONNECTIONS` (16) sessions. The rendezvous
 //! session used to count as one of them, and the rendezvous pseudo-node
 //! accepted only 16 sessions itself and never let one go. The first 16 joiners
 //! therefore filled the rendezvous, and every later joiner stayed alone with
@@ -20,7 +20,7 @@ use habilis_network::protocol::{Lookup, Transport};
 use habilis_network::net::test_relay;
 use std::{env, fs};
 use tokio::{sync, time};
-/// One more than `MAX_DIRECT_PEERS + 1`, so that a node cannot hold a session
+/// One more than `MAX_CONNECTIONS + 1`, so that a node cannot hold a session
 /// to every other member and still keep one for the rendezvous.
 const MEMBERS: usize = 18;
 const FORMATION_DEADLINE: Duration = Duration::from_mins(2);

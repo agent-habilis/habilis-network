@@ -5,6 +5,7 @@
 //! rather than stalling the event loop.
 
 mod in_flight_dial;
+mod plan_release;
 mod registration;
 mod timeouts;
 pub(crate) use timeouts::{COOLDOWN_REFUSED, DIAL_TIMEOUT};
@@ -181,6 +182,420 @@ mod tests {
             connection.close_reason(),
             Some(ConnectionError::LocallyClosed)
         )
+    }
+
+    /// A pinned connection rides multihop for a peer that the node could not dial directly, and
+    /// the members that forward for it pay for each minute it stays. It closes after the pinned
+    /// idle (60 s), which is shorter than the idle timeout of a direct connection.
+    #[test]
+    fn a_pinned_connection_is_closed_after_a_minute_idle_and_a_direct_one_is_not() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            time::pause();
+
+            advance_secs(61).await;
+            assert!(
+                connection.close_reason().is_none(),
+                "a direct connection keeps the idle timeout of the pool"
+            );
+
+            {
+                let mut conns = pool.inner.conns.lock().await;
+                let pooled = conns.get_mut(&server).expect("the connection is pooled");
+                pooled.pinned = true;
+                pooled.last_used = time::Instant::now();
+            }
+            advance_secs(55).await;
+            assert!(
+                connection.close_reason().is_none(),
+                "inside the pinned idle the connection stays"
+            );
+            advance_secs(10).await;
+            assert!(
+                closed_as_idle(&connection),
+                "a pinned connection idle for a minute is closed as idle"
+            );
+
+            time::resume();
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// A connection that took no unit (the ceiling holds only a busy peer) is an extra: it closes
+    /// after the extra idle, as a pinned one does.
+    #[test]
+    fn a_connection_that_took_no_unit_is_closed_after_a_minute_idle() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) =
+                pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            let _busy = admission.busy(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            admission.note_connection(&connection);
+            assert!(admission.is_extra(server), "no unit was free or evictable");
+            time::pause();
+
+            advance_secs(55).await;
+            assert!(
+                connection.close_reason().is_none(),
+                "inside the extra idle the connection stays"
+            );
+            advance_secs(10).await;
+            assert!(
+                closed_as_idle(&connection),
+                "an extra idle for a minute is closed as idle"
+            );
+
+            time::resume();
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// The pool counts its dials for each peer, so that a test can say that a node dialed nobody
+    /// for a peer. A dial counts when it reaches the endpoint, and a send over a warm connection
+    /// does not.
+    #[test]
+    fn the_pool_counts_each_dial_it_makes_for_a_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(300)).await;
+            let other = testing::endpoint_id(8);
+            assert_eq!(pool.dials_to(server), 0, "no dial before the first send");
+            pool.warm_or_dial(server).await.expect("dial");
+            assert_eq!(pool.dials_to(server), 1, "the first send dials once");
+            pool.warm_or_dial(server).await.expect("warm");
+            assert_eq!(
+                pool.dials_to(server),
+                1,
+                "a send over the warm connection is not a dial"
+            );
+            assert_eq!(pool.dials_to(other), 0, "another peer is counted apart");
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// A direct dial that has a route takes it as one more address, beside the address of the peer:
+    /// a peer that no direct path reaches is reached through the route. A pinned dial takes the
+    /// route alone.
+    #[test]
+    fn a_direct_dial_adds_its_route_to_the_address_and_a_pinned_dial_takes_the_route_alone() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(300)).await;
+            let known = iroh::EndpointAddr::new(server).with_ip_addr(([192, 0, 2, 1], 4433).into());
+            pool.note_addr(&known);
+
+            let roomy = SignalAdmission::new(4);
+            pool.set_admission(roomy);
+            let registration = pool.register_planned_dial(server, || Some(a_route()));
+            let planned = pool.inner.routes.lock().remove(&server);
+            let address = pool.dial_address(server, planned);
+            assert!(
+                address.addrs.contains(&a_route())
+                    && address.addrs.iter().any(iroh::TransportAddr::is_ip),
+                "a direct dial keeps the address of the peer and adds the route: {address:?}"
+            );
+            drop(registration);
+
+            let full = SignalAdmission::new(1);
+            full.note_success(testing::endpoint_id(7));
+            let (full_pool, full_server, router_two, client_two) =
+                pool_with_idle(Duration::from_secs(300)).await;
+            full_pool.note_addr(
+                &iroh::EndpointAddr::new(full_server).with_ip_addr(([192, 0, 2, 2], 4433).into()),
+            );
+            full_pool.set_admission(full);
+            let pinned_registration =
+                full_pool.register_planned_dial(full_server, || Some(a_route()));
+            let pinned_plan = full_pool.inner.routes.lock().remove(&full_server);
+            let pinned_address = full_pool.dial_address(full_server, pinned_plan);
+            let pinned_addrs: Vec<iroh::TransportAddr> =
+                pinned_address.addrs.iter().cloned().collect();
+            assert_eq!(
+                pinned_addrs,
+                vec![a_route()],
+                "a pinned dial takes the route and no other address"
+            );
+            drop(pinned_registration);
+            router.shutdown().await.expect("shutdown");
+            router_two.shutdown().await.expect("shutdown");
+            client.close().await;
+            client_two.close().await;
+        });
+    }
+
+    /// A route to a peer, for the tests of a pinned dial: the dial itself fails, as the test
+    /// endpoints run no multihop transport.
+    fn a_route() -> iroh::TransportAddr {
+        iroh::TransportAddr::Custom(habilis_network_iroh_gossip_transport::gossip_addr(
+            testing::endpoint_id(9),
+        ))
+    }
+
+    /// A dial that ends with no connection gives its unit back: a peer on the dial-failure
+    /// cooldown, and a send that finds a warm connection, both planned a dial and reserved a unit.
+    #[test]
+    fn a_planned_dial_that_ends_without_a_connection_gives_its_unit_back() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(300)).await;
+            let admission = SignalAdmission::new(2);
+            admission.note_success(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            let other = testing::endpoint_id(8);
+
+            pool.note_dial_failure(server).await;
+            let registration = pool.register_planned_dial(server, || None);
+            let refused = pool
+                .send_registered(registration, server, bytes::Bytes::from_static(b"one"))
+                .await;
+            assert!(refused.is_err(), "a peer on the cooldown is not dialed");
+            assert!(
+                admission.has_room(other),
+                "the dial that the cooldown stopped gave its unit back"
+            );
+
+            pool.inner.dial_failures.lock().await.forget(&server);
+            pool.warm_or_dial(server).await.expect("dial");
+            admission.release_dial(server);
+            let warm_registration = pool.register_planned_dial(server, || None);
+            pool.send_registered(warm_registration, server, bytes::Bytes::from_static(b"two"))
+                .await
+                .expect("send over the warm connection");
+            assert!(
+                admission.has_room(other),
+                "a send that found a warm connection gave back the unit that it planned"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// A courtesy dial at the ceiling with a route pins the peer and dials through the route. The
+    /// dial is held at its gate, so the test reads the pin before the dial ends and gives it back.
+    #[test]
+    fn a_courtesy_dial_at_the_ceiling_with_a_route_pins_the_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(300)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            let gate = pool.hold_next_dial();
+            assert!(
+                pool.dial_and_send_in_background(server, bytes::Bytes::from_static(b"hi"), || {
+                    Some(a_route())
+                })
+                .await,
+                "a courtesy reply with a route is sent"
+            );
+            assert!(
+                admission.is_pinned(server),
+                "the courtesy dial at the ceiling pins the peer on its route"
+            );
+            gate.notify_one();
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// A courtesy dial at the ceiling with no route evicts nobody and sends nothing: a backfill is
+    /// not the answer to a request. With a free unit it dials.
+    #[test]
+    fn a_courtesy_dial_at_the_ceiling_with_no_route_dials_nobody() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(300)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            assert!(
+                !pool
+                    .dial_and_send_in_background(server, bytes::Bytes::from_static(b"hi"), || None)
+                    .await,
+                "no route and no free unit: no courtesy dial"
+            );
+            assert!(!pool.is_dialing(server), "no dial is in flight");
+            assert!(
+                !admission.has_room(testing::endpoint_id(8)),
+                "the ledger still holds its one unit and reserves no other"
+            );
+
+            let roomy = SignalAdmission::new(2);
+            roomy.note_success(testing::endpoint_id(7));
+            let (roomy_pool, roomy_server, router_two, client_two) =
+                pool_with_idle(Duration::from_secs(300)).await;
+            roomy_pool.set_admission(roomy);
+            assert!(
+                roomy_pool
+                    .dial_and_send_in_background(
+                        roomy_server,
+                        bytes::Bytes::from_static(b"hi"),
+                        || None
+                    )
+                    .await,
+                "a free unit: the courtesy dial goes"
+            );
+            router.shutdown().await.expect("shutdown");
+            router_two.shutdown().await.expect("shutdown");
+            client.close().await;
+            client_two.close().await;
+        });
+    }
+
+    /// A pinned peer is not dialed again by the pool: only the loop holds a fresh route, so the next
+    /// send plans the dial. Any other peer is planned with no route.
+    #[test]
+    fn a_redial_of_a_pinned_peer_is_not_made_and_another_peer_is_planned() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(300)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            let first = pool.register_planned_dial(server, || Some(a_route()));
+            assert!(admission.is_pinned(server), "the first dial pins the peer");
+            assert!(
+                pool.redial_registration(server).is_none(),
+                "a pinned peer is not dialed again with a route that may be gone"
+            );
+            drop(first);
+            assert!(
+                pool.redial_registration(server).is_some(),
+                "a peer that is not pinned is planned as any send"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// A probe that is cancelled while its dial runs gives its unit back.
+    #[test]
+    fn a_probe_that_is_dropped_mid_dial_gives_its_unit_back() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(300)).await;
+            let admission = SignalAdmission::new(2);
+            admission.note_success(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            let _gate = pool.hold_next_dial();
+            let probing = pool.clone();
+            let probe = tokio::spawn(async move { probing.probe_connection(server).await });
+            while admission.has_room(testing::endpoint_id(8)) {
+                task::yield_now().await;
+            }
+            probe.abort();
+            let _ = probe.await;
+            assert!(
+                admission.has_room(testing::endpoint_id(8)),
+                "the probe that was dropped gave its unit back"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// The route of a pinned connection is gone, but the peer became a gossip neighbor: it is a
+    /// direct peer now, and its connection is not closed for the route.
+    #[test]
+    fn a_connection_of_a_peer_that_is_no_longer_pinned_is_not_closed_for_its_route() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) =
+                pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let admission = SignalAdmission::new(2);
+            pool.set_admission(admission.clone());
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            pool.inner
+                .conns
+                .lock()
+                .await
+                .get_mut(&server)
+                .expect("the connection is pooled")
+                .pinned = true;
+            assert!(
+                !pool.close_pinned(server).await && connection.close_reason().is_none(),
+                "the ledger does not pin the peer any more: the connection stays"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// A probe is a dial that no send asked for. It takes a free unit and never the last one at the
+    /// ceiling: it is refused and evicts nobody. With a free unit it dials.
+    #[test]
+    fn a_probe_at_the_ceiling_dials_nobody() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(300)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            assert!(
+                !pool.has_room_for_unprompted_dial(server),
+                "a ceiling of 1 with 1 unit has no room"
+            );
+
+            let probe = pool.probe_connection(server).await;
+            assert!(
+                probe.is_err_and(|error| error.to_string().contains("at its ceiling")),
+                "a probe at the ceiling is refused"
+            );
+
+            let roomy = SignalAdmission::new(2);
+            roomy.note_success(testing::endpoint_id(7));
+            let (roomy_pool, roomy_server, router_two, client_two) =
+                pool_with_idle(Duration::from_secs(300)).await;
+            roomy_pool.set_admission(roomy);
+            assert!(
+                roomy_pool.probe_connection(roomy_server).await.is_ok(),
+                "a probe with a free unit dials"
+            );
+            router.shutdown().await.expect("shutdown");
+            router_two.shutdown().await.expect("shutdown");
+            client.close().await;
+            client_two.close().await;
+        });
+    }
+
+    /// The route of a pinned connection is gone: the connection closes, and a direct connection
+    /// of the same pool is left alone.
+    #[test]
+    fn a_pinned_connection_closes_when_its_route_is_gone_and_a_direct_one_stays() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            assert!(
+                !pool.close_pinned(server).await && connection.close_reason().is_none(),
+                "a direct connection stays"
+            );
+            pool.inner
+                .conns
+                .lock()
+                .await
+                .get_mut(&server)
+                .expect("the connection is pooled")
+                .pinned = true;
+            assert!(
+                pool.close_pinned(server).await,
+                "a pinned connection closes"
+            );
+            assert!(
+                closed_as_idle(&connection) && pool.inner.conns.lock().await.is_empty(),
+                "and leaves the pool, so that the next send is cold"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
     }
 
     #[test]
@@ -442,7 +857,7 @@ mod tests {
             lookup::add_peer_addr(&lookup::address_book(&endpoint), bob_addr);
             let pool = super::UnicastPool::new(endpoint.clone(), false);
             assert!(
-                pool.dial_and_send_in_background(bob, bytes::Bytes::new())
+                pool.dial_and_send_in_background(bob, bytes::Bytes::new(), || None)
                     .await,
                 "a background send is accepted after the dropped dial"
             );
@@ -717,13 +1132,21 @@ mod tests {
 
                 let gate = pool.hold_next_dial();
                 assert!(
-                    pool.dial_and_send_in_background(server, bytes::Bytes::from_static(b"one"))
-                        .await,
+                    pool.dial_and_send_in_background(
+                        server,
+                        bytes::Bytes::from_static(b"one"),
+                        || None
+                    )
+                    .await,
                     "the first frame starts the dial"
                 );
                 assert!(
-                    pool.dial_and_send_in_background(server, bytes::Bytes::from_static(b"two"))
-                        .await,
+                    pool.dial_and_send_in_background(
+                        server,
+                        bytes::Bytes::from_static(b"two"),
+                        || None
+                    )
+                    .await,
                     "the second frame waits for the dial instead of being dropped"
                 );
                 gate.notify_one();

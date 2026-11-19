@@ -75,8 +75,8 @@ impl InjectedEndpoint {
     /// makes the admission table that its connection hook reports to.
     ///
     /// The keys of the handles are checked before anything is bound, so a
-    /// refused handle is not spent on an endpoint. `max_direct` is the ceiling of
-    /// direct connections, as in [`SetupParams::max_direct`](super::SetupParams::max_direct).
+    /// refused handle is not spent on an endpoint. `max_connections` is the ceiling of
+    /// direct connections, as in [`SetupParams::max_connections`](super::SetupParams::max_connections).
     ///
     /// # Errors
     /// `transports` has no `WebRTC` handle, or it already has an admission table
@@ -87,9 +87,9 @@ impl InjectedEndpoint {
         secret: iroh::SecretKey,
         alpns: Vec<Vec<u8>>,
         transports: lookup::TransportHandles,
-        max_direct: usize,
+        max_connections: usize,
     ) -> Result<Self, SetupError> {
-        Self::bind_checked(lookups, secret, alpns, transports, max_direct)
+        Self::bind_checked(lookups, secret, alpns, transports, max_connections)
             .await
             .map_err(SetupError::internal)
     }
@@ -99,11 +99,11 @@ impl InjectedEndpoint {
         secret: iroh::SecretKey,
         alpns: Vec<Vec<u8>>,
         mut transports: lookup::TransportHandles,
-        max_direct: usize,
+        max_connections: usize,
     ) -> Result<Self> {
         anyhow::ensure!(
             transports.admission.is_none(),
-            "an injected endpoint makes its own admission table: pass `max_direct`, not a table"
+            "an injected endpoint makes its own admission table: pass `max_connections`, not a table"
         );
         let webrtc = transports
             .webrtc
@@ -113,7 +113,7 @@ impl InjectedEndpoint {
         super::check_webrtc_key(bound, &webrtc)?;
         #[cfg(feature = "multihop")]
         super::check_hop_key(bound, transports.multihop.as_ref())?;
-        let admission = transport::SignalAdmission::new(max_direct);
+        let admission = transport::SignalAdmission::new(max_connections);
         transports.admission = Some(admission.clone());
         #[cfg(all(feature = "multihop", feature = "host"))]
         let multihop = transports.multihop.clone();

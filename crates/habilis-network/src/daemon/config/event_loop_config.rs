@@ -204,7 +204,7 @@ pub(crate) struct RuntimeConfig {
     /// to every handler, so multiple in-process sessions each have their own and
     /// never race a shared global.
     pub(crate) sink: sync::Arc<dyn NodeSink>,
-    pub(crate) max_peers: usize,
+    pub(crate) max_connections: usize,
     /// The consumer's per-user runtime base — the root the control socket, the
     /// default state file, and the default log dir live under. Carried from
     /// [`SetupParams`](crate::daemon::setup::SetupParams) rather than derived here; see

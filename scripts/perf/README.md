@@ -47,8 +47,7 @@ full text.
 | `MESH_TRANSPORT` | `udp` (default) or `webrtc`; multihop is added to `udp` unless `MESH_MULTIHOP=off` |
 | `MESH_TRANSPORTS` | the whole list, for example `udp,webrtc,multihop,relay`; only the creator reads it |
 | `MESH_TRAFFIC` | `off`: no directed messages. On, each node sends one per second to each roster peer |
-| `MESH_MAX_PEERS` | G, the gossip active view; `0` takes the engine default |
-| `MESH_MAX_DIRECT` | C, the ceiling of direct connections (WebRTC sessions and unicast connections together); `0` takes the engine default, 64. A newcomer past C evicts the least valuable peer |
+| `MESH_MAX_CONNECTIONS` | the cap on the direct connections: gossip neighbors, WebRTC sessions and unicast connections together; `0` takes the engine default, 16. A newcomer past the cap evicts the least valuable peer that is not a gossip neighbor |
 | `MESH_TRAFFIC_UNTIL_SECS` | the directed messages stop after this many seconds. With `MESH_BLOCK_UDP_AFTER_SECS` and `MESH_TRANSPORTS=udp,webrtc,multihop` this is the run of the idle detach |
 | `MESH_TRAFFIC_BURSTY` | `1`: instead of a message per second to every peer, every 60 to 240 s (random) one message to each of 3 to 5 random peers. A connection then idles, and is needed again |
 | `MESH_FLOOD_PEERS` | K: from second 30 on, messages of 3000 bytes to the first K roster peers as fast as the node accepts them. The RSS against K is the worst case of one connection (with `MESH_TRAFFIC=off`). Read the RSS of the sender and of the receiver: the flood fills the send buffer of the sender as well as the receive window of the receiver |
@@ -71,7 +70,8 @@ resident memory. `qclose`, `pclose` and `sclose` count the closes of every QUIC 
 (the gossip links too), of the pooled unicast connections that a send used, and of WebRTC
 sessions, and `qredial`, `predial` and `sredial` the closes that were followed by a connection to
 the same peer within 300 s: `bun scripts/perf/redial_report.ts <run folder>` prints them
-per node per hour, and the share of closes that were followed by a re-dial. `idle_sessions` counts the WebRTC sessions to members that are not gossip
+per node per hour, and the share of closes that were followed by a re-dial. `fwd` counts the multihop
+cells that the node passed on for pairs it is not part of, since its start: the forward load. `idle_sessions` counts the WebRTC sessions to members that are not gossip
 neighbors. `phase` is 2 once the node has taken IP away.
 
 A run folder holds `n<i>.out` and `n<i>.err` per node, `summary.txt` (the last census
@@ -235,8 +235,8 @@ To compare two builds that both have the wire counters, give arm a a loaded phas
 arms then give a ratio, and the step measure of the unicast digests used it: arm a was the build before the change and
 arm b the build with it, 3 pairs at N = 16.
 
-To compare two settings of one build, give each arm its own cap on direct links with `--plain-max-peers` and
-`--counters-max-peers`. `bench.ts` passes `--max-peers` to `create` and `join`, and writes it to `result.json`.
+To compare two settings of one build, give each arm its own cap on direct links with `--plain-max-connections` and
+`--counters-max-connections`. `bench.ts` passes `--max-connections` to `create` and `join`, and writes it to `result.json`.
 `--join-time 1` polls the rosters in the settle phase and writes `join_ms`: the time from the end of the last join
 until every daemon lists the other N-1 members.
 

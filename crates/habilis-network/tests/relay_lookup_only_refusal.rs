@@ -124,7 +124,7 @@ async fn spawn(
         .webrtc(false)
         .gossip(false);
     let params = SetupParams::new(author, sink)
-        .max_peers(16)
+        .max_connections(16)
         .transports(transports);
     let config: runtime::EventLoopConfig = setup_mesh(
         SetupKind::Topic {

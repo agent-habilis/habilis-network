@@ -187,6 +187,7 @@ pub(crate) fn nudge_climbing_pairs(
             })
         })
         .collect();
+    close_pinned_without_route(state);
     let gossip_on = state.gossip_handle.is_some();
     for (peer, addrs) in
         pair_to_climb::plan_relay_dials(pairs, &mut state.route_dialed, only_changed, gossip_on)
@@ -202,6 +203,23 @@ pub(crate) fn nudge_climbing_pairs(
         let endpoint = context.endpoint.clone();
         task::spawn(async move {
             webrtc::nudge_acceptor::nudge_with(&endpoint, peer, &addrs).await;
+        });
+    }
+}
+
+/// A pinned connection exists for its route. A pinned peer with no route now loses its
+/// connection, and the next send to it follows the normal rule (see
+/// [`pair_to_climb::lost_pinned`]). A pinned peer with a route is a pair like any other: if it
+/// reads as the relay, the pass above dials it with the route.
+fn close_pinned_without_route(state: &EventLoopState) {
+    let peers = state.webrtc_admission.pinned_peers();
+    let pinned = peers
+        .into_iter()
+        .map(|peer| (peer, route_to(state, peer).is_some()));
+    for peer in pair_to_climb::lost_pinned(pinned) {
+        let pool = state.unicast_pool.clone();
+        task::spawn(async move {
+            pool.close_pinned(peer).await;
         });
     }
 }
@@ -308,7 +326,9 @@ pub(crate) async fn on_path_change(
                 }
                 tracing::info!(target: transport::LOG_TARGET, %peer, ?kind, detector = "watcher", "direct path lost; racing again");
             }
-            if let Some(addrs) = ladder.nudge {
+            // A pinned peer rides multihop only: a nudge dial would open a direct path to it.
+            let pinned = state.webrtc_admission.is_pinned(peer);
+            if let Some(addrs) = ladder.nudge.filter(|_| !pinned) {
                 // One dial carries what iroh may not know yet: the session's
                 // address moves a connection onto the session's path, and the
                 // multihop route is learned by no lookup while another path is

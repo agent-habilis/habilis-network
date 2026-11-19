@@ -24,6 +24,12 @@ pub(crate) fn negotiate_session(
         // No transport registered: the beacon, or a multihop peer.
         return;
     };
+    // A pinned peer rides multihop and nothing else: a session would take a unit, or evict a peer,
+    // at the ceiling that pinned it.
+    if state.webrtc_admission.is_pinned(peer) {
+        tracing::debug!(target: LOG_TARGET, %peer, "pinned to multihop; no session");
+        return;
+    }
     // A cold pair stays where it is until the next send.
     if retry::held_back(state, &address) {
         tracing::debug!(target: LOG_TARGET, %peer, "no send yet; leaving this pair alone");

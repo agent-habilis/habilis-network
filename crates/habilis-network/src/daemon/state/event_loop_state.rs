@@ -1394,10 +1394,10 @@ impl EventLoopState {
         self.joined_refloods_peerinfo(false, now)
     }
 
-    /// Record how many links this node holds out of `max_peers` (G). Below G - 1 starts
+    /// Record how many links this node holds out of `max_connections` (G). Below G - 1 starts
     /// the clock of a starved node, and G - 1 or more stops it.
-    pub(crate) fn note_link_count(&mut self, linked: usize, max_peers: usize, now: Instant) {
-        if linked.saturating_add(1) < max_peers {
+    pub(crate) fn note_link_count(&mut self, linked: usize, max_connections: usize, now: Instant) {
+        if linked.saturating_add(1) < max_connections {
             self.below_target_since.get_or_insert(now);
         } else {
             self.below_target_since = None;
@@ -1654,7 +1654,7 @@ impl EventLoopState {
     /// oldest of them all otherwise), and
     /// the state of the dropped orphan goes with it (`drop_endpoint_state`): no eviction leaves state that no sweep
     /// finds again, whether the orphan lost its link after it came in (it waits for the next sweep), or the endpoints
-    /// that are linked outnumber the cap (`--max-peers` has no upper limit), unless a nickname or a retained key binds
+    /// that are linked outnumber the cap (`--max-connections` has no upper limit), unless a nickname or a retained key binds
     /// the endpoint again by then. The pooled connection of the dropped orphan waits in the teardown
     /// queue, and falls back to the idle sweep of the pool only when that queue is full.
     fn insert_orphan(&mut self, endpoint: EndpointId) {

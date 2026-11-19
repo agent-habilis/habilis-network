@@ -190,7 +190,7 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
 
     let config = setup_mesh(
         kind,
-        SetupParams::new(author, SilentSink::default()).max_peers(16),
+        SetupParams::new(author, SilentSink::default()).max_connections(16),
     )
     .await?;
 
