@@ -2727,82 +2727,86 @@ mod tests {
     /// ticker on the same current-thread runtime keeps running. A blocking sleep on the runtime thread (up to 30 s)
     /// would stop every timer of a daemon that starts in the same process.
     #[cfg(all(unix, feature = "host"))]
-    #[tokio::test]
-    async fn the_wait_for_the_run_lock_does_not_stop_the_runtime() {
-        use std::fs;
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::time::Duration;
-        use tokio::task;
-        let dir = TempDir::new("habilis-run-lock-runtime");
-        let state = dir.path().join("session.json");
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(false);
-        let holder: fs::File = options
-            .open(state.with_extension("run.lock"))
-            .expect("the file of the holder");
-        holder.lock().expect("the holder takes the lock");
-        let releaser = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(700));
-            drop(holder);
+    #[test]
+    fn the_wait_for_the_run_lock_does_not_stop_the_runtime() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use std::fs;
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::time::Duration;
+            use tokio::task;
+            let dir = TempDir::new("habilis-run-lock-runtime");
+            let state = dir.path().join("session.json");
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(false);
+            let holder: fs::File = options
+                .open(state.with_extension("run.lock"))
+                .expect("the file of the holder");
+            holder.lock().expect("the holder takes the lock");
+            let releaser = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(700));
+                drop(holder);
+            });
+            // the test and the ticker task share the count
+            let ticks = Arc::new(AtomicUsize::new(0));
+            let ticker = {
+                let ticks = Arc::clone(&ticks);
+                tokio::spawn(async move {
+                    loop {
+                        time::sleep(Duration::from_millis(20)).await;
+                        ticks.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            };
+            // let the ticker start
+            task::yield_now().await;
+
+            let keys = super::run_keys_off_the_runtime(Some(state), None).await;
+
+            ticker.abort();
+            releaser.join().expect("the holder ends");
+            assert!(
+                keys.is_ok(),
+                "the start did not get the lock after the holder let go"
+            );
+            let seen = ticks.load(Ordering::Relaxed);
+            assert!(
+                seen >= 10,
+                "the wait for the run lock stopped the runtime: the ticker ran {seen} times in 700 ms"
+            );
         });
-        // the test and the ticker task share the count
-        let ticks = Arc::new(AtomicUsize::new(0));
-        let ticker = {
-            let ticks = Arc::clone(&ticks);
-            tokio::spawn(async move {
-                loop {
-                    time::sleep(Duration::from_millis(20)).await;
-                    ticks.fetch_add(1, Ordering::Relaxed);
-                }
-            })
-        };
-        // let the ticker start
-        task::yield_now().await;
-
-        let keys = super::run_keys_off_the_runtime(Some(state), None).await;
-
-        ticker.abort();
-        releaser.join().expect("the holder ends");
-        assert!(
-            keys.is_ok(),
-            "the start did not get the lock after the holder let go"
-        );
-        let seen = ticks.load(Ordering::Relaxed);
-        assert!(
-            seen >= 10,
-            "the wait for the run lock stopped the runtime: the ticker ran {seen} times in 700 ms"
-        );
     }
 
     /// A setup that is cancelled while it waits for the run lock leaves nothing behind: the worker that waits stops
     /// at its next step. Else it keeps the member key lock that it holds, and when the holder lets go it takes the run
     /// lock and writes the run counter of a start that does not exist.
     #[cfg(all(unix, feature = "host"))]
-    #[tokio::test]
-    async fn a_cancelled_wait_for_the_run_lock_writes_no_run_counter() {
-        use std::fs;
-        use std::time::Duration;
-        let dir = TempDir::new("habilis-run-lock-cancel");
-        let state = dir.path().join("session.json");
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(false);
-        let holder: fs::File = options
-            .open(state.with_extension("run.lock"))
-            .expect("the file of the holder");
-        holder.lock().expect("the holder takes the lock");
-        let start = tokio::spawn(super::run_keys_off_the_runtime(Some(state.clone()), None));
-        time::sleep(Duration::from_millis(150)).await;
+    #[test]
+    fn a_cancelled_wait_for_the_run_lock_writes_no_run_counter() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use std::fs;
+            use std::time::Duration;
+            let dir = TempDir::new("habilis-run-lock-cancel");
+            let state = dir.path().join("session.json");
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(false);
+            let holder: fs::File = options
+                .open(state.with_extension("run.lock"))
+                .expect("the file of the holder");
+            holder.lock().expect("the holder takes the lock");
+            let start = tokio::spawn(super::run_keys_off_the_runtime(Some(state.clone()), None));
+            time::sleep(Duration::from_millis(150)).await;
 
-        start.abort();
-        time::sleep(Duration::from_millis(150)).await;
-        drop(holder);
-        time::sleep(Duration::from_millis(500)).await;
+            start.abort();
+            time::sleep(Duration::from_millis(150)).await;
+            drop(holder);
+            time::sleep(Duration::from_millis(500)).await;
 
-        assert!(
-            !state.with_extension("run").exists(),
-            "the cancelled start took the run lock when the holder let go, and wrote a run counter"
-        );
+            assert!(
+                !state.with_extension("run").exists(),
+                "the cancelled start took the run lock when the holder let go, and wrote a run counter"
+            );
+        });
     }
 
     /// A start that is cancelled before the lock is free writes no run counter either. The wait reads the flag
@@ -3700,123 +3704,127 @@ mod tests {
 
     /// A handle made from a key other than the one the endpoint binds is refused
     /// by `bind`, both for the `WebRTC` transport and for the multihop handle.
-    #[tokio::test]
-    async fn an_injected_handle_on_another_key_is_refused_at_bind() {
-        let secret = iroh::SecretKey::from_bytes(&[91; 32]);
-        let other = iroh::SecretKey::from_bytes(&[5; 32]);
-        let lookups = LookupOpts::loopback();
-        let bind = |webrtc, multihop| {
-            super::InjectedEndpoint::bind(
+    #[test]
+    fn an_injected_handle_on_another_key_is_refused_at_bind() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let secret = iroh::SecretKey::from_bytes(&[91; 32]);
+            let other = iroh::SecretKey::from_bytes(&[5; 32]);
+            let lookups = LookupOpts::loopback();
+            let bind = |webrtc, multihop| {
+                super::InjectedEndpoint::bind(
+                    &lookups,
+                    secret.clone(),
+                    Vec::new(),
+                    lookup::TransportHandles {
+                        multihop,
+                        webrtc,
+                        gossip: None,
+                        admission: None,
+                        underlay: false,
+                        options: lookup::TransportOpts::default(),
+                    },
+                    transport::MAX_DIRECT_PEERS,
+                )
+            };
+            let own_webrtc = lookup::build_webrtc_handle(secret.public());
+            let other_webrtc = lookup::build_webrtc_handle(other.public());
+
+            let other_hop = multihop_on(&other, PayloadPath::DirectOnly).await;
+            let hop_error = bind(Some(own_webrtc.clone()), Some(other_hop.clone()))
+                .await
+                .expect_err("a hop identity on another key");
+            assert!(hop_error.to_string().contains("multihop"), "{hop_error}");
+            other_hop.close().await;
+
+            let webrtc_error = bind(Some(other_webrtc), None)
+                .await
+                .expect_err("a WebRTC handle on another key");
+            assert!(
+                webrtc_error.to_string().contains("WebRTC"),
+                "{webrtc_error}"
+            );
+
+            // A refused handle is not bound, so the one that was refused is still free.
+            let accepted = bind(Some(own_webrtc.clone()), None)
+                .await
+                .expect("handles on the bound key are accepted");
+            accepted.endpoint.close().await;
+
+            let table = transport::SignalAdmission::new(transport::MAX_DIRECT_PEERS);
+            let table_error = super::InjectedEndpoint::bind(
                 &lookups,
                 secret.clone(),
                 Vec::new(),
                 lookup::TransportHandles {
-                    multihop,
-                    webrtc,
-                    gossip: None,
-                    admission: None,
-                    underlay: false,
-                    options: lookup::TransportOpts::default(),
+                    webrtc: Some(own_webrtc),
+                    admission: Some(table),
+                    ..lookup::TransportHandles::default()
                 },
                 transport::MAX_DIRECT_PEERS,
             )
-        };
-        let own_webrtc = lookup::build_webrtc_handle(secret.public());
-        let other_webrtc = lookup::build_webrtc_handle(other.public());
-
-        let other_hop = multihop_on(&other, PayloadPath::DirectOnly).await;
-        let hop_error = bind(Some(own_webrtc.clone()), Some(other_hop.clone()))
             .await
-            .expect_err("a hop identity on another key");
-        assert!(hop_error.to_string().contains("multihop"), "{hop_error}");
-        other_hop.close().await;
-
-        let webrtc_error = bind(Some(other_webrtc), None)
-            .await
-            .expect_err("a WebRTC handle on another key");
-        assert!(
-            webrtc_error.to_string().contains("WebRTC"),
-            "{webrtc_error}"
-        );
-
-        // A refused handle is not bound, so the one that was refused is still free.
-        let accepted = bind(Some(own_webrtc.clone()), None)
-            .await
-            .expect("handles on the bound key are accepted");
-        accepted.endpoint.close().await;
-
-        let table = transport::SignalAdmission::new(transport::MAX_DIRECT_PEERS);
-        let table_error = super::InjectedEndpoint::bind(
-            &lookups,
-            secret.clone(),
-            Vec::new(),
-            lookup::TransportHandles {
-                webrtc: Some(own_webrtc),
-                admission: Some(table),
-                ..lookup::TransportHandles::default()
-            },
-            transport::MAX_DIRECT_PEERS,
-        )
-        .await
-        .expect_err("a caller's admission table");
-        assert!(
-            table_error.to_string().contains("admission"),
-            "{table_error}"
-        );
+            .expect_err("a caller's admission table");
+            assert!(
+                table_error.to_string().contains("admission"),
+                "{table_error}"
+            );
+        });
     }
 
     /// The hook of an injected endpoint reports its connections to the table the mesh
     /// enforces: a peer that dials it holds a direct slot there, and the count rises.
-    #[tokio::test]
-    async fn an_injected_endpoints_hook_reports_to_its_admission_table() {
-        // Only the unicast ALPN counts against the ceiling; every connection still lands in the slot table.
-        const ALPN: &[u8] = transport::UNICAST_ALPN;
-        let secret = iroh::SecretKey::from_bytes(&[92; 32]);
-        let injected: super::InjectedEndpoint = super::InjectedEndpoint::bind(
-            &LookupOpts::loopback(),
-            secret.clone(),
-            vec![ALPN.to_vec()],
-            lookup::TransportHandles {
-                webrtc: Some(lookup::build_webrtc_handle(secret.public())),
-                ..lookup::TransportHandles::default()
-            },
-            transport::MAX_DIRECT_PEERS,
-        )
-        .await
-        .expect("the injected endpoint binds");
-        assert_eq!(injected.admission.direct_units(), 0, "no peer dialed yet");
-
-        let dialer = lookup::build_peer_endpoint(&LookupOpts::loopback())
+    #[test]
+    fn an_injected_endpoints_hook_reports_to_its_admission_table() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // Only the unicast ALPN counts against the ceiling; every connection still lands in the slot table.
+            const ALPN: &[u8] = transport::UNICAST_ALPN;
+            let secret = iroh::SecretKey::from_bytes(&[92; 32]);
+            let injected: super::InjectedEndpoint = super::InjectedEndpoint::bind(
+                &LookupOpts::loopback(),
+                secret.clone(),
+                vec![ALPN.to_vec()],
+                lookup::TransportHandles {
+                    webrtc: Some(lookup::build_webrtc_handle(secret.public())),
+                    ..lookup::TransportHandles::default()
+                },
+                transport::MAX_DIRECT_PEERS,
+            )
             .await
-            .expect("a dialer binds");
-        let server = injected.endpoint.clone();
-        let serving = tokio::spawn(async move {
-            let incoming = server.accept().await.expect("an incoming connection");
-            incoming.await.expect("the handshake completes")
-        });
-        let connection = dialer
-            .connect(injected.endpoint.addr(), ALPN)
-            .await
-            .expect("the dial connects");
-        let _served = serving.await.expect("the accept task");
+            .expect("the injected endpoint binds");
+            assert_eq!(injected.admission.direct_units(), 0, "no peer dialed yet");
 
-        // The hook runs after the handshake, so the slot may land a moment after the dial.
-        let mut units = 0;
-        for _ in 0..200 {
-            units = injected.admission.direct_units();
-            if units > 0 {
-                break;
+            let dialer = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                .await
+                .expect("a dialer binds");
+            let server = injected.endpoint.clone();
+            let serving = tokio::spawn(async move {
+                let incoming = server.accept().await.expect("an incoming connection");
+                incoming.await.expect("the handshake completes")
+            });
+            let connection = dialer
+                .connect(injected.endpoint.addr(), ALPN)
+                .await
+                .expect("the dial connects");
+            let _served = serving.await.expect("the accept task");
+
+            // The hook runs after the handshake, so the slot may land a moment after the dial.
+            let mut units = 0;
+            for _ in 0..200 {
+                units = injected.admission.direct_units();
+                if units > 0 {
+                    break;
+                }
+                time::sleep(Duration::from_millis(10)).await;
             }
-            time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(
-            units, 1,
-            "the endpoint's hook did not report the dialer to its table"
-        );
+            assert_eq!(
+                units, 1,
+                "the endpoint's hook did not report the dialer to its table"
+            );
 
-        drop(connection);
-        dialer.close().await;
-        injected.endpoint.close().await;
+            drop(connection);
+            dialer.close().await;
+            injected.endpoint.close().await;
+        });
     }
 
     async fn setup_with(

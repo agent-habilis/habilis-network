@@ -329,181 +329,195 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn keeping_only_some_roots_drops_the_map_of_each_other_root() {
-        let chunks = MeshChunks::open(None).expect("an in-memory store");
-        let old = chunks.put_value(b"the old value").await.expect("a value");
-        let kept = chunks.put_value(b"the kept value").await.expect("a value");
-        chunks.keep_only([kept]).await.expect("a sweep");
-        assert!(
-            !chunks.has_map(old).await,
-            "the map of a root that is not kept must be dropped"
-        );
-        assert!(
-            chunks.has_map(kept).await,
-            "the map of a kept root must stay"
-        );
-        assert_eq!(
-            chunks.stored_chunks(),
-            1,
-            "the chunk of the old value must be swept"
-        );
+    #[test]
+    fn keeping_only_some_roots_drops_the_map_of_each_other_root() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let chunks = MeshChunks::open(None).expect("an in-memory store");
+            let old = chunks.put_value(b"the old value").await.expect("a value");
+            let kept = chunks.put_value(b"the kept value").await.expect("a value");
+            chunks.keep_only([kept]).await.expect("a sweep");
+            assert!(
+                !chunks.has_map(old).await,
+                "the map of a root that is not kept must be dropped"
+            );
+            assert!(
+                chunks.has_map(kept).await,
+                "the map of a kept root must stay"
+            );
+            assert_eq!(
+                chunks.stored_chunks(),
+                1,
+                "the chunk of the old value must be swept"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn without_a_key_the_chunks_are_the_bytes_of_the_value() {
-        let chunks = MeshChunks::open(None).expect("an in-memory store");
-        let root = chunks
-            .put_value(b"the value of a mesh with no password")
-            .await
-            .expect("a value");
-        assert_eq!(
-            chunks.stored_bytes(root).await,
-            b"the value of a mesh with no password",
-            "a mesh with no password must keep the value as it is"
-        );
+    #[test]
+    fn without_a_key_the_chunks_are_the_bytes_of_the_value() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let chunks = MeshChunks::open(None).expect("an in-memory store");
+            let root = chunks
+                .put_value(b"the value of a mesh with no password")
+                .await
+                .expect("a value");
+            assert_eq!(
+                chunks.stored_bytes(root).await,
+                b"the value of a mesh with no password",
+                "a mesh with no password must keep the value as it is"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn with_a_key_the_chunks_are_sealed_and_open_to_the_value() {
-        let key = SymmetricKey::from([5u8; 32]);
-        let chunks = MeshChunks::open(None)
-            .expect("an in-memory store")
-            .key(Some(key.clone()));
-        let value = b"the value of a passworded mesh".as_slice();
-        let root = chunks.put_value(value).await.expect("a value");
-        let stored = chunks.stored_bytes(root).await;
-        assert_eq!(
-            stored.len(),
-            value.len() + SEAL_SYMMETRIC_OVERHEAD,
-            "the chunks must hold the sealed value, which is the overhead longer"
-        );
-        assert!(
-            !stored.windows(value.len()).any(|window| window == value),
-            "the chunks of a passworded mesh must not hold the plaintext"
-        );
-        assert_eq!(
-            open_symmetric(&key, &stored).expect("the key opens the chunks"),
-            value,
-            "the key of the mesh must open the stored bytes to the value"
-        );
-        assert!(
-            open_symmetric(&SymmetricKey::from([6u8; 32]), &stored).is_err(),
-            "another key must not open the stored bytes"
-        );
+    #[test]
+    fn with_a_key_the_chunks_are_sealed_and_open_to_the_value() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let key = SymmetricKey::from([5u8; 32]);
+            let chunks = MeshChunks::open(None)
+                .expect("an in-memory store")
+                .key(Some(key.clone()));
+            let value = b"the value of a passworded mesh".as_slice();
+            let root = chunks.put_value(value).await.expect("a value");
+            let stored = chunks.stored_bytes(root).await;
+            assert_eq!(
+                stored.len(),
+                value.len() + SEAL_SYMMETRIC_OVERHEAD,
+                "the chunks must hold the sealed value, which is the overhead longer"
+            );
+            assert!(
+                !stored.windows(value.len()).any(|window| window == value),
+                "the chunks of a passworded mesh must not hold the plaintext"
+            );
+            assert_eq!(
+                open_symmetric(&key, &stored).expect("the key opens the chunks"),
+                value,
+                "the key of the mesh must open the stored bytes to the value"
+            );
+            assert!(
+                open_symmetric(&SymmetricKey::from([6u8; 32]), &stored).is_err(),
+                "another key must not open the stored bytes"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn a_value_that_was_fetched_is_kept_as_it_came_and_names_the_same_root() {
-        let key = SymmetricKey::from([5u8; 32]);
-        let author = MeshChunks::open(None)
-            .expect("an in-memory store")
-            .key(Some(key.clone()));
-        let fetcher = MeshChunks::open(None)
-            .expect("an in-memory store")
-            .key(Some(key));
-        let root = author
-            .put_value(b"a value to fetch")
-            .await
-            .expect("a value");
-        let stored = author.stored_bytes(root).await;
-        assert_eq!(
-            fetcher.put_stored(&stored).await.expect("stored bytes"),
-            root,
-            "stored bytes must name the root that the author named"
-        );
-        assert_eq!(
-            fetcher.stored_bytes(root).await,
-            stored,
-            "the fetcher must keep the bytes as they came, and not seal them again"
-        );
+    #[test]
+    fn a_value_that_was_fetched_is_kept_as_it_came_and_names_the_same_root() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let key = SymmetricKey::from([5u8; 32]);
+            let author = MeshChunks::open(None)
+                .expect("an in-memory store")
+                .key(Some(key.clone()));
+            let fetcher = MeshChunks::open(None)
+                .expect("an in-memory store")
+                .key(Some(key));
+            let root = author
+                .put_value(b"a value to fetch")
+                .await
+                .expect("a value");
+            let stored = author.stored_bytes(root).await;
+            assert_eq!(
+                fetcher.put_stored(&stored).await.expect("stored bytes"),
+                root,
+                "stored bytes must name the root that the author named"
+            );
+            assert_eq!(
+                fetcher.stored_bytes(root).await,
+                stored,
+                "the fetcher must keep the bytes as they came, and not seal them again"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn the_stored_size_of_a_pointer_counts_the_seal_of_a_passworded_mesh_only() {
-        let value = b"the value of a mesh".as_slice();
-        let size = u64::try_from(value.len()).expect("a size");
-        let plain = MeshChunks::open(None).expect("an in-memory store");
-        let sealed = MeshChunks::open(None)
-            .expect("an in-memory store")
-            .key(Some(SymmetricKey::from([5u8; 32])));
-        let plain_root = plain.put_value(value).await.expect("a value");
-        assert_eq!(
-            plain.stored_size(ChunkPointer::new(plain_root, size, 0)),
-            size,
-            "a mesh with no password stores the bytes of the value"
-        );
-        let sealed_root = sealed.put_value(value).await.expect("a value");
-        let expected = size + u64::try_from(SEAL_SYMMETRIC_OVERHEAD).expect("a size");
-        assert_eq!(
-            sealed.stored_size(ChunkPointer::new(sealed_root, size, 0)),
-            expected,
-            "a passworded mesh stores the seal too"
-        );
-        assert_eq!(
-            u64::try_from(sealed.stored_bytes(sealed_root).await.len()).expect("a size"),
-            expected,
-            "the stored size must be the size of the stored bytes"
-        );
+    #[test]
+    fn the_stored_size_of_a_pointer_counts_the_seal_of_a_passworded_mesh_only() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let value = b"the value of a mesh".as_slice();
+            let size = u64::try_from(value.len()).expect("a size");
+            let plain = MeshChunks::open(None).expect("an in-memory store");
+            let sealed = MeshChunks::open(None)
+                .expect("an in-memory store")
+                .key(Some(SymmetricKey::from([5u8; 32])));
+            let plain_root = plain.put_value(value).await.expect("a value");
+            assert_eq!(
+                plain.stored_size(ChunkPointer::new(plain_root, size, 0)),
+                size,
+                "a mesh with no password stores the bytes of the value"
+            );
+            let sealed_root = sealed.put_value(value).await.expect("a value");
+            let expected = size + u64::try_from(SEAL_SYMMETRIC_OVERHEAD).expect("a size");
+            assert_eq!(
+                sealed.stored_size(ChunkPointer::new(sealed_root, size, 0)),
+                expected,
+                "a passworded mesh stores the seal too"
+            );
+            assert_eq!(
+                u64::try_from(sealed.stored_bytes(sealed_root).await.len()).expect("a size"),
+                expected,
+                "the stored size must be the size of the stored bytes"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn the_stored_bytes_of_a_value_open_to_the_value_with_the_key_of_the_mesh_only() {
-        let key = SymmetricKey::from([5u8; 32]);
-        let sealed = MeshChunks::open(None)
-            .expect("an in-memory store")
-            .key(Some(key));
-        let other = MeshChunks::open(None)
-            .expect("an in-memory store")
-            .key(Some(SymmetricKey::from([6u8; 32])));
-        let plain = MeshChunks::open(None).expect("an in-memory store");
-        let root = sealed.put_value(b"the value").await.expect("a value");
-        let stored = sealed.stored_bytes(root).await;
-        assert_eq!(
-            sealed.open_value(&stored).expect("the key opens it"),
-            b"the value",
-            "the key of the mesh must open the stored bytes"
-        );
-        assert!(
-            other.open_value(&stored).is_err(),
-            "another key must not open the stored bytes"
-        );
-        assert!(
-            plain
-                .open_value(&stored)
-                .is_ok_and(|opened| opened != b"the value"),
-            "a mesh with no password has no key to open them"
-        );
-        let mut tampered = stored;
-        tampered[20] ^= 1;
-        assert!(
-            sealed.open_value(&tampered).is_err(),
-            "a stored value that was changed must not open"
-        );
-        assert_eq!(
-            plain.open_value(b"as it is").expect("no key, no seal"),
-            b"as it is",
-            "a mesh with no password keeps the bytes of the value as they are"
-        );
+    #[test]
+    fn the_stored_bytes_of_a_value_open_to_the_value_with_the_key_of_the_mesh_only() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let key = SymmetricKey::from([5u8; 32]);
+            let sealed = MeshChunks::open(None)
+                .expect("an in-memory store")
+                .key(Some(key));
+            let other = MeshChunks::open(None)
+                .expect("an in-memory store")
+                .key(Some(SymmetricKey::from([6u8; 32])));
+            let plain = MeshChunks::open(None).expect("an in-memory store");
+            let root = sealed.put_value(b"the value").await.expect("a value");
+            let stored = sealed.stored_bytes(root).await;
+            assert_eq!(
+                sealed.open_value(&stored).expect("the key opens it"),
+                b"the value",
+                "the key of the mesh must open the stored bytes"
+            );
+            assert!(
+                other.open_value(&stored).is_err(),
+                "another key must not open the stored bytes"
+            );
+            assert!(
+                plain
+                    .open_value(&stored)
+                    .is_ok_and(|opened| opened != b"the value"),
+                "a mesh with no password has no key to open them"
+            );
+            let mut tampered = stored;
+            tampered[20] ^= 1;
+            assert!(
+                sealed.open_value(&tampered).is_err(),
+                "a stored value that was changed must not open"
+            );
+            assert_eq!(
+                plain.open_value(b"as it is").expect("no key, no seal"),
+                b"as it is",
+                "a mesh with no password keeps the bytes of the value as they are"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn a_store_in_a_folder_starts_empty_whatever_an_earlier_run_left() {
-        let dir = TempDir::new("habilis-mesh-chunks-clear");
-        let folder = dir.0.join("run.chunks");
-        let hash = chunk_hash(b"left by an earlier run");
-        DiskStore::open(&folder)
-            .expect("an earlier store")
-            .put(hash, b"left by an earlier run")
-            .await
-            .expect("a chunk");
-        let chunks = MeshChunks::open(Some(&folder)).expect("a store in the folder");
-        let Store::Disk(store) = &chunks.store else {
-            panic!("a folder must give a store on disk");
-        };
-        assert!(
-            !store.has(hash).await.expect("a lookup"),
-            "the chunk of an earlier run must be gone"
-        );
+    #[test]
+    fn a_store_in_a_folder_starts_empty_whatever_an_earlier_run_left() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = TempDir::new("habilis-mesh-chunks-clear");
+            let folder = dir.0.join("run.chunks");
+            let hash = chunk_hash(b"left by an earlier run");
+            DiskStore::open(&folder)
+                .expect("an earlier store")
+                .put(hash, b"left by an earlier run")
+                .await
+                .expect("a chunk");
+            let chunks = MeshChunks::open(Some(&folder)).expect("a store in the folder");
+            let Store::Disk(store) = &chunks.store else {
+                panic!("a folder must give a store on disk");
+            };
+            assert!(
+                !store.has(hash).await.expect("a lookup"),
+                "the chunk of an earlier run must be gone"
+            );
+        });
     }
 }

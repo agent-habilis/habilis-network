@@ -264,163 +264,172 @@ mod tests {
         (acceptor, rx)
     }
 
-    #[tokio::test]
-    async fn a_request_reaches_the_loop_with_the_endpoint_of_its_connection_and_the_answer_goes_back()
-     {
-        let (acceptor, mut asks) = acceptor(8, Duration::from_secs(5));
-        let pair = connected(acceptor).await;
-        let connection = pair.connection.clone();
-        let answerer = task::spawn(async move {
-            let ask = next_ask(&mut asks).await;
-            let seen = (ask.from, ask.request.clone());
-            ask.reply
-                .send(b"the answer".to_vec())
-                .expect("the stream waits for the answer");
-            seen
-        });
-        let answer = ask(&connection, b"the request").await;
-        assert_eq!(
-            answer.as_deref(),
-            Some(b"the answer".as_slice()),
-            "the answer of the loop must reach the asker"
-        );
-        let (from, request) = time::timeout(Duration::from_secs(5), answerer)
-            .await
-            .expect("the answerer ends within 5 s")
-            .expect("the answerer does not panic");
-        assert_eq!(
-            from,
-            pair.client.id(),
-            "the request must carry the endpoint of its connection"
-        );
-        assert_eq!(
-            request, b"the request",
-            "the loop must get the request as it was sent"
-        );
-        pair.close().await;
-    }
-
-    #[tokio::test]
-    async fn a_loop_that_does_not_answer_gives_the_absent_answer_after_the_deadline() {
-        let (acceptor, mut asks) = acceptor(8, Duration::from_millis(300));
-        let pair = connected(acceptor).await;
-        let connection = pair.connection.clone();
-        // The loop takes the request and holds it, as a stalled loop does.
-        let holder = task::spawn(async move {
-            let held = next_ask(&mut asks).await;
-            time::sleep(Duration::from_secs(5)).await;
-            drop(held);
-        });
-        let answer = ask(&connection, b"the request").await;
-        assert_eq!(
-            answer.as_deref(),
-            Some(ABSENT.as_slice()),
-            "a stalled loop must not hold the stream: the asker gets the absent answer"
-        );
-        holder.abort();
-        pair.close().await;
-    }
-
-    #[tokio::test]
-    async fn a_request_longer_than_any_request_is_answered_absent_and_never_reaches_the_loop() {
-        let (acceptor, mut asks) = acceptor(8, Duration::from_secs(5));
-        let pair = connected(acceptor).await;
-        let connection = pair.connection.clone();
-        let answer = ask(&connection, &[7u8; 4096]).await;
-        assert_eq!(
-            answer.as_deref(),
-            Some(ABSENT.as_slice()),
-            "a request past the cap must get the absent answer"
-        );
-        assert!(
-            asks.try_recv().is_err(),
-            "a request past the cap must not reach the loop"
-        );
-        pair.close().await;
-    }
-
-    #[tokio::test]
-    async fn a_request_that_finds_the_inbox_full_is_answered_absent_at_once() {
-        let (acceptor, asks) = acceptor(1, Duration::from_secs(5));
-        let pair = connected(acceptor).await;
-        let connection = pair.connection.clone();
-        // The first request fills the inbox, and the loop does not take it.
-        let first = task::spawn({
-            let connection = connection.clone();
-            async move { ask(&connection, b"first").await }
-        });
-        let waited = Instant::now();
-        while asks.is_empty() {
-            assert!(
-                waited.elapsed() < Duration::from_secs(5),
-                "the first request must reach the inbox"
+    #[test]
+    fn a_request_reaches_the_loop_with_the_endpoint_of_its_connection_and_the_answer_goes_back() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (acceptor, mut asks) = acceptor(8, Duration::from_secs(5));
+            let pair = connected(acceptor).await;
+            let connection = pair.connection.clone();
+            let answerer = task::spawn(async move {
+                let ask = next_ask(&mut asks).await;
+                let seen = (ask.from, ask.request.clone());
+                ask.reply
+                    .send(b"the answer".to_vec())
+                    .expect("the stream waits for the answer");
+                seen
+            });
+            let answer = ask(&connection, b"the request").await;
+            assert_eq!(
+                answer.as_deref(),
+                Some(b"the answer".as_slice()),
+                "the answer of the loop must reach the asker"
             );
-            time::sleep(Duration::from_millis(10)).await;
-        }
-        let started = Instant::now();
-        let second = ask(&connection, b"second").await;
-        assert_eq!(
-            second.as_deref(),
-            Some(ABSENT.as_slice()),
-            "a request that finds the inbox full must get the absent answer"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "a full inbox must be answered at once and not at the deadline, it took {:?}",
-            started.elapsed()
-        );
-        first.abort();
-        drop(asks);
-        pair.close().await;
+            let (from, request) = time::timeout(Duration::from_secs(5), answerer)
+                .await
+                .expect("the answerer ends within 5 s")
+                .expect("the answerer does not panic");
+            assert_eq!(
+                from,
+                pair.client.id(),
+                "the request must carry the endpoint of its connection"
+            );
+            assert_eq!(
+                request, b"the request",
+                "the loop must get the request as it was sent"
+            );
+            pair.close().await;
+        });
     }
 
-    #[tokio::test]
-    async fn the_stream_past_the_cap_of_one_endpoint_is_answered_absent_at_once() {
-        let (acceptor, asks) = acceptor(16, Duration::from_secs(5));
-        let pair = connected(acceptor).await;
-        let connection = pair.connection.clone();
-        // The loop takes no request, so each stream that the cap lets in stays open.
-        let open: Vec<task::JoinHandle<Option<Vec<u8>>>> = (0..CHUNK_STREAMS_PER_PEER)
-            .map(|number| {
+    #[test]
+    fn a_loop_that_does_not_answer_gives_the_absent_answer_after_the_deadline() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (acceptor, mut asks) = acceptor(8, Duration::from_millis(300));
+            let pair = connected(acceptor).await;
+            let connection = pair.connection.clone();
+            // The loop takes the request and holds it, as a stalled loop does.
+            let holder = task::spawn(async move {
+                let held = next_ask(&mut asks).await;
+                time::sleep(Duration::from_secs(5)).await;
+                drop(held);
+            });
+            let answer = ask(&connection, b"the request").await;
+            assert_eq!(
+                answer.as_deref(),
+                Some(ABSENT.as_slice()),
+                "a stalled loop must not hold the stream: the asker gets the absent answer"
+            );
+            holder.abort();
+            pair.close().await;
+        });
+    }
+
+    #[test]
+    fn a_request_longer_than_any_request_is_answered_absent_and_never_reaches_the_loop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (acceptor, mut asks) = acceptor(8, Duration::from_secs(5));
+            let pair = connected(acceptor).await;
+            let connection = pair.connection.clone();
+            let answer = ask(&connection, &[7u8; 4096]).await;
+            assert_eq!(
+                answer.as_deref(),
+                Some(ABSENT.as_slice()),
+                "a request past the cap must get the absent answer"
+            );
+            assert!(
+                asks.try_recv().is_err(),
+                "a request past the cap must not reach the loop"
+            );
+            pair.close().await;
+        });
+    }
+
+    #[test]
+    fn a_request_that_finds_the_inbox_full_is_answered_absent_at_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (acceptor, asks) = acceptor(1, Duration::from_secs(5));
+            let pair = connected(acceptor).await;
+            let connection = pair.connection.clone();
+            // The first request fills the inbox, and the loop does not take it.
+            let first = task::spawn({
                 let connection = connection.clone();
-                task::spawn(async move {
-                    ask(
-                        &connection,
-                        &[u8::try_from(number).expect("a small number")],
-                    )
-                    .await
-                })
-            })
-            .collect();
-        let waited = Instant::now();
-        while asks.len() < CHUNK_STREAMS_PER_PEER {
-            assert!(
-                waited.elapsed() < Duration::from_secs(5),
-                "the streams under the cap must reach the loop"
+                async move { ask(&connection, b"first").await }
+            });
+            let waited = Instant::now();
+            while asks.is_empty() {
+                assert!(
+                    waited.elapsed() < Duration::from_secs(5),
+                    "the first request must reach the inbox"
+                );
+                time::sleep(Duration::from_millis(10)).await;
+            }
+            let started = Instant::now();
+            let second = ask(&connection, b"second").await;
+            assert_eq!(
+                second.as_deref(),
+                Some(ABSENT.as_slice()),
+                "a request that finds the inbox full must get the absent answer"
             );
-            time::sleep(Duration::from_millis(10)).await;
-        }
-        let started = Instant::now();
-        let past_cap = ask(&connection, b"past the cap").await;
-        assert_eq!(
-            past_cap.as_deref(),
-            Some(ABSENT.as_slice()),
-            "a stream past the cap of its endpoint must get the absent answer"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the stream past the cap must be answered at once, it took {:?}",
-            started.elapsed()
-        );
-        assert_eq!(
-            asks.len(),
-            CHUNK_STREAMS_PER_PEER,
-            "the stream past the cap must not reach the loop"
-        );
-        for stream in open {
-            stream.abort();
-        }
-        pair.close().await;
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "a full inbox must be answered at once and not at the deadline, it took {:?}",
+                started.elapsed()
+            );
+            first.abort();
+            drop(asks);
+            pair.close().await;
+        });
+    }
+
+    #[test]
+    fn the_stream_past_the_cap_of_one_endpoint_is_answered_absent_at_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (acceptor, asks) = acceptor(16, Duration::from_secs(5));
+            let pair = connected(acceptor).await;
+            let connection = pair.connection.clone();
+            // The loop takes no request, so each stream that the cap lets in stays open.
+            let open: Vec<task::JoinHandle<Option<Vec<u8>>>> = (0..CHUNK_STREAMS_PER_PEER)
+                .map(|number| {
+                    let connection = connection.clone();
+                    task::spawn(async move {
+                        ask(
+                            &connection,
+                            &[u8::try_from(number).expect("a small number")],
+                        )
+                        .await
+                    })
+                })
+                .collect();
+            let waited = Instant::now();
+            while asks.len() < CHUNK_STREAMS_PER_PEER {
+                assert!(
+                    waited.elapsed() < Duration::from_secs(5),
+                    "the streams under the cap must reach the loop"
+                );
+                time::sleep(Duration::from_millis(10)).await;
+            }
+            let started = Instant::now();
+            let past_cap = ask(&connection, b"past the cap").await;
+            assert_eq!(
+                past_cap.as_deref(),
+                Some(ABSENT.as_slice()),
+                "a stream past the cap of its endpoint must get the absent answer"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "the stream past the cap must be answered at once, it took {:?}",
+                started.elapsed()
+            );
+            assert_eq!(
+                asks.len(),
+                CHUNK_STREAMS_PER_PEER,
+                "the stream past the cap must not reach the loop"
+            );
+            for stream in open {
+                stream.abort();
+            }
+            pair.close().await;
+        });
     }
 
     #[test]

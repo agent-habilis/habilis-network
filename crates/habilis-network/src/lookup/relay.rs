@@ -3409,23 +3409,25 @@ mod tests {
     /// the 3 s probe timeout of iroh before its first net report, and has no home relay until
     /// then: a peer that dials it through the relay in that time meets a relay that drops the
     /// packet.
-    #[tokio::test]
-    async fn an_endpoint_on_a_plain_http_rung_is_online_without_the_probe_timeout() {
-        let (url, _server) = test_relay::spawn_plain()
-            .await
-            .expect("a plain local relay");
-        let endpoint = iroh::Endpoint::builder(presets::Minimal)
-            .relay_mode(super::one_rung_mode(Some(&url)))
-            .bind()
-            .await
-            .expect("bind an endpoint on the rung");
+    #[test]
+    fn an_endpoint_on_a_plain_http_rung_is_online_without_the_probe_timeout() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (url, _server) = test_relay::spawn_plain()
+                .await
+                .expect("a plain local relay");
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&url)))
+                .bind()
+                .await
+                .expect("bind an endpoint on the rung");
 
-        let online = time::timeout(std_Duration::from_secs(2), endpoint.online())
-            .await
-            .is_ok();
-        endpoint.close().await;
+            let online = time::timeout(std_Duration::from_secs(2), endpoint.online())
+                .await
+                .is_ok();
+            endpoint.close().await;
 
-        assert!(online, "no home relay after 2 s");
+            assert!(online, "no home relay after 2 s");
+        });
     }
 
     #[test]

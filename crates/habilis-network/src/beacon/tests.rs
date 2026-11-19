@@ -1347,32 +1347,35 @@ fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
 /// A rung that a foreign listener held and that this member then binds is its own rung: it
 /// is not foreign any more, or `register_rendezvous` would leave it out of the book after each
 /// heal.
-#[tokio::test]
-async fn a_rung_that_this_member_binds_is_no_longer_foreign() {
-    let socket = net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0)).expect("a free loopback port");
-    let rung = socket.local_addr().expect("its address").port();
-    drop(socket);
-    let mut params = public_params();
-    params.bind_ports = vec![rung];
-    let peer = loopback_endpoint().await;
-    let book = lookup::address_book(&peer);
-    let mut beacon = None;
-    let mut rungs = super::RungWatch::detached();
-    rungs.mark_foreign(rung);
+#[test]
+fn a_rung_that_this_member_binds_is_no_longer_foreign() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let socket =
+            net::UdpSocket::bind((net::Ipv4Addr::LOCALHOST, 0)).expect("a free loopback port");
+        let rung = socket.local_addr().expect("its address").port();
+        drop(socket);
+        let mut params = public_params();
+        params.bind_ports = vec![rung];
+        let peer = loopback_endpoint().await;
+        let book = lookup::address_book(&peer);
+        let mut beacon = None;
+        let mut rungs = super::RungWatch::detached();
+        rungs.mark_foreign(rung);
 
-    let outcome = claim::claim_holder(&params, &peer, &book, &mut beacon, &mut rungs).await;
+        let outcome = claim::claim_holder(&params, &peer, &book, &mut beacon, &mut rungs).await;
 
-    if let Some(held) = beacon.take() {
-        held.shed_and_wait().await;
-    }
-    peer.close().await;
-    assert_eq!(outcome, super::Held::Claimed, "the free rung is claimed");
-    let no_rungs: Vec<u16> = Vec::new();
-    assert_eq!(
-        rungs.withheld_rungs(),
-        no_rungs,
-        "the rung of our own beacon is still read as foreign"
-    );
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        peer.close().await;
+        assert_eq!(outcome, super::Held::Claimed, "the free rung is claimed");
+        let no_rungs: Vec<u16> = Vec::new();
+        assert_eq!(
+            rungs.withheld_rungs(),
+            no_rungs,
+            "the rung of our own beacon is still read as foreign"
+        );
+    });
 }
 
 /// The entry after a claim holds the relay rung of the rendezvous and the direct addresses of
