@@ -100,7 +100,4 @@ allowed-duplicate-crates = [
     "spin",
     # embedded-io: the lock keeps two lines and the lint counts both; no graph we build reaches them.
     "embedded-io",
-    # n0-mainline 0.5 (iroh-mainline-address-lookup) takes noq-udp from crates.io beside the noq fork
-    # of iroh; remove this line when the address lookup moves to n0-mainline 0.8 on our fork.
-    "noq-udp",
 ]

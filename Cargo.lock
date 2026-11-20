@@ -62,12 +62,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "allocator-api2"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1721,7 +1715,7 @@ dependencies = [
  "iroh-gossip",
  "n0-future",
  "n0-watcher",
- "noq-udp 1.1.0 (git+https://github.com/agent-habilis/noq?rev=6c6b21708c4c33a194572ec82e42627c5631ed82)",
+ "noq-udp",
  "num-traits",
  "tokio",
  "tracing",
@@ -1742,7 +1736,7 @@ dependencies = [
  "iroh-relay",
  "n0-future",
  "n0-watcher",
- "noq-udp 1.1.0 (git+https://github.com/agent-habilis/noq?rev=6c6b21708c4c33a194572ec82e42627c5631ed82)",
+ "noq-udp",
  "postcard",
  "serde",
  "tokio",
@@ -1775,7 +1769,7 @@ dependencies = [
  "n0-error",
  "n0-future",
  "n0-watcher",
- "noq-udp 1.1.0 (git+https://github.com/agent-habilis/noq?rev=6c6b21708c4c33a194572ec82e42627c5631ed82)",
+ "noq-udp",
  "num-traits",
  "rand 0.9.4",
  "serde",
@@ -1943,8 +1937,6 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "allocator-api2",
- "equivalent",
  "foldhash",
 ]
 
@@ -2405,7 +2397,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=dcacb07c727ef0c1c04b310525a9ee6f7eaf518f#dcacb07c727ef0c1c04b310525a9ee6f7eaf518f"
+source = "git+https://github.com/agent-habilis/iroh?rev=aa9814fb0f3e9a31cef3be5622ef5731c4db61fd#aa9814fb0f3e9a31cef3be5622ef5731c4db61fd"
 dependencies = [
  "axum",
  "backon",
@@ -2431,7 +2423,7 @@ dependencies = [
  "netwatch",
  "noq",
  "noq-proto",
- "noq-udp 1.1.0 (git+https://github.com/agent-habilis/noq?rev=6c6b21708c4c33a194572ec82e42627c5631ed82)",
+ "noq-udp",
  "papaya",
  "pin-project",
  "portable-atomic",
@@ -2456,7 +2448,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=dcacb07c727ef0c1c04b310525a9ee6f7eaf518f#dcacb07c727ef0c1c04b310525a9ee6f7eaf518f"
+source = "git+https://github.com/agent-habilis/iroh?rev=aa9814fb0f3e9a31cef3be5622ef5731c4db61fd#aa9814fb0f3e9a31cef3be5622ef5731c4db61fd"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -2474,7 +2466,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=dcacb07c727ef0c1c04b310525a9ee6f7eaf518f#dcacb07c727ef0c1c04b310525a9ee6f7eaf518f"
+source = "git+https://github.com/agent-habilis/iroh?rev=aa9814fb0f3e9a31cef3be5622ef5731c4db61fd#aa9814fb0f3e9a31cef3be5622ef5731c4db61fd"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -2497,7 +2489,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.104.0"
-source = "git+https://github.com/agent-habilis/iroh-gossip?rev=8395a325a100d9972cdfa0442184ffa403ce61bf#8395a325a100d9972cdfa0442184ffa403ce61bf"
+source = "git+https://github.com/agent-habilis/iroh-gossip?rev=d661c54ac749cdd0596556cb340718df4ce1d224#d661c54ac749cdd0596556cb340718df4ce1d224"
 dependencies = [
  "blake3",
  "bytes",
@@ -2523,7 +2515,7 @@ dependencies = [
 [[package]]
 name = "iroh-mainline-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=7bb8c9b0ebdf56da177cd8bd2eaba5742e323f23#7bb8c9b0ebdf56da177cd8bd2eaba5742e323f23"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=75a94915461d097328934a0d596a221807e5db55#75a94915461d097328934a0d596a221807e5db55"
 dependencies = [
  "derive_more",
  "iroh",
@@ -2540,7 +2532,7 @@ dependencies = [
 [[package]]
 name = "iroh-mdns-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=7bb8c9b0ebdf56da177cd8bd2eaba5742e323f23#7bb8c9b0ebdf56da177cd8bd2eaba5742e323f23"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=75a94915461d097328934a0d596a221807e5db55#75a94915461d097328934a0d596a221807e5db55"
 dependencies = [
  "data-encoding",
  "derive_more",
@@ -2594,7 +2586,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=dcacb07c727ef0c1c04b310525a9ee6f7eaf518f#dcacb07c727ef0c1c04b310525a9ee6f7eaf518f"
+source = "git+https://github.com/agent-habilis/iroh?rev=aa9814fb0f3e9a31cef3be5622ef5731c4db61fd#aa9814fb0f3e9a31cef3be5622ef5731c4db61fd"
 dependencies = [
  "blake3",
  "bytes",
@@ -2861,9 +2853,9 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.18.1"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b6180140927ee907000b0aa540091f6ea512ead4447c92b8fc35bc72788a5a6"
+checksum = "4a9f71e3591c7ec44d3e563e87bf14ddc2bada8519dca046e5b0e560cd004e2d"
 dependencies = [
  "hashbrown 0.17.1",
 ]
@@ -2996,21 +2988,19 @@ dependencies = [
 
 [[package]]
 name = "n0-mainline"
-version = "0.5.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d976b09e7ed101cc2571d9423584e3c3eea38afad32fc305c1beae0a4eeadcde"
+checksum = "9624231d16070e2c4de0bbd37246eb8052ffdb832d6a3fa501abdbf4cb9549c9"
 dependencies = [
  "crc",
  "dyn-clone",
  "ed25519-dalek",
  "futures-core",
+ "hex",
  "lru",
  "n0-error",
- "noq-udp 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "noq-udp",
  "rand 0.10.2",
- "serde",
- "serde_bencode",
- "serde_bytes",
  "sha1_smol",
  "tokio",
  "tracing",
@@ -3111,7 +3101,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.19.1"
-source = "git+https://github.com/agent-habilis/net-tools?rev=6862314909c147f49dfac22daf200bb59c1439f6#6862314909c147f49dfac22daf200bb59c1439f6"
+source = "git+https://github.com/agent-habilis/net-tools?rev=9241a12a8273f092a4cb1a0d28a1244a3c148341#9241a12a8273f092a4cb1a0d28a1244a3c148341"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3128,7 +3118,7 @@ dependencies = [
  "netlink-packet-route",
  "netlink-proto",
  "netlink-sys",
- "noq-udp 1.1.0 (git+https://github.com/agent-habilis/noq?rev=6c6b21708c4c33a194572ec82e42627c5631ed82)",
+ "noq-udp",
  "objc2-core-foundation",
  "objc2-system-configuration",
  "pin-project-lite",
@@ -3166,13 +3156,13 @@ dependencies = [
 [[package]]
 name = "noq"
 version = "1.1.0"
-source = "git+https://github.com/agent-habilis/noq?rev=6c6b21708c4c33a194572ec82e42627c5631ed82#6c6b21708c4c33a194572ec82e42627c5631ed82"
+source = "git+https://github.com/agent-habilis/noq?rev=95c4a2edea4d93783b94fe4d83ed1e9e084472ee#95c4a2edea4d93783b94fe4d83ed1e9e084472ee"
 dependencies = [
  "bytes",
  "cfg_aliases",
  "derive_more",
  "noq-proto",
- "noq-udp 1.1.0 (git+https://github.com/agent-habilis/noq?rev=6c6b21708c4c33a194572ec82e42627c5631ed82)",
+ "noq-udp",
  "pin-project-lite",
  "rustc-hash",
  "rustls",
@@ -3187,7 +3177,7 @@ dependencies = [
 [[package]]
 name = "noq-proto"
 version = "1.1.0"
-source = "git+https://github.com/agent-habilis/noq?rev=6c6b21708c4c33a194572ec82e42627c5631ed82#6c6b21708c4c33a194572ec82e42627c5631ed82"
+source = "git+https://github.com/agent-habilis/noq?rev=95c4a2edea4d93783b94fe4d83ed1e9e084472ee#95c4a2edea4d93783b94fe4d83ed1e9e084472ee"
 dependencies = [
  "aes-gcm",
  "bytes",
@@ -3213,21 +3203,9 @@ dependencies = [
 
 [[package]]
 name = "noq-udp"
-version = "1.1.0"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bde7a5d5102f1cff03d482240f0ed20551661f63663620f4b26112ed751165e9"
-dependencies = [
- "cfg_aliases",
- "libc",
- "socket2",
- "tracing",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "noq-udp"
-version = "1.1.0"
-source = "git+https://github.com/agent-habilis/noq?rev=6c6b21708c4c33a194572ec82e42627c5631ed82#6c6b21708c4c33a194572ec82e42627c5631ed82"
+checksum = "716df6621d528211d75608903c0dd54bee78745444cdcbb791bcfbc55717a29f"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -3652,7 +3630,7 @@ dependencies = [
 [[package]]
 name = "portmapper"
 version = "0.19.1"
-source = "git+https://github.com/agent-habilis/net-tools?rev=6862314909c147f49dfac22daf200bb59c1439f6#6862314909c147f49dfac22daf200bb59c1439f6"
+source = "git+https://github.com/agent-habilis/net-tools?rev=9241a12a8273f092a4cb1a0d28a1244a3c148341#9241a12a8273f092a4cb1a0d28a1244a3c148341"
 dependencies = [
  "base64",
  "bytes",
@@ -4292,16 +4270,6 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
-]
-
-[[package]]
-name = "serde_bencode"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a70dfc7b7438b99896e7f8992363ab8e2c4ba26aa5ec675d32d1c3c2c33d413e"
-dependencies = [
- "serde",
- "serde_bytes",
 ]
 
 [[package]]
