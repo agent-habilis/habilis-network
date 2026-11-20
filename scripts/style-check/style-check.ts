@@ -650,6 +650,12 @@ const RULES: Rule[] = [
     why: "Do not run code before main().",
   },
   {
+    name: "log_target",
+    pattern: /\btarget:\s*"crate::/,
+    glob: "*.rs",
+    why: 'A log target is a string, so "crate::" names no module and no pin matches it. Write "habilis_network::<subsystem>".',
+  },
+  {
     name: "block_doc",
     pattern: /^\s*\/\*[*!]($|[^*/])/,
     glob: "*.rs",
