@@ -51,11 +51,12 @@ pub(crate) fn next_fill(
     });
     let cooled = candidates.filter(|address| !state.relink_on_cooldown(address.id, now));
     let cooled: Vec<&iroh::EndpointAddr> = cooled.collect();
-    let mut free: Vec<&iroh::EndpointAddr> = cooled
-        .iter()
-        .copied()
-        .filter(|address| !state.graft_blocked(address.id, now))
-        .collect();
+    let mut free: Vec<&iroh::EndpointAddr> = Vec::new();
+    for address in &cooled {
+        if !state.graft_blocked(address.id, now) {
+            free.push(address);
+        }
+    }
     // Every free peer refused lately, and the node is short of G with no link gained: it asks one of
     // them with a high priority request (see `graft_request`).
     if free.is_empty() && state.forced_neighbor_ready(now) {
@@ -114,6 +115,8 @@ pub(crate) fn isolated_candidate(
 /// fast window is open, with a low priority request that evicts nobody. The lost peers are
 /// asked by the regraft, and they are full; the heal tick, 15 s later, was the first attempt to
 /// reach a peer with a free slot. The relink cooldown sends each tick to another peer.
+/// When the window of a forced request ends (see `graft_request`) and every peer refused, the pick
+/// can be a refusing peer, and the request is a forced one.
 pub(crate) async fn refill_isolated(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let now = Instant::now();
     let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
@@ -192,19 +195,19 @@ pub(crate) fn retry_candidates_at(
     let cooled: Vec<&iroh::EndpointAddr> = direct_ok
         .filter(|address| !state.relink_on_cooldown(address.id, now))
         .collect();
-    let mut peers: Vec<iroh::EndpointAddr> = cooled
-        .iter()
-        .copied()
-        .filter(|address| !state.graft_blocked(address.id, now))
-        .cloned()
-        .collect();
+    let mut peers: Vec<iroh::EndpointAddr> = Vec::new();
+    for address in &cooled {
+        if !state.graft_blocked(address.id, now) {
+            peers.push((*address).clone());
+        }
+    }
     // The same rule as in `next_fill`: with no relay payload this is the only path that grafts,
     // and it forces one random refusing peer, as `next_fill` does.
     if peers.is_empty() && state.forced_neighbor_ready(now) {
         let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
-        peers = pick
-            .checked_rem(cooled.len())
-            .and_then(|index| cooled.get(index))
+        let index = pick.checked_rem(cooled.len());
+        let refusing = index.and_then(|index| cooled.get(index));
+        peers = refusing
             .map(|address| (*address).clone())
             .into_iter()
             .collect();
