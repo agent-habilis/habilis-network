@@ -3,7 +3,9 @@
 use super::plan;
 use super::plan::Plan;
 use super::underlay_web_rtc::UnderlayWebRtc;
+use crate::transport::probe::PathKind;
 use crate::transport::webrtc;
+use std::collections::HashMap;
 
 use iroh::EndpointId;
 
@@ -55,11 +57,18 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
         .allowed
         .replace(neighbors.iter().map(|(_, address)| address.id).collect());
 
-    let wanted_addrs = plan::wanted_underlays(&neighbors, state.local_udp_transport, |member| {
-        state.pair_path_kind(member)
-    });
+    // One read for each neighbor: a read locks the admission table, and the two plans must see
+    // the same kinds.
+    let mut kinds: HashMap<EndpointId, PathKind> = HashMap::new();
+    for (member, _) in &neighbors {
+        if let Some(kind) = state.pair_path_kind(*member) {
+            kinds.insert(*member, kind);
+        }
+    }
+    let kind_of = |member: EndpointId| kinds.get(&member).copied();
+    let wanted_addrs = plan::wanted_underlays(&neighbors, state.local_udp_transport, kind_of);
     let wanted: Vec<EndpointId> = wanted_addrs.iter().map(|address| address.id).collect();
-    let kept = plan::kept_underlays(&neighbors, |member| state.pair_path_kind(member));
+    let kept = plan::kept_underlays(&neighbors, kind_of);
     let held: Vec<_> = underlay.handle.live_peer_ids().collect();
     let Plan { dial, detach } = plan(
         underlay.endpoint.id(),
@@ -68,37 +77,30 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
         &held,
         underlay.admission.room(),
     );
-    let describe = |member: &EndpointId| {
-        (
-            member.fmt_short().to_string(),
-            state.pair_path_kind(*member),
-        )
-    };
-    let kinds: Vec<_> = neighbors
-        .iter()
-        .map(|(member, _)| describe(member))
-        .collect();
-    let local = underlay.endpoint.id().fmt_short();
-    let linked = state.linked_endpoints.len();
-    let members = neighbors.len();
-    let wanted_count = wanted.len();
-    let kept_count = kept.len();
-    let held_count = held.len();
-    let dial_count = dial.len();
-    let detach_count = detach.len();
-    tracing::debug!(
-        target: LOG_TARGET,
-        local = %local,
-        linked,
-        members,
-        kinds = ?kinds,
-        wanted = wanted_count,
-        kept = kept_count,
-        held = held_count,
-        dial = dial_count,
-        detach = detach_count,
-        "underlay tick"
-    );
+    if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG) {
+        let mut described: Vec<(String, Option<PathKind>)> = Vec::new();
+        for (member, _) in &neighbors {
+            described.push((member.fmt_short().to_string(), kind_of(*member)));
+        }
+        let local = underlay.endpoint.id().fmt_short();
+        let linked = state.linked_endpoints.len();
+        let members = neighbors.len();
+        let (wanted_count, kept_count, held_count) = (wanted.len(), kept.len(), held.len());
+        let (dial_count, detach_count) = (dial.len(), detach.len());
+        tracing::debug!(
+            target: LOG_TARGET,
+            local = %local,
+            linked,
+            members,
+            kinds = ?described,
+            wanted = wanted_count,
+            kept = kept_count,
+            held = held_count,
+            dial = dial_count,
+            detach = detach_count,
+            "underlay tick"
+        );
+    }
 
     for peer in &wanted {
         if !held.contains(peer) && !dial.contains(peer) {
