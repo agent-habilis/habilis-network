@@ -29,11 +29,7 @@ impl Observed {
     pub(crate) fn refused() -> Self {
         Self {
             surfaceable: false,
-            update: membership_update::MembershipUpdate {
-                returned: false,
-                joined_new: false,
-                stale: true,
-            },
+            update: membership_update::MembershipUpdate::STALE,
         }
     }
 }

@@ -85,15 +85,14 @@ impl Listings {
         }
 
         // New mesh. Bound the map by evicting the stalest entry.
-        let oldest = self
-            .entries
-            .iter()
-            .min_by_key(|(_, listing)| listing.last_seen);
-        let stalest = oldest.map(|(id, _)| id.clone());
-        if self.entries.len() >= MAX_LISTINGS
-            && let Some(stalest) = stalest
-        {
-            self.entries.remove(&stalest);
+        if self.entries.len() >= MAX_LISTINGS {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, listing)| listing.last_seen);
+            if let Some(stalest) = oldest.map(|(id, _)| id.clone()) {
+                self.entries.remove(&stalest);
+            }
         }
         let public = !mesh.is_loopback();
         let password = mesh.requires_password();
