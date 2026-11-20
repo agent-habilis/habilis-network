@@ -198,7 +198,7 @@ impl NodeSink for JsonSink {
                 let _ = self.events.send(json);
             }
             Err(error) => tracing::warn!(
-                target: "crate::messages",
+                target: "habilis_network::messages",
                 %error,
                 "dropping an unserializable node event"
             ),
