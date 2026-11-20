@@ -341,20 +341,6 @@ impl Member {
             .unwrap_or(false)
     }
 
-    /// The lane that a directed frame to `peer` takes now, as the roster names it:
-    /// `relay-only` is the one where the frame is parked until a direct path is proven.
-    async fn lane_to(&self, peer: &str) -> Option<String> {
-        let json = self
-            .membership
-            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
-            .await
-            .expect("the loop answers");
-        let roster: serde_json::Value = serde_json::from_str(&json).ok()?;
-        let mut entries = roster["peers"].as_array()?.iter();
-        let found = entries.find(|entry| entry["nickname"] == peer);
-        found.and_then(|entry| entry["transport"].as_str().map(str::to_owned))
-    }
-
     fn ports(&self) -> Vec<u16> {
         self.membership.node.bound_ports().to_vec()
     }
@@ -892,17 +878,19 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
     }
 }
 
-/// A frame that is parked for the session arrives once the session is up. The sender has the
-/// higher id, so nobody but its own engine can see IP go: the proof of a direct path is taken
-/// back, the frames are parked (the roster reads `relay-only`), and the session carries them
-/// when it attaches. Every probe that was sent while the lane read `relay-only` must reach bob,
-/// and the run prints how long after the rung changed the last one arrived.
+/// A frame that is accepted while IP goes arrives once the session is up. The sender has the
+/// higher id, so nobody but its own engine can see IP go. The lane reads `relay-only` only after
+/// a probe proved that the pair has no direct path, so a frame that goes before that proof dials
+/// and waits for the session, and the session carries it when it attaches. Every probe that was
+/// sent before the rung read `webrtc`, and that the send accepted, must reach bob. A send that
+/// the engine refuses is not owed: the caller retries it. The run prints how long after the
+/// rung changed the last one arrived.
 #[test]
 #[ignore = "run by cargo task matrix"]
-fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
+fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_goes() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        const NAME: &str = "udp_webrtc_ip_direct_parks_a_frame";
+        const NAME: &str = "udp_webrtc_ip_direct_carries_a_frame_sent_while_ip_goes";
         const AFTER_THE_RUNG: Duration = Duration::from_secs(3);
         let (_, cell) = CELLS
             .iter()
@@ -920,41 +908,23 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
             apply(cut, &alice, &bob, &carol).await;
         }
 
-        // (text, the lane read before the send, when it went)
-        let mut sent: Vec<(String, bool, Instant)> = Vec::new();
+        // (text, the send was accepted, the rung was not webrtc yet when it went)
+        let mut sent: Vec<(String, bool, bool)> = Vec::new();
         let started = Instant::now();
         let mut on_the_rung_since: Option<Instant> = None;
-        let mut next_probe = Instant::now();
-        let mut last_parked_send: Option<Instant> = None;
-        // The lane reads `relay-only` only between the moment the proof is taken back and the
-        // attach, well under a second: so the lane is read every 20 ms, and a frame goes at once
-        // while it reads so (at most one every 100 ms), besides the probe of every second.
         while started.elapsed() < STEP_DEADLINE {
-            let parked = alice.lane_to("bob").await.as_deref() == Some("relay-only");
-            let due = Instant::now() >= next_probe;
-            let extra = parked
-                && last_parked_send
-                    .is_none_or(|sent_at| sent_at.elapsed() >= Duration::from_millis(100));
-            if due || extra {
-                let text = format!("parked {NAME} {}", sent.len());
-                let _ = alice.send("bob", &text).await;
-                sent.push((text, parked, Instant::now()));
-                if parked {
-                    last_parked_send = Some(Instant::now());
+            let text = format!("while ip goes {NAME} {}", sent.len());
+            let accepted = alice.send("bob", &text).await.is_ok();
+            sent.push((text, accepted, on_the_rung_since.is_none()));
+            if alice.rung_to("bob").await == Some("webrtc") {
+                let since = *on_the_rung_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= AFTER_THE_RUNG {
+                    break;
                 }
+            } else {
+                on_the_rung_since = None;
             }
-            if due {
-                next_probe = Instant::now() + Duration::from_secs(1);
-                if alice.rung_to("bob").await == Some("webrtc") {
-                    let since = *on_the_rung_since.get_or_insert_with(Instant::now);
-                    if since.elapsed() >= AFTER_THE_RUNG {
-                        break;
-                    }
-                } else {
-                    on_the_rung_since = None;
-                }
-            }
-            time::sleep(Duration::from_millis(20)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         let on_the_rung = on_the_rung_since.unwrap_or_else(|| {
             panic!(
@@ -963,30 +933,29 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
             )
         });
 
-        let parked: Vec<&(String, bool, Instant)> = sent.iter().filter(|probe| probe.1).collect();
+        let owed: Vec<&(String, bool, bool)> =
+            sent.iter().filter(|probe| probe.1 && probe.2).collect();
         assert!(
-            !parked.is_empty(),
-            "{NAME}: no probe went while the lane read relay-only, so the test proved nothing"
+            !owed.is_empty(),
+            "{NAME}: the send accepted no probe before the rung read webrtc, so the test proved nothing"
         );
         let waiting = Instant::now();
         let mut late = Duration::ZERO;
-        for (text, _, _) in &parked {
+        for (text, _, _) in &owed {
             while !bob.saw_msg(text) {
                 assert!(
                     waiting.elapsed() < PAYLOAD_DEADLINE,
-                    "{NAME}: the frame {text:?} was parked and never reached bob"
+                    "{NAME}: the frame {text:?} was accepted before the session and never reached bob"
                 );
                 time::sleep(Duration::from_millis(250)).await;
             }
             late = late.max(on_the_rung.elapsed());
         }
-        let first_parked = parked.first().map(|probe| probe.2.duration_since(started));
         eprintln!(
-            "DIAG {NAME}: {} probes, {} sent while the lane read relay-only (first after {:?}), \
-         the last one reached bob {:?} after the rung was first read",
+            "DIAG {NAME}: {} probes, {} owed (accepted before the rung read webrtc), \
+             the last one reached bob {:?} after the rung was first read",
             sent.len(),
-            parked.len(),
-            first_parked,
+            owed.len(),
             late,
         );
         for member in [alice, bob, carol] {
