@@ -38,9 +38,10 @@ pub(crate) struct GraftTarget {
 ///
 /// A node that holds fewer than G links and gained none for its window (`FORCE_NEIGHBOR_AFTER`,
 /// doubled for each forced request of its streak up to `STARVED`, then stretched by its jitter, so
-/// at most 1.5 times `STARVED`) asks one peer with a `Force` instead, at most once per window: when two members are one link short and linked to each other,
-/// every other member is full and refuses every low priority request, and the backoffs of the free
-/// peers overlap, so a rule that waits for them all would never fire.
+/// at most 1.5 times `STARVED`) asks one peer with a `Force` instead, at most once per window: when
+/// two members are one link short and linked to each other, every other member is full and refuses
+/// every low priority request, and the backoffs of the free peers overlap, so a rule that waits for
+/// them all would never fire.
 ///
 /// When the links of all the members add up to an odd number, one member stays one link short and
 /// no member can fill it: a forced request only moves that gap to the member that lost a link. The

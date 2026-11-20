@@ -743,9 +743,10 @@ pub const STARVED: Duration = Duration::from_mins(5);
 /// requests. Each node stretches it by a fixed share up to 50%, so that 60 s becomes 60 to
 /// 90 s. The window doubles with each request up to `STARVED`, and the jitter comes after that cap,
 /// so a window is at most 1.5 times `STARVED`. When the views of two members are one link short
-/// and the two are linked to each other, every free peer is full and refuses a low priority request for ever, and `STARVED` does not
-/// help: it starts only at G - 2. A high priority request makes the full peer drop exactly one
-/// neighbor, which then has a free slot. One request per member per window.
+/// and the two are linked to each other, every free peer is full and refuses a low priority
+/// request for ever, and `STARVED` does not help: it starts only at G - 2. A high priority request
+/// makes the full peer drop exactly one neighbor, which then has a free slot. One request per
+/// member per window.
 pub const FORCE_NEIGHBOR_AFTER: Duration = Duration::from_secs(60);
 
 /// How often an advertising `create` re-broadcasts its mesh id into
