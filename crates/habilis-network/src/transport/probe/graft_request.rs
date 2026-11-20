@@ -238,7 +238,13 @@ mod tests {
             "the first call of the window forces"
         );
         assert_eq!(
-            graft_request(&mut state, target(1), TARGET, due + Duration::from_secs(1), true),
+            graft_request(
+                &mut state,
+                target(1),
+                TARGET,
+                due + Duration::from_secs(1),
+                true
+            ),
             GraftRequest::Skip,
             "a second call inside the window does not"
         );
