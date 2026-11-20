@@ -18,11 +18,9 @@ use std::{fs, path};
 use tokio::io;
 /// Client-side: send an IPC command to the running server and return the raw JSON response.
 ///
-/// # Panics
-/// If called with a command that carries no mesh id — never: `Info` uses `send_to_path`.
 /// # Errors
-/// [`NoDaemon`] when no server is listening; otherwise an invalid socket name
-/// or a failed request/response round trip.
+/// [`NoDaemon`] when no server is listening; otherwise a command that names no mesh (`Info`
+/// uses `send_to_path`), an invalid socket name or a failed request/response round trip.
 ///
 /// # Examples
 ///
@@ -48,9 +46,11 @@ where
     Cmd: Serialize + Addressed,
 {
     use interprocess::local_socket::traits::tokio::Stream as _;
-    let mesh = command
-        .mesh_id()
-        .expect("send() is only used for mesh-addressed commands; Info uses send_to_path");
+    let mesh = command.mesh_id().ok_or_else(|| {
+        IpcError::internal(anyhow::anyhow!(
+            "the command names no mesh; send it with send_to_path"
+        ))
+    })?;
     let path = listener::socket_path(base, mesh, nickname);
     let name = listener::to_name(&path)
         .map_err(|error| IpcError::internal(anyhow::anyhow!("invalid socket name: {error}")))?;

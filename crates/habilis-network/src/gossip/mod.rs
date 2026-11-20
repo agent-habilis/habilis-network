@@ -22,7 +22,6 @@ mod recv;
 pub(crate) mod serve_budget;
 pub(crate) mod split;
 
-#[cfg(feature = "multihop")]
 mod json_body;
 mod path_summary;
 
@@ -42,7 +41,6 @@ const _: () = assert!(
     "MAX_MESSAGE_SIZE leaves too little headroom under iroh-gossip's DEFAULT_MAX_MESSAGE_SIZE"
 );
 
-#[cfg(feature = "multihop")]
 pub(crate) use json_body::json_body;
 #[cfg(test)]
 pub(crate) use merge_ctx::peer_info_seal_key;

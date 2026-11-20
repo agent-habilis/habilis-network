@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
-
 use crate::protocol::crypto;
 use crate::protocol::meshes::LookupOpts;
 use crate::transport::PayloadPath;
@@ -68,7 +66,7 @@ impl OffloadRequest {
 /// The ticket is the whole result: `encode()` it into whatever reference the
 /// application uses, ship that string over gossip, and the peer calls
 /// [`fetch`](super::fetch). Content-addressed dedup means offloading identical bytes twice
-/// returns the first ticket without re-paying the hash or the Argon2 stretch.
+/// returns the first ticket without re-paying the Argon2 stretch.
 ///
 /// `relay_transport` must be the mesh's `transport.relay_transport`
 /// (`mesh.transport().relay_transport`): the ticket carries it so the fetcher
@@ -78,9 +76,6 @@ impl OffloadRequest {
 /// # Errors
 /// Binding the blob server, hashing, or snapshotting the file fails (e.g. the
 /// file is unreadable or exceeds `MAX_BLOB_BYTES`).
-///
-/// # Panics
-/// Panics if an internal invariant is violated.
 ///
 /// # Examples
 ///
@@ -101,31 +96,17 @@ pub async fn offload(
     relay_transport: PayloadPath,
     request: OffloadRequest,
 ) -> Result<BlobTicket, BlobError> {
-    offload_checked(server, lookups, relay_transport, request)
-        .await
-        .map_err(BlobError::internal)
-}
-
-async fn offload_checked(
-    server: &mut Option<BlobServer>,
-    lookups: &LookupOpts,
-    relay_transport: PayloadPath,
-    request: OffloadRequest,
-) -> Result<BlobTicket> {
     let OffloadRequest {
         path,
         spool_dir,
         content_id,
         password,
     } = request;
-    if server.is_none() {
-        *server =
-            Some(BlobServer::start(lookups.clone(), spool_dir, password, relay_transport).await?);
-    }
-    server
-        .as_ref()
-        .expect("server set above")
-        .register(&path, content_id)
-        .await
-        .map_err(anyhow::Error::from)
+    let server = match server {
+        Some(server) => server,
+        None => server.insert(
+            BlobServer::start(lookups.clone(), spool_dir, password, relay_transport).await?,
+        ),
+    };
+    server.register(&path, content_id).await
 }
