@@ -37,22 +37,22 @@ pub(crate) struct GraftTarget {
 /// too, so that its silence reads as a refusal.
 ///
 /// A node that holds fewer than G links and gained none for its window (`FORCE_NEIGHBOR_AFTER`,
-/// doubled for each forced request of its streak, at most `STARVED`) asks one peer with a `Force`
-/// instead, at most once per window: when two members are one link short and linked to each other,
+/// doubled for each forced request of its streak up to `STARVED`, then stretched by its jitter, so
+/// at most 1.5 times `STARVED`) asks one peer with a `Force` instead, at most once per window: when two members are one link short and linked to each other,
 /// every other member is full and refuses every low priority request, and the backoffs of the free
 /// peers overlap, so a rule that waits for them all would never fire.
 ///
 /// When the links of all the members add up to an odd number, one member stays one link short and
 /// no member can fill it: a forced request only moves that gap to the member that lost a link. The
 /// doubling does not stop this, because the node that loses the link has no streak of its own. So
-/// the member with the greatest endpoint among those seen alive for `STARVED` does not force when
-/// it is one link short (`is_anchor`): the gap walks until it reaches that member, and stays. The
+/// the live member with the greatest endpoint does not force when it is one link short
+/// (`is_anchor`): the gap walks until it reaches that member, and stays. In the advisor model the
 /// walk takes about one forced request per member, 75 to 105 s each. The same rule slows the case
-/// of two short members when one of them is the anchor, by up to 27 min at the worst (a mesh of
-/// G plus 2 members), because only the other can force. A member that thinks it is the anchor in
-/// a split roster, and a member that is silent but listed, do not make a deadlock: a linked pair
-/// cannot both be the greatest. With members of different caps the gap is bounded by the
-/// doubling, not removed.
+/// of two short members when one of them is the anchor, because only the other can force: by up to
+/// 27 min at the worst in that model (a mesh of G plus 2 members). A member that thinks it is the
+/// anchor in a split roster, and a member that is silent but listed, do not make a deadlock: a
+/// linked pair cannot both be the greatest. With members of different caps the gap is bounded by
+/// the doubling, not removed.
 ///
 /// A low priority request evicts nobody, so a node that arrives when every other node is
 /// full gets no link from it. A `paced` graft (the fill tick, a proven direct path) asks
@@ -448,10 +448,10 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let [low, middle, high, _] = ids_in_order();
-        let mut state = anchor_node(start, middle, &[("low-a", low)]);
-        let heard = start.checked_sub(STARVED).unwrap_or(start);
-        state.live_member_for_test("gone", high, heard);
-        let late = start + FORCE_NEIGHBOR_AFTER * 2;
+        let late = start + STARVED + FORCE_NEIGHBOR_AFTER * 2;
+        let mut state = anchor_node(start, middle, &[]);
+        state.live_member_for_test("low-a", low, start + STARVED);
+        state.live_member_for_test("gone", high, start);
         assert!(
             !state.forced_neighbor_ready(late),
             "a member that was silent for STARVED does not make this node a forcing one"
@@ -522,5 +522,27 @@ mod tests {
             );
             now += Duration::from_secs(30);
         }
+    }
+
+    #[test]
+    fn a_member_that_lost_every_link_starts_the_record_over_when_it_comes_back() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut state = short_node(TARGET - 1, start);
+        assert!(
+            state.forced_neighbor_due(start + FORCE_NEIGHBOR_AFTER),
+            "the request is due when the window ends"
+        );
+        assert_eq!(state.force_streak, 1, "a forced request counts");
+        for seed in 0..TARGET - 1 {
+            state.unlink(testing::endpoint_id(
+                u8::try_from(seed).expect("a small seed") + 10,
+            ));
+        }
+        state.link(testing::endpoint_id(10));
+        assert_eq!(
+            state.force_streak, 0,
+            "the first link of a member that lost every link is a new record"
+        );
     }
 }

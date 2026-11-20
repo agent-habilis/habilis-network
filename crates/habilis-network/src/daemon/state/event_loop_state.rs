@@ -653,8 +653,9 @@ pub struct EventLoopState {
     /// links. Each one doubles the window, up to `STARVED`. This bounds the churn of members with
     /// different caps; it does not stop the gap of an odd mesh, which `is_anchor` stops.
     pub(crate) force_streak: u32,
-    /// The most links this node ever held. A link beyond it starts the doubling over: a node that
-    /// still gains links is not stuck, so its next request is not slowed by the old ones.
+    /// The most links this node held since it last held none. A link beyond it starts the doubling
+    /// over: a node that still gains links is not stuck, so its next request is not slowed by the
+    /// old ones.
     pub(crate) most_links: usize,
     /// Whether the last count of links was one short of G.
     pub(crate) short_by_one: bool,
@@ -1580,8 +1581,10 @@ impl EventLoopState {
         grown.mul_f64(1.0 + self.force_jitter)
     }
 
-    /// Whether no member that this node has seen alive for `STARVED` has a greater endpoint than
-    /// this node. A node short by one link in a mesh where the links of all the members add up to
+    /// Whether no live member has a greater endpoint than this node. A member is live when it is
+    /// in the roster, not quiet, and heard within `STARVED`; the sweep drops a peer that is silent
+    /// for `ALIVE_TIMEOUT` (90 s), so in practice that is the live window, and the other two tests
+    /// are guards. A node short by one link in a mesh where the links of all the members add up to
     /// an odd number is the last gap: no member can fill it, and a forced request would only move
     /// it. The greatest live endpoint keeps the gap, so the gap stops there, and no other rule
     /// has to tell that gap from the two short members that a forced request is for.
@@ -1611,8 +1614,7 @@ impl EventLoopState {
         let waited = self
             .forced_neighbor_at
             .is_none_or(|at| now.duration_since(at) >= window);
-        let keeps_the_gap = self.short_by_one && self.is_anchor(now);
-        short && waited && !keeps_the_gap
+        short && waited && !(self.short_by_one && self.is_anchor(now))
     }
 
     /// Whether a graft leaves `peer` alone at `now`: it refused a `Neighbor` request and its
@@ -2122,6 +2124,7 @@ impl EventLoopState {
         self.linked_endpoints.remove(&peer);
         if self.linked_endpoints.is_empty() {
             self.zero_links_since.get_or_insert_with(Instant::now);
+            self.most_links = 0;
         }
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
     }
