@@ -87,6 +87,10 @@ mod tests {
 
     const TARGET: usize = 4;
 
+    /// The spread of the backoff jitter, fixed: 0.0 makes the first wait exactly 60 s, where a
+    /// random spread makes it 48 to 72 s and a second ask 90 s after the first can find it unexpired.
+    const BACKOFF_SPREAD: f64 = 0.0;
+
     /// A node with `links` links that has been short of G since `start`, and whose window has no
     /// jitter.
     fn short_node(links: usize, start: Instant) -> EventLoopState {
@@ -116,7 +120,12 @@ mod tests {
             GraftRequest::Neighbor,
             "an ask of a peer that did not refuse is a low priority request"
         );
-        state.settle_graft_backoff(at + Duration::from_secs(21));
+        let linked = &state.linked_endpoints;
+        state.graft_backoff.settle(
+            at + Duration::from_secs(21),
+            |peer| linked.contains(peer),
+            BACKOFF_SPREAD,
+        );
     }
 
     #[test]
