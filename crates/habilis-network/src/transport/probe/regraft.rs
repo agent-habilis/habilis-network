@@ -189,11 +189,93 @@ pub(crate) fn retry_candidates_at(
         state.direct.get(&address.id) != Some(&DirectState::Pending)
             || (webrtc::lane_needs::needs_webrtc_lane(address) && webrtc_session(address))
     });
-    let cooled = direct_ok.filter(|address| !state.relink_on_cooldown(address.id, now));
+    let cooled: Vec<&iroh::EndpointAddr> = direct_ok
+        .filter(|address| !state.relink_on_cooldown(address.id, now))
+        .collect();
     let mut peers: Vec<iroh::EndpointAddr> = cooled
+        .iter()
+        .copied()
         .filter(|address| !state.graft_blocked(address.id, now))
         .cloned()
         .collect();
+    // The same rule as in `next_fill`: with no relay payload this is the only path that grafts.
+    if peers.is_empty() && state.forced_neighbor_ready(now) {
+        peers = cooled.into_iter().cloned().collect();
+    }
     peers.sort_unstable_by_key(|address| address.id);
     peers
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use iroh::EndpointAddr;
+
+    use super::retry_candidates_at;
+    use crate::daemon::state::EventLoopState;
+    use crate::testing;
+    use crate::transport::probe::graft_request::{GraftRequest, GraftTarget, graft_request};
+    use crate::util::clock::Instant;
+    use crate::util::tuning::FORCE_NEIGHBOR_AFTER;
+
+    const TARGET: usize = 4;
+
+    /// The one free peer of the node, and the rendezvous.
+    fn peer() -> iroh::EndpointId {
+        testing::endpoint_id(1)
+    }
+
+    fn rendezvous() -> iroh::EndpointId {
+        testing::endpoint_id(99)
+    }
+
+    /// A node one link short of G since `start` and with no jitter, whose only free peer was
+    /// asked at `start` and refused: that peer is in its wait when the window ends.
+    fn node_whose_only_free_peer_refused(start: Instant) -> EventLoopState {
+        let mut state = testing::fresh_state();
+        for seed in 0..TARGET - 1 {
+            state.link(testing::endpoint_id(
+                u8::try_from(seed).expect("a small seed") + 10,
+            ));
+        }
+        state.force_jitter = 0.0;
+        state.note_link_count(TARGET - 1, TARGET, start);
+        state
+            .peer_endpoints
+            .insert(testing::nick("free-peer"), EndpointAddr::new(peer()));
+        let target = GraftTarget {
+            peer: peer(),
+            rendezvous: rendezvous(),
+        };
+        assert_eq!(
+            graft_request(&mut state, target, TARGET, start, true),
+            GraftRequest::Neighbor,
+            "the first ask is a low priority request"
+        );
+        state.settle_graft_backoff(start + Duration::from_secs(21));
+        state
+    }
+
+    #[test]
+    fn the_probe_path_offers_the_refusing_peer_when_the_window_ends() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let state = node_whose_only_free_peer_refused(start);
+        let early = start + FORCE_NEIGHBOR_AFTER.saturating_sub(Duration::from_secs(1));
+        assert!(
+            retry_candidates_at(&state, rendezvous(), TARGET, false, early).is_empty(),
+            "before the window the refusing peer is left alone"
+        );
+        let due = start + FORCE_NEIGHBOR_AFTER;
+        let offered: Vec<_> = retry_candidates_at(&state, rendezvous(), TARGET, false, due)
+            .into_iter()
+            .map(|address| address.id)
+            .collect();
+        assert_eq!(
+            offered,
+            vec![peer()],
+            "when the window ends the refusing peer is offered, so that the request is forced"
+        );
+    }
 }
