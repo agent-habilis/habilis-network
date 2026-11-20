@@ -46,6 +46,29 @@ mod tests {
         }
     }
 
+    /// A command that names no mesh, as an `Info` does.
+    #[derive(Debug, Serialize)]
+    struct Unaddressed;
+
+    impl Addressed for Unaddressed {
+        fn mesh_id(&self) -> Option<&MeshId> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_command_that_names_no_mesh_is_an_error() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let nickname = Nickname::from("alice");
+            let sent = client::send(&test_base(), &Unaddressed, &nickname).await;
+            let error = sent.expect_err("a command with no mesh has no socket");
+            assert!(
+                error.to_string().contains("names no mesh"),
+                "the error says what the command lacks: {error}"
+            );
+        });
+    }
+
     // ── pure functions ─────────────────────────────────────────────
 
     #[test]
