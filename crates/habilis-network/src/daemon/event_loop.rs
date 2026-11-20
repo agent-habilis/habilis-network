@@ -475,6 +475,7 @@ fn wire_transports(
     }
     // The direct-path transport the session manager fills; `None` leaves
     // every pair to iroh's own paths.
+    state.own_endpoint = Some(endpoint.id());
     state.webrtc = transports.webrtc_enabled.then_some(transports.webrtc);
     // The gossip transport of the member endpoint, when the mesh has gossip: the admission table
     // made it with the endpoint and keeps it, to tell it which peers are established and which
