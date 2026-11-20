@@ -649,6 +649,10 @@ pub struct EventLoopState {
     /// How much longer than `FORCE_NEIGHBOR_AFTER` this node waits, as a fraction: it is drawn
     /// once, so that the members that fell short together do not force together.
     pub(crate) force_jitter: f64,
+    /// How many forced requests this node sent since it last held G links. Each one doubles
+    /// the window, up to `STARVED`: when no peer has a slot to give, a forced request only moves
+    /// the gap to another member, and the doubling bounds that churn.
+    pub(crate) force_streak: u32,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
     pub(crate) graft_backoff: graft_backoff::GraftBackoff,
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
@@ -1132,6 +1136,7 @@ impl EventLoopState {
             join_fallback_at: None,
             short_since: None,
             forced_neighbor_at: None,
+            force_streak: 0,
             force_jitter: rand::Rng::random_range(&mut rand::rng(), 0.0..=0.5),
             graft_backoff: graft_backoff::GraftBackoff::default(),
             lane_wanted: HashMap::new(),
@@ -1416,6 +1421,7 @@ impl EventLoopState {
             self.short_since.get_or_insert(now);
         } else {
             self.short_since = None;
+            self.force_streak = 0;
         }
     }
 
@@ -1547,13 +1553,24 @@ impl EventLoopState {
         let due = self.forced_neighbor_ready(now);
         if due {
             self.forced_neighbor_at = Some(now);
+            self.force_streak = self.force_streak.saturating_add(1);
         }
         due
     }
 
+    /// The wait before a forced request: `FORCE_NEIGHBOR_AFTER`, doubled for each forced request
+    /// since the node last held G links, stretched by the jitter, and at most `STARVED`.
+    pub(crate) fn force_window(&self) -> Duration {
+        let doublings = 2_u32.saturating_pow(self.force_streak);
+        tuning::force_neighbor_after()
+            .saturating_mul(doublings)
+            .mul_f64(1.0 + self.force_jitter)
+            .min(STARVED)
+    }
+
     /// [`Self::forced_neighbor_due`] without the stamp.
     pub(crate) fn forced_neighbor_ready(&self, now: Instant) -> bool {
-        let window = tuning::FORCE_NEIGHBOR_AFTER.mul_f64(1.0 + self.force_jitter);
+        let window = self.force_window();
         let short = self
             .short_since
             .is_some_and(|since| now.duration_since(since) >= window);

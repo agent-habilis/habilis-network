@@ -14,7 +14,7 @@ pub(crate) enum GraftRequest {
     /// Low priority: a peer with a full view refuses and keeps its neighbors.
     Neighbor,
     /// High priority, to this one peer: it makes a peer with a full view drop exactly one neighbor,
-    /// and starts no walk. For a node one link short whose free peers all refused.
+    /// and starts no walk. For a node short of G that gained no link for its window.
     Force,
     /// No request: the peer refused lately and its wait runs.
     Skip,
@@ -36,10 +36,13 @@ pub(crate) struct GraftTarget {
 /// its backoff (`GraftBackoff`). The `PeerInfo` graft is not held, but its request is recorded
 /// too, so that its silence reads as a refusal.
 ///
-/// A node that holds fewer than G links and gained none for `FORCE_NEIGHBOR_AFTER` asks one peer
+/// A node that holds fewer than G links and gained none for its window (`FORCE_NEIGHBOR_AFTER`,
+/// doubled for each forced request since it last held G links, at most `STARVED`) asks one peer
 /// with a `Force` instead, at most once per window: when two members are one link short and linked
 /// to each other, every other member is full and refuses every low priority request, and the
-/// backoffs of the free peers overlap, so a rule that waits for them all would never fire.
+/// backoffs of the free peers overlap, so a rule that waits for them all would never fire. When no
+/// member has a free slot, a forced request only moves the gap to another member, and the doubled
+/// window bounds that churn to one link-up per member per `STARVED`.
 ///
 /// A low priority request evicts nobody, so a node that arrives when every other node is
 /// full gets no link from it. A `paced` graft (the fill tick, a proven direct path) asks
@@ -65,6 +68,8 @@ pub(crate) fn graft_request(
         GraftRequest::Join
     } else if paced && state.forced_neighbor_due(now) {
         tracing::info!(target: transport::LOG_TARGET, %peer, linked = state.linked_endpoints.len(), "short of G with no link gained: forcing one neighbor");
+        // A forced request that brings no link is read as a refusal, like any other ask.
+        state.graft_backoff.asked(peer, now);
         GraftRequest::Force
     } else if paced && state.graft_backoff.is_blocked(&peer, now) {
         tracing::debug!(target: transport::LOG_TARGET, %peer, "graft skipped: the peer refused lately");
@@ -125,6 +130,94 @@ mod tests {
             at + Duration::from_secs(21),
             |endpoint| linked.contains(endpoint),
             BACKOFF_SPREAD,
+        );
+    }
+
+    #[test]
+    fn a_forced_request_is_recorded_so_that_its_silence_reads_as_a_refusal() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut state = short_node(TARGET - 1, start);
+        let due = start + FORCE_NEIGHBOR_AFTER;
+        assert_eq!(
+            graft_request(&mut state, target(1), TARGET, due, true),
+            GraftRequest::Force,
+            "the window ends, so the first request is forced"
+        );
+        let linked = &state.linked_endpoints;
+        state.graft_backoff.settle(
+            due + Duration::from_secs(21),
+            |endpoint| linked.contains(endpoint),
+            BACKOFF_SPREAD,
+        );
+        assert!(
+            state
+                .graft_backoff
+                .is_blocked(&testing::endpoint_id(1), due + Duration::from_secs(21)),
+            "a peer that got no link from a forced request is left alone for the first wait"
+        );
+    }
+
+    #[test]
+    fn each_forced_request_doubles_the_window_up_to_starved_and_a_full_view_resets_it() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut state = short_node(TARGET - 1, start);
+        let mut now = start + FORCE_NEIGHBOR_AFTER;
+        let mut windows = Vec::new();
+        for _ in 0..4 {
+            windows.push(state.force_window());
+            assert!(
+                state.forced_neighbor_due(now),
+                "the request is due when its window ends"
+            );
+            now += state.force_window();
+        }
+        assert_eq!(
+            windows,
+            [
+                FORCE_NEIGHBOR_AFTER,
+                FORCE_NEIGHBOR_AFTER * 2,
+                FORCE_NEIGHBOR_AFTER * 4,
+                STARVED
+            ],
+            "the window doubles with each forced request and stops at STARVED"
+        );
+        assert_eq!(state.force_window(), STARVED, "the cap holds");
+        state.note_link_count(TARGET, TARGET, now);
+        assert_eq!(
+            state.force_window(),
+            FORCE_NEIGHBOR_AFTER,
+            "a view at G starts the window over"
+        );
+    }
+
+    #[test]
+    fn a_second_forced_request_waits_for_the_doubled_window() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut state = short_node(TARGET - 1, start);
+        let due = start + FORCE_NEIGHBOR_AFTER;
+        assert_eq!(
+            graft_request(&mut state, target(1), TARGET, due, true),
+            GraftRequest::Force,
+            "the window ends, so the first request is forced"
+        );
+        let gained = due + Duration::from_secs(1);
+        state.link(testing::endpoint_id(77));
+        state.unlink(testing::endpoint_id(77));
+        state.note_link_count(TARGET - 1, TARGET, gained);
+        let one_window = gained + FORCE_NEIGHBOR_AFTER;
+        assert_ne!(
+            graft_request(&mut state, target(2), TARGET, one_window, true),
+            GraftRequest::Force,
+            "one plain window after a forced request is not enough"
+        );
+        let two_windows = gained + FORCE_NEIGHBOR_AFTER * 2;
+        assert_eq!(
+            graft_request(&mut state, target(2), TARGET, two_windows, true),
+            GraftRequest::Force,
+            "the doubled window is"
         );
     }
 
@@ -257,13 +350,14 @@ mod tests {
             GraftRequest::Skip,
             "a second call inside the window does not"
         );
-        let next = due + FORCE_NEIGHBOR_AFTER;
-        let refused_again = due + FORCE_NEIGHBOR_AFTER.saturating_sub(Duration::from_secs(30));
+        let doubled = FORCE_NEIGHBOR_AFTER * 2;
+        let next = due + doubled;
+        let refused_again = due + doubled.saturating_sub(Duration::from_secs(30));
         refuse_at(&mut state, 1, refused_again);
         assert_eq!(
             graft_request(&mut state, target(1), TARGET, next, true),
             GraftRequest::Force,
-            "the next window forces again"
+            "the next window, doubled, forces again"
         );
     }
 

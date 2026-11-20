@@ -332,6 +332,9 @@ pub struct Tuning {
     pub rival_recheck_meshed: Duration,
     /// The cap of the ramping recheck interval of a beacon holder with no peers (a topic peer that stays alone).
     pub rival_recheck_alone: Duration,
+    /// How long a node short of G links waits before it forces one neighbor (see
+    /// [`FORCE_NEIGHBOR_AFTER`]).
+    pub force_neighbor_after: Duration,
     /// How often a node revisits the rendezvous to meet split islands.
     pub rendezvous_periodic_return: Duration,
     /// Whether a topic mesh looks up peers over mDNS only.
@@ -413,6 +416,13 @@ impl Tuning {
         self
     }
 
+    /// Set the wait before a node short of G links forces one neighbor.
+    #[must_use]
+    pub fn force_neighbor_after(mut self, force_neighbor_after: Duration) -> Self {
+        self.force_neighbor_after = force_neighbor_after;
+        self
+    }
+
     /// Set the rival recheck interval for a lone member.
     #[must_use]
     pub fn rival_recheck_alone(mut self, rival_recheck_alone: Duration) -> Self {
@@ -440,6 +450,7 @@ impl Tuning {
         rival_recheck: RIVAL_RECHECK,
         rival_recheck_meshed: RIVAL_RECHECK_MESHED,
         rival_recheck_alone: RIVAL_RECHECK_ALONE,
+        force_neighbor_after: FORCE_NEIGHBOR_AFTER,
         rendezvous_periodic_return: RENDEZVOUS_PERIODIC_RETURN,
         topic_mdns_only: false,
         peerinfo_refresh_min: PEERINFO_REFRESH_MIN,
@@ -747,6 +758,23 @@ pub const STARVED: Duration = Duration::from_mins(5);
 /// neighbor, which then has a free slot. One request per member per window bounds the churn to
 /// one link-up per member per window.
 pub const FORCE_NEIGHBOR_AFTER: Duration = Duration::from_secs(60);
+
+/// The live value, after any override of [`FORCE_NEIGHBOR_AFTER`]. Clamped to `>= 1 s`.
+///
+/// # Examples
+///
+/// The wait is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::force_neighbor_after;
+/// use std::time::Duration;
+///
+/// assert!(force_neighbor_after() > Duration::ZERO);
+/// ```
+#[must_use]
+pub fn force_neighbor_after() -> Duration {
+    current().force_neighbor_after.max(Duration::from_secs(1))
+}
 
 /// How often an advertising `create` re-broadcasts its mesh id into
 /// the directory. Short enough that a fresh discoverer sees every live
