@@ -390,23 +390,31 @@ mod tests {
         );
     }
 
-    /// Four endpoints in the order of their ids, smallest first: an id is the public half of a key,
-    /// so the order of the seeds says nothing about it.
-    fn ids_in_order() -> [iroh::EndpointId; 4] {
-        let mut ids: Vec<iroh::EndpointId> = (10..14).map(testing::endpoint_id).collect();
+    /// Six endpoints in the order of their ids, smallest first: an id is the public half of a key,
+    /// so the order of the seeds says nothing about it. The three smallest are the links of the
+    /// anchor tests, so that no link exceeds the node under test.
+    fn ids_in_order() -> [iroh::EndpointId; 6] {
+        let mut ids: Vec<iroh::EndpointId> = (20..26).map(testing::endpoint_id).collect();
         ids.sort_unstable();
-        <[iroh::EndpointId; 4]>::try_from(ids).expect("four ids")
+        <[iroh::EndpointId; 6]>::try_from(ids).expect("six ids")
     }
 
-    /// A node one link short since `start`, whose endpoint is `own` and whose roster holds the
-    /// members `others`, each heard at `start`.
+    /// A node one link short since `start`, whose endpoint is `own`, whose links are the three
+    /// smallest of `ids_in_order`, and whose roster holds the members `others`, each heard at
+    /// `start`.
     fn anchor_node(
         start: Instant,
         own: iroh::EndpointId,
         others: &[(&str, iroh::EndpointId)],
     ) -> EventLoopState {
-        let mut state = short_node(TARGET - 1, start);
+        let [first, second, third, ..] = ids_in_order();
+        let mut state = testing::fresh_state();
+        for endpoint in [first, second, third] {
+            state.link(endpoint);
+        }
+        state.force_jitter = 0.0;
         state.own_endpoint = Some(own);
+        state.note_link_count(TARGET - 1, TARGET, start);
         for (nickname, endpoint) in others {
             state.live_member_for_test(nickname, *endpoint, start);
         }
@@ -417,7 +425,7 @@ mod tests {
     fn the_greatest_live_member_short_by_one_does_not_force() {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
-        let [low, middle, high, _] = ids_in_order();
+        let [_, _, _, low, middle, high] = ids_in_order();
         let late = start + FORCE_NEIGHBOR_AFTER * 2;
         let state = anchor_node(start, high, &[("low-a", low), ("low-b", middle)]);
         assert!(
@@ -436,7 +444,7 @@ mod tests {
     fn a_member_that_is_not_the_greatest_forces_when_short_by_one() {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
-        let [low, middle, high, _] = ids_in_order();
+        let [_, _, _, low, middle, high] = ids_in_order();
         let state = anchor_node(start, middle, &[("low-a", low), ("high", high)]);
         assert!(
             state.forced_neighbor_ready(start + FORCE_NEIGHBOR_AFTER),
@@ -448,7 +456,7 @@ mod tests {
     fn a_greater_member_that_was_not_seen_alive_lately_is_no_anchor() {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
-        let [low, middle, high, _] = ids_in_order();
+        let [_, _, _, low, middle, high] = ids_in_order();
         let late = start + STARVED + FORCE_NEIGHBOR_AFTER * 2;
         let mut state = anchor_node(start, middle, &[]);
         state.live_member_for_test("low-a", low, start + STARVED);
@@ -512,7 +520,7 @@ mod tests {
     fn the_anchor_short_by_one_sends_no_forced_request_for_three_starved_windows() {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
-        let [low, middle, high, _] = ids_in_order();
+        let [_, _, _, low, middle, high] = ids_in_order();
         let mut state = anchor_node(start, high, &[("low-a", low), ("low-b", middle)]);
         let mut now = start;
         while now < start + STARVED * 3 {
@@ -544,6 +552,44 @@ mod tests {
         assert_eq!(
             state.force_streak, 0,
             "the first link of a member that lost every link is a new record"
+        );
+    }
+
+    /// A node one link short, whose endpoint is `own` and whose three links go to `linked`, with
+    /// an empty roster: no member of it has an address bound yet.
+    fn linked_node(
+        start: Instant,
+        own: iroh::EndpointId,
+        linked: [iroh::EndpointId; 3],
+    ) -> EventLoopState {
+        let mut state = testing::fresh_state();
+        for endpoint in linked {
+            state.link(endpoint);
+        }
+        state.force_jitter = 0.0;
+        state.own_endpoint = Some(own);
+        state.note_link_count(TARGET - 1, TARGET, start);
+        state
+    }
+
+    #[test]
+    fn a_greater_linked_member_with_no_bound_address_keeps_the_smaller_from_being_the_anchor() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ids: Vec<iroh::EndpointId> = (10..16).map(testing::endpoint_id).collect();
+        ids.sort_unstable();
+        let [low_a, low_b, own, _, _, high] =
+            <[iroh::EndpointId; 6]>::try_from(ids).expect("six ids");
+        let late = start + FORCE_NEIGHBOR_AFTER * 2;
+        let smaller = linked_node(start, own, [low_a, low_b, high]);
+        assert!(
+            smaller.forced_neighbor_ready(late),
+            "a linked member with a greater endpoint is a member, bound or not: this one is no anchor"
+        );
+        let greater = linked_node(start, high, [low_a, low_b, own]);
+        assert!(
+            !greater.forced_neighbor_ready(late),
+            "the member that no linked member exceeds keeps the gap"
         );
     }
 }

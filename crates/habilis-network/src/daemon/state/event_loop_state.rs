@@ -1584,7 +1584,8 @@ impl EventLoopState {
     /// Whether no live member has a greater endpoint than this node. A member is live when it is
     /// in the roster, not quiet, and heard within `STARVED`; the sweep drops a peer that is silent
     /// for `ALIVE_TIMEOUT` (90 s), so in practice that is the live window, and the other two tests
-    /// are guards. A node short by one link in a mesh where the links of all the members add up to
+    /// are guards. A member that this node is linked to counts at once, with no roster row or bound
+    /// address needed. A node short by one link in a mesh where the links of all the members add up to
     /// an odd number is the last gap: no member can fill it, and a forced request would only move
     /// it. The greatest live endpoint keeps the gap, so the gap stops there, and no other rule
     /// has to tell that gap from the two short members that a forced request is for.
@@ -1592,6 +1593,11 @@ impl EventLoopState {
         let Some(own) = self.own_endpoint else {
             return false;
         };
+        // A linked member is alive and a member, whether or not the roster has bound its address
+        // yet: two linked members that are one link short must not both keep the gap.
+        if self.linked_endpoints.iter().any(|linked| *linked > own) {
+            return false;
+        }
         for key in &self.peers {
             let heard = self.last_seen.get(key);
             let alive = heard.is_some_and(|at| now.saturating_duration_since(*at) < STARVED);
