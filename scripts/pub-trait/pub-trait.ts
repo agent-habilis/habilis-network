@@ -26,7 +26,8 @@ function listFiles(): string[] {
 function usedAsBound(name: string, texts: string[]): boolean {
   const uses = [
     new RegExp(`\\bdyn\\s+${name}\\b`),
-    new RegExp(`\\bimpl\\s+(?:[^{;=]*\\+\\s*)?${name}\\b`),
+    // An `impl Name for Type` block is no bound, so it does not count.
+    new RegExp(`\\bimpl\\s+(?:[^{;=]*\\+\\s*)?${name}\\b(?!\\s*(?:<[^>\\n]*>)?\\s+for\\b)`),
     new RegExp(`<[^>\\n]*\\b\\w+\\s*:\\s*[^>\\n]*\\b${name}\\b`),
     new RegExp(`\\bwhere\\b[^{;]*\\b\\w+\\s*:\\s*[^{;]*\\b${name}\\b`),
     new RegExp(`\\bpub trait\\s+\\w+\\s*:\\s*[^{]*\\b${name}\\b`),
