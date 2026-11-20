@@ -210,3 +210,134 @@ pub(crate) async fn retry_direct(
         lanes::retry_one(state, context, address, distrust_links).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use iroh::endpoint::presets;
+    use iroh::protocol::Router;
+    use iroh::{Endpoint, EndpointId, RelayMode};
+    use iroh_gossip::api::GossipReceiver;
+    use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
+    use iroh_gossip::proto::{self, HyparviewConfig};
+    use n0_future::{StreamExt, time};
+
+    use crate::daemon::handler_ctx;
+    use crate::gossip::event;
+    use crate::protocol::MeshId;
+    use crate::protocol::identity::Identity;
+    use crate::util::clock::Instant;
+    use crate::{lookup, testing, transport};
+
+    const TOPIC: [u8; 32] = [8; 32];
+
+    /// A gossip node on a loopback endpoint, whose active view holds `capacity` links.
+    async fn node(capacity: usize) -> (Router, Gossip) {
+        let endpoint_builder = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup();
+        let endpoint = endpoint_builder
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        let config = HyparviewConfig {
+            active_view_capacity: capacity,
+            ..HyparviewConfig::default()
+        };
+        let gossip_builder = Gossip::builder().membership_config(config);
+        let gossip: Gossip = gossip_builder.spawn(endpoint.clone());
+        let handler = gossip.clone();
+        let router: Router = Router::builder(endpoint)
+            .accept(GOSSIP_ALPN, handler)
+            .spawn();
+        (router, gossip)
+    }
+
+    fn know(of: &Router, other: &Router) {
+        lookup::add_peer_addr(
+            &lookup::address_book(of.endpoint()),
+            other.endpoint().addr(),
+        );
+    }
+
+    /// The receiver tracks its neighbors as it reads events, so the wait reads them.
+    async fn until_linked(receiver: &mut GossipReceiver, peer: EndpointId) -> bool {
+        for _ in 0..100 {
+            if receiver.neighbors().any(|neighbor| neighbor == peer) {
+                return true;
+            }
+            let _ = time::timeout(Duration::from_millis(100), receiver.next()).await;
+        }
+        false
+    }
+
+    /// Two members are linked to each other and hold their only slot. A third member short of G
+    /// with no link gained for its window grafts the first: the graft is a high priority request,
+    /// the full peer drops its neighbor, and the third member is linked. A low priority request is
+    /// refused by a full peer, and the same graft would leave the third member without a link for
+    /// ever.
+    #[test]
+    fn a_forced_graft_gets_a_link_from_a_full_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (full, full_gossip) = node(1).await;
+            let (neighbor, neighbor_gossip) = node(1).await;
+            let (short, short_gossip) = node(1).await;
+            know(&neighbor, &full);
+            know(&short, &full);
+            let topic = proto::TopicId::from_bytes(TOPIC);
+            let (_full_sender, _full_receiver) = full_gossip
+                .subscribe(topic, vec![])
+                .await
+                .expect("subscribe the full peer")
+                .split();
+            let bootstrap = vec![full.endpoint().id()];
+            let (_neighbor_sender, mut neighbor_receiver) = neighbor_gossip
+                .subscribe(topic, bootstrap)
+                .await
+                .expect("subscribe the neighbor")
+                .split();
+            assert!(
+                until_linked(&mut neighbor_receiver, full.endpoint().id()).await,
+                "the neighbor holds the only slot of the full peer"
+            );
+            let (short_sender, mut short_receiver) = short_gossip
+                .subscribe(topic, vec![])
+                .await
+                .expect("subscribe the short member")
+                .split();
+
+            let sender = transport::MeshSender::new(short_sender);
+            let mesh = MeshId::from("test");
+            let identity = Identity::generate();
+            let our_pubkey = identity.author_key();
+            let author = testing::nick("short");
+            let sink = event::SilentSink;
+            let context = handler_ctx::HandlerCtx {
+                sender: &sender,
+                endpoint: short.endpoint(),
+                mesh: &mesh,
+                author: &author,
+                identity: &identity,
+                our_pubkey,
+                max_connections: 1,
+                rendezvous_id: testing::endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let mut state = testing::fresh_state();
+            state.force_jitter = 0.0;
+            state.short_since = Instant::now().checked_sub(Duration::from_mins(2));
+
+            super::request_graft(&mut state, &context, full.endpoint().id(), true)
+                .await
+                .expect("the graft is sent");
+
+            assert!(
+                until_linked(&mut short_receiver, full.endpoint().id()).await,
+                "a full peer that gets the forced request drops its neighbor and links the short member"
+            );
+            let _ = tokio::join!(full.shutdown(), neighbor.shutdown(), short.shutdown());
+        });
+    }
+}
