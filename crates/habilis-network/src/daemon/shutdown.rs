@@ -467,6 +467,46 @@ mod tests {
     }
 
     /// The test binary runs this test again, in a process of its own, with this variable set.
+    const SIGNAL_CHILD: &str = "HABILIS_TEST_SIGNAL_CHILD";
+
+    /// A termination signal that arrives right after the quit channel exists reaches the channel.
+    /// A handler that a task registers later leaves a window in which the signal has its default
+    /// action and ends the daemon with no cleanup. The check runs in a child process, because
+    /// the default action ends the process.
+    #[test]
+    fn a_signal_right_after_the_start_reaches_the_quit_channel() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use rustix::process as os_process;
+
+            if env::var_os(SIGNAL_CHILD).is_some() {
+                let mut quit_rx =
+                    super::spawn_quit_signal_tasks(false, None).expect("the handlers register");
+                // No await before the signal: no spawned task has run yet.
+                os_process::kill_process(os_process::getpid(), os_process::Signal::TERM)
+                    .expect("the process can signal itself");
+                let quit = time::timeout(Duration::from_secs(5), quit_rx.recv()).await;
+                println!("QUIT_SIGNAL received={}", quit.is_ok());
+                return;
+            }
+            let mut command = Command::new(env::current_exe().expect("the test binary"));
+            command
+                .args([
+                    "--exact",
+                    "daemon::shutdown::tests::a_signal_right_after_the_start_reaches_the_quit_channel",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(SIGNAL_CHILD, "1");
+            let output = command.output().expect("run the test binary");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("QUIT_SIGNAL received=true"),
+                "the signal ended the process, or it did not reach the quit channel: {stdout}"
+            );
+        });
+    }
+
+    /// The test binary runs this test again, in a process of its own, with this variable set.
     const QUIT_CHILD: &str = "HABILIS_TEST_CLI_QUIT_CHILD";
 
     /// A CLI quit announces the departure and asks the loop to exit the process, which it does
