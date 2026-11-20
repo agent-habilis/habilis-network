@@ -237,7 +237,7 @@ async fn linked_pair_ordered(
         }
         let _ = alice.membership.node.leave().await;
         let _ = bob.membership.node.leave().await;
-        habilis_network_test_tracing::clear_captured_logs();
+        habilis_network_test_tracing::captured_logs().clear();
     }
     panic!("no draw of ids gave bob the order (higher: {bob_is_higher}) in 20 tries");
 }
