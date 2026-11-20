@@ -136,6 +136,7 @@ pub(crate) async fn request_graft(
     ) {
         GraftRequest::Join => context.sender.join_peers(vec![peer]).await,
         GraftRequest::Neighbor => context.sender.neighbor_peers(vec![peer]).await,
+        GraftRequest::Force => context.sender.force_neighbor_peer(peer).await,
         GraftRequest::Skip => Ok(()),
     }
 }

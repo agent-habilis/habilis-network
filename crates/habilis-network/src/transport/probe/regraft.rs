@@ -50,9 +50,17 @@ pub(crate) fn next_fill(
         address.id != rendezvous_id && !state.linked_endpoints.contains(&address.id)
     });
     let cooled = candidates.filter(|address| !state.relink_on_cooldown(address.id, now));
+    let cooled: Vec<&iroh::EndpointAddr> = cooled.collect();
     let mut free: Vec<&iroh::EndpointAddr> = cooled
+        .iter()
+        .copied()
         .filter(|address| !state.graft_blocked(address.id, now))
         .collect();
+    // Every free peer refused lately, and the node is short of G with no link gained: it asks one of
+    // them with a high priority request (see `graft_request`).
+    if free.is_empty() && state.forced_neighbor_ready(now) {
+        free = cooled;
+    }
     free.sort_unstable_by_key(|address| {
         (webrtc::lane_needs::needs_webrtc_lane(address), address.id)
     });

@@ -642,6 +642,13 @@ pub struct EventLoopState {
     pub(crate) below_target_since: Option<Instant>,
     /// When a graft last fell back to a `Join` for a starved node.
     pub(crate) join_fallback_at: Option<Instant>,
+    /// Since when this node holds fewer than G links and has gained none. Cleared by a link.
+    pub(crate) short_since: Option<Instant>,
+    /// When a graft last forced a high priority `Neighbor` request for a node one link short.
+    pub(crate) forced_neighbor_at: Option<Instant>,
+    /// How much longer than `FORCE_NEIGHBOR_AFTER` this node waits, as a fraction: it is drawn
+    /// once, so that the members that fell short together do not force together.
+    pub(crate) force_jitter: f64,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
     pub(crate) graft_backoff: graft_backoff::GraftBackoff,
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
@@ -1123,6 +1130,9 @@ impl EventLoopState {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             redials: redial::Redials::default(),
             join_fallback_at: None,
+            short_since: None,
+            forced_neighbor_at: None,
+            force_jitter: rand::Rng::random_range(&mut rand::rng(), 0.0..=0.5),
             graft_backoff: graft_backoff::GraftBackoff::default(),
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
@@ -1402,6 +1412,11 @@ impl EventLoopState {
         } else {
             self.below_target_since = None;
         }
+        if linked < max_connections {
+            self.short_since.get_or_insert(now);
+        } else {
+            self.short_since = None;
+        }
     }
 
     /// A frame is held for the lane peer `peer` at `now`: its session is wanted.
@@ -1523,6 +1538,29 @@ impl EventLoopState {
             .join_fallback_at
             .is_none_or(|at| now.duration_since(at) >= window);
         starved && waited
+    }
+
+    /// Whether a graft at `now` forces a high priority `Neighbor` request: the node holds fewer
+    /// than G links and has gained none for `FORCE_NEIGHBOR_AFTER` (stretched by its jitter), and the
+    /// last forced request is as old. A `true` stamps the request.
+    pub(crate) fn forced_neighbor_due(&mut self, now: Instant) -> bool {
+        let due = self.forced_neighbor_ready(now);
+        if due {
+            self.forced_neighbor_at = Some(now);
+        }
+        due
+    }
+
+    /// [`Self::forced_neighbor_due`] without the stamp.
+    pub(crate) fn forced_neighbor_ready(&self, now: Instant) -> bool {
+        let window = tuning::FORCE_NEIGHBOR_AFTER.mul_f64(1.0 + self.force_jitter);
+        let short = self
+            .short_since
+            .is_some_and(|since| now.duration_since(since) >= window);
+        let waited = self
+            .forced_neighbor_at
+            .is_none_or(|at| now.duration_since(at) >= window);
+        short && waited
     }
 
     /// Whether a graft leaves `peer` alone at `now`: it refused a `Neighbor` request and its
@@ -2062,6 +2100,7 @@ impl EventLoopState {
     /// A gossip link to `peer` is up.
     pub(crate) fn link(&mut self, peer: EndpointId) {
         self.linked_endpoints.insert(peer);
+        self.short_since = None;
         self.zero_links_since = None;
         self.regraft_at.remove(&peer);
         self.graft_backoff.reset(peer);
