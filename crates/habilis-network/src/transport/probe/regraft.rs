@@ -198,9 +198,16 @@ pub(crate) fn retry_candidates_at(
         .filter(|address| !state.graft_blocked(address.id, now))
         .cloned()
         .collect();
-    // The same rule as in `next_fill`: with no relay payload this is the only path that grafts.
+    // The same rule as in `next_fill`: with no relay payload this is the only path that grafts,
+    // and it forces one random refusing peer, as `next_fill` does.
     if peers.is_empty() && state.forced_neighbor_ready(now) {
-        peers = cooled.into_iter().cloned().collect();
+        let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
+        peers = pick
+            .checked_rem(cooled.len())
+            .and_then(|index| cooled.get(index))
+            .map(|address| (*address).clone())
+            .into_iter()
+            .collect();
     }
     peers.sort_unstable_by_key(|address| address.id);
     peers
@@ -273,6 +280,39 @@ mod tests {
             next_fill(&state, TARGET, rendezvous(), due, 0).map(|address| address.id),
             Some(peer()),
             "when the window ends the refusing peer is picked, so that the request is forced"
+        );
+    }
+
+    #[test]
+    fn the_probe_path_offers_one_of_two_refusing_peers_when_the_window_ends() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut state = node_whose_only_free_peer_refused(start);
+        let second = testing::endpoint_id(2);
+        state
+            .peer_endpoints
+            .insert(testing::nick("second-peer"), EndpointAddr::new(second));
+        let target = GraftTarget {
+            peer: second,
+            rendezvous: rendezvous(),
+        };
+        assert_eq!(
+            graft_request(&mut state, target, TARGET, start, true),
+            GraftRequest::Neighbor,
+            "the first ask of the second peer is a low priority request"
+        );
+        let linked = &state.linked_endpoints;
+        state.graft_backoff.settle(
+            start + Duration::from_secs(21),
+            |endpoint| linked.contains(endpoint),
+            0.0,
+        );
+        let due = start + FORCE_NEIGHBOR_AFTER;
+        let offered = retry_candidates_at(&state, rendezvous(), TARGET, false, due);
+        assert_eq!(
+            offered.len(),
+            1,
+            "one refusing peer is forced, not every refusing peer"
         );
     }
 
