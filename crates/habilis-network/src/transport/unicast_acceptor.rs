@@ -117,6 +117,12 @@ impl UnicastAcceptor {
     }
 }
 
+/// How long the read of one frame may take. The idle timer does not run during the read, so a
+/// peer that opens a stream and never finishes it would hold the accept task, and the busy mark
+/// that keeps its connection from eviction. A sender gives up on a send after 3 s (the send
+/// timeout of the pool), so a frame that takes longer than this is no frame of a sender that runs.
+const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl ProtocolHandler for UnicastAcceptor {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         // The sender checks its own selected path, but an old build or a
@@ -140,10 +146,13 @@ impl ProtocolHandler for UnicastAcceptor {
                 Ok(Ok(mut recv)) => {
                     let admission = self.admission.as_ref();
                     let _busy = admission.map(|table| table.busy(connection.remote_id()));
-                    self.handle_frame(
-                        connection.remote_id(),
-                        recv.read_to_end(MAX_UNICAST_FRAME).await,
-                    );
+                    let read = recv.read_to_end(MAX_UNICAST_FRAME);
+                    let Ok(frame) = n0future_time::timeout(FRAME_READ_TIMEOUT, read).await else {
+                        tracing::debug!(target: LOG_TARGET, "closing an accepted unicast connection: a stream stalled");
+                        connection.close(IDLE.into(), b"stalled stream");
+                        break;
+                    };
+                    self.handle_frame(connection.remote_id(), frame);
                 }
                 Ok(Err(_closed)) => break,
                 Err(_idle) => {
@@ -275,6 +284,36 @@ mod tests {
                 if close.reason.as_ref() == b"idle"
                     && close.error_code.into_inner() == u64::from(IDLE)
         )
+    }
+
+    /// A peer that opens a stream and never finishes it must not hold the accept task: the idle
+    /// timer does not run while a frame is read, so the read has a bound of its own.
+    #[test]
+    fn a_stream_that_is_never_finished_closes_the_connection() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (connection, router, client, _frames) = connected(Duration::from_secs(600)).await;
+            let mut stalled = connection.open_uni().await.expect("open a stream");
+            stalled.write_all(b"x").await.expect("write one byte");
+            tokio_time::pause();
+
+            assert!(
+                closed_after_advancing(&connection).await,
+                "the acceptor closes a connection whose stream stalls"
+            );
+            assert!(
+                matches!(
+                    connection.close_reason(),
+                    Some(ConnectionError::ApplicationClosed(ref close))
+                        if close.reason.as_ref() == b"stalled stream"
+                ),
+                "closed by the acceptor for the stalled stream, got {:?}",
+                connection.close_reason()
+            );
+            drop(stalled);
+            tokio_time::resume();
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
     }
 
     #[test]
