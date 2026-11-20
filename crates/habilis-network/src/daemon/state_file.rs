@@ -401,17 +401,10 @@ pub fn read_identity(path: &Path) -> SessionIdentity {
     }
 }
 
-/// The mesh-id key, falling back to the pre-rename `room` spelling: a daemon
-/// from the previous release may still be running, and `ready`/`session`/
-/// `leave` must map its file. The one home for that rule — retire the
-/// fallback here when the compat window closes.
+/// The mesh id of a state file.
 fn mesh_field(doc: &serde_json::Value) -> Option<String> {
-    let keys = ["gossip", "room"];
-    let spelling = keys.iter().find_map(|key| {
-        let field = doc.get(key);
-        field.and_then(serde_json::Value::as_str)
-    });
-    spelling.map(str::to_owned)
+    let field = doc.get("gossip");
+    field.and_then(serde_json::Value::as_str).map(str::to_owned)
 }
 
 /// One running daemon as seen through its state file — what a consumer's
@@ -1212,36 +1205,6 @@ mod tests {
             "an old entry without a pid still reads its mesh"
         );
         assert_eq!(entry.pid, None, "an old entry without a pid has no pid");
-        let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn legacy_room_keyed_file_still_maps_its_mesh() {
-        // A daemon from the previous release writes `room`, not `gossip`;
-        // `session`/`leave`/`ready` must still map (and reap) it. Pins the
-        // `mesh_field` fallback — deleting it must go red here, not in the
-        // field as an unreapable orphan daemon.
-        let _guard = ::habilis_network_test_tracing::init();
-        let path = unique_path("session-entry-legacy-room");
-        fs::create_dir_all(path.parent().expect("the test path has a parent"))
-            .expect("the test directory can be created");
-        fs::write(
-            &path,
-            r#"{"last_updated":1,"name":"old","nickname":"n-n","participant_count":1,"pid":7,"ready":true,"room":"legacy"}"#,
-        )
-        .expect("the test state file can be written");
-        let entry = super::read_session_entry(&path).expect("present");
-        assert_eq!(
-            entry.mesh.as_deref(),
-            Some("legacy"),
-            "a room-keyed file maps its mesh in the entry"
-        );
-        let identity = super::read_identity(&path);
-        assert_eq!(
-            identity.mesh.as_deref(),
-            Some("legacy"),
-            "a room-keyed file maps its mesh in the identity"
-        );
         let _ = fs::remove_file(&path);
     }
 
