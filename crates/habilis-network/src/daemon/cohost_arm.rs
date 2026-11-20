@@ -162,7 +162,12 @@ pub(super) async fn maybe_cohost(
                 .is_some();
         if stopped || yields {
             state.rungs.own_check_done();
-            shed_beacon(state, arm.params, current);
+            let reason = if stopped {
+                "the own rung stopped answering"
+            } else {
+                "a lower rung of the ladder answers as our mesh"
+            };
+            shed_beacon(state, arm.params, current, reason);
             return;
         }
     }
@@ -342,21 +347,46 @@ fn shed_beacon(
     state: &mut EventLoopState,
     params: &beacon::RendezvousParams,
     rendezvous: &mut Option<beacon::Rendezvous>,
+    reason: &'static str,
 ) {
-    let Some(held) = rendezvous.take() else {
+    if rendezvous.is_none() {
         return;
-    };
-    tracing::info!(
-        target: "habilis_network::gossip",
-        "beacon shed: a lower rung of the ladder answers as our mesh"
-    );
-    state.beacon_closing = Some(held.shed_then());
+    }
+    tracing::info!(target: "habilis_network::gossip", reason, "beacon shed");
+    release_beacon(state, params, rendezvous);
+}
+
+/// The steps of each shed, with no log line: the caller says why it sheds.
+fn release_beacon(
+    state: &mut EventLoopState,
+    params: &beacon::RendezvousParams,
+    rendezvous: &mut Option<beacon::Rendezvous>,
+) {
+    // `shed`, not a plain drop: the graceful endpoint close turns the
+    // peer's link to its own dead beacon into an immediate
+    // `NeighborDown` instead of a zombie that only dies at the QUIC idle
+    // timeout — the zombie both stalls the post-shed re-graft and leaves
+    // a poisoned pool entry under the shared id.
+    if let Some(held) = rendezvous.take() {
+        state.beacon_closing = Some(held.shed_then());
+    }
     state.next_rival_recheck = None;
+    // A round that was running against our own beacon now has nothing to find.
     state.cancel_rendezvous_round();
+    // The book still names the beacon just shed; the next holder writes its own address. What the
+    // mesh registered for the id by itself (a relay rung) is written back.
     state.address_book.remove_endpoint_info(params.id);
     super::setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
+    // Don't wait for that `NeighborDown` either — clear the link flag now
+    // (mirroring the hard resume edge), or a yielding node's heal ticks
+    // idle on "rendezvous linked" instead of grafting the rival's beacon.
     state.rendezvous_flags.remove(&RendezvousFlag::Linked);
+    // We just released the identity to re-probe it, so the reading that
+    // stood before the release answers a question we have re-asked.
     state.forget_rendezvous_verdict();
+    // Arm the fast burst explicitly rather than waiting for our own
+    // beacon's `NeighborDown` to do it — the re-probe (and the re-claim
+    // when no rival exists) then runs within ~RECLAIM_INTERVAL.
     state.arm_reclaim(Instant::now());
 }
 
@@ -386,7 +416,7 @@ pub(super) fn shed_on_request(
     rendezvous: &mut Option<beacon::Rendezvous>,
 ) {
     if state.test_holds.remove(&TestHold::Shed) {
-        shed_beacon(state, params, rendezvous);
+        shed_beacon(state, params, rendezvous, "a test asked for it");
     }
 }
 
@@ -610,37 +640,8 @@ pub(super) fn shed_rival_beacon_if_due(
         "beacon rival re-check: releasing the rendezvous to re-probe for a same-id co-host"
     );
     state.beacon_notes.remove(&BeaconNote::YieldToLower);
-    // `shed`, not a plain drop: the graceful endpoint close turns the
-    // peer's link to its own dead beacon into an immediate
-    // `NeighborDown` instead of a zombie that only dies at the QUIC idle
-    // timeout — the zombie both stalls the post-shed re-graft and leaves
-    // a poisoned pool entry under the shared id.
-    if let Some(held) = rendezvous.take() {
-        state.beacon_closing = Some(held.shed_then());
-    }
-    state.next_rival_recheck = None;
     state.rival_recheck_rounds = state.rival_recheck_rounds.saturating_add(1);
-    // A round that was running against our own beacon now has nothing to find.
-    state.cancel_rendezvous_round();
-    // The book still names the beacon just shed; the next holder writes its own address. What the
-    // mesh registered for the id by itself (a relay rung) is written back.
-    state.address_book.remove_endpoint_info(arm.params.id);
-    super::setup::register_rendezvous(
-        &state.address_book,
-        arm.params,
-        &state.rungs.withheld_rungs(),
-    );
-    // Don't wait for that `NeighborDown` either — clear the link flag now
-    // (mirroring the hard resume edge), or a yielding node's heal ticks
-    // idle on "rendezvous linked" instead of grafting the rival's beacon.
-    state.rendezvous_flags.remove(&RendezvousFlag::Linked);
-    // We just released the identity to re-probe it, so the reading that
-    // stood before the release answers a question we have re-asked.
-    state.forget_rendezvous_verdict();
-    // Arm the fast burst explicitly rather than waiting for our own
-    // beacon's `NeighborDown` to do it — the re-probe (and the re-claim
-    // when no rival exists) then runs within ~RECLAIM_INTERVAL.
-    state.arm_reclaim(Instant::now());
+    release_beacon(state, arm.params, rendezvous);
     true
 }
 
