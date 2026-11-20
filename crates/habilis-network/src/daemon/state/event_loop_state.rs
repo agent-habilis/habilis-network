@@ -642,6 +642,25 @@ pub struct EventLoopState {
     pub(crate) below_target_since: Option<Instant>,
     /// When a graft last fell back to a `Join` for a starved node.
     pub(crate) join_fallback_at: Option<Instant>,
+    /// Since when this node holds fewer than G links and has gained none. Cleared by a link.
+    pub(crate) short_since: Option<Instant>,
+    /// When a graft last forced a high priority `Neighbor` request for a node one link short.
+    pub(crate) forced_neighbor_at: Option<Instant>,
+    /// How much longer than `FORCE_NEIGHBOR_AFTER` this node waits, as a fraction: it is drawn
+    /// once, so that the members that fell short together do not force together.
+    pub(crate) force_jitter: f64,
+    /// How many forced requests this node sent since it last held G links or a new record of
+    /// links. Each one doubles the window, up to `STARVED`. This bounds the churn of members with
+    /// different caps; it does not stop the gap of an odd mesh, which `is_anchor` stops.
+    pub(crate) force_streak: u32,
+    /// The most links this node held since it last held none. A link beyond it starts the doubling
+    /// over: a node that still gains links is not stuck, so its next request is not slowed by the
+    /// old ones.
+    pub(crate) most_links: usize,
+    /// Whether the last count of links was one short of G.
+    pub(crate) short_by_one: bool,
+    /// The endpoint of this node, set when the transports are wired. The anchor rule compares it.
+    pub(crate) own_endpoint: Option<EndpointId>,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
     pub(crate) graft_backoff: graft_backoff::GraftBackoff,
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
@@ -1123,6 +1142,13 @@ impl EventLoopState {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             redials: redial::Redials::default(),
             join_fallback_at: None,
+            short_since: None,
+            forced_neighbor_at: None,
+            force_streak: 0,
+            most_links: 0,
+            short_by_one: false,
+            own_endpoint: None,
+            force_jitter: rand::Rng::random_range(&mut rand::rng(), 0.0..=0.5),
             graft_backoff: graft_backoff::GraftBackoff::default(),
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
@@ -1402,6 +1428,13 @@ impl EventLoopState {
         } else {
             self.below_target_since = None;
         }
+        self.short_by_one = linked.saturating_add(1) == max_connections;
+        if linked < max_connections {
+            self.short_since.get_or_insert(now);
+        } else {
+            self.short_since = None;
+            self.force_streak = 0;
+        }
     }
 
     /// A frame is held for the lane peer `peer` at `now`: its session is wanted.
@@ -1523,6 +1556,71 @@ impl EventLoopState {
             .join_fallback_at
             .is_none_or(|at| now.duration_since(at) >= window);
         starved && waited
+    }
+
+    /// Whether a graft at `now` forces a high priority `Neighbor` request: the node holds fewer
+    /// than G links and has gained none for `FORCE_NEIGHBOR_AFTER` (stretched by its jitter), and the
+    /// last forced request is as old. A `true` stamps the request.
+    pub(crate) fn forced_neighbor_due(&mut self, now: Instant) -> bool {
+        let due = self.forced_neighbor_ready(now);
+        if due {
+            self.forced_neighbor_at = Some(now);
+            self.force_streak = self.force_streak.saturating_add(1);
+        }
+        due
+    }
+
+    /// The wait before a forced request: `FORCE_NEIGHBOR_AFTER`, doubled for each forced request
+    /// since the streak began, at most `STARVED`, and then stretched by the jitter, so that two
+    /// nodes at the cap still wait for different times.
+    pub(crate) fn force_window(&self) -> Duration {
+        let doublings = 2_u32.saturating_pow(self.force_streak);
+        let grown = tuning::FORCE_NEIGHBOR_AFTER
+            .saturating_mul(doublings)
+            .min(STARVED);
+        grown.mul_f64(1.0 + self.force_jitter)
+    }
+
+    /// Whether no live member has a greater endpoint than this node. A member is live when it is
+    /// in the roster, not quiet, and heard within `STARVED`; the sweep drops a peer that is silent
+    /// for `ALIVE_TIMEOUT` (90 s), so in practice that is the live window, and the other two tests
+    /// are guards. A member that this node is linked to counts at once, with no roster row or bound
+    /// address needed. A node short by one link in a mesh where the links of all the members add up to
+    /// an odd number is the last gap: no member can fill it, and a forced request would only move
+    /// it. The greatest live endpoint keeps the gap, so the gap stops there, and no other rule
+    /// has to tell that gap from the two short members that a forced request is for.
+    pub(crate) fn is_anchor(&self, now: Instant) -> bool {
+        let Some(own) = self.own_endpoint else {
+            return false;
+        };
+        // A linked member is alive and a member, whether or not the roster has bound its address
+        // yet: two linked members that are one link short must not both keep the gap.
+        if self.linked_endpoints.iter().any(|linked| *linked > own) {
+            return false;
+        }
+        for key in &self.peers {
+            let heard = self.last_seen.get(key);
+            let alive = heard.is_some_and(|at| now.saturating_duration_since(*at) < STARVED);
+            if !alive || self.quiet.contains(key) {
+                continue;
+            }
+            if self.address_of(key).is_some_and(|address| address.id > own) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// [`Self::forced_neighbor_due`] without the stamp.
+    pub(crate) fn forced_neighbor_ready(&self, now: Instant) -> bool {
+        let window = self.force_window();
+        let short = self
+            .short_since
+            .is_some_and(|since| now.duration_since(since) >= window);
+        let waited = self
+            .forced_neighbor_at
+            .is_none_or(|at| now.duration_since(at) >= window);
+        short && waited && !(self.short_by_one && self.is_anchor(now))
     }
 
     /// Whether a graft leaves `peer` alone at `now`: it refused a `Neighbor` request and its
@@ -2032,6 +2130,7 @@ impl EventLoopState {
         self.linked_endpoints.remove(&peer);
         if self.linked_endpoints.is_empty() {
             self.zero_links_since.get_or_insert_with(Instant::now);
+            self.most_links = 0;
         }
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
     }
@@ -2062,6 +2161,11 @@ impl EventLoopState {
     /// A gossip link to `peer` is up.
     pub(crate) fn link(&mut self, peer: EndpointId) {
         self.linked_endpoints.insert(peer);
+        if self.linked_endpoints.len() > self.most_links {
+            self.most_links = self.linked_endpoints.len();
+            self.force_streak = 0;
+        }
+        self.short_since = None;
         self.zero_links_since = None;
         self.regraft_at.remove(&peer);
         self.graft_backoff.reset(peer);
@@ -2954,6 +3058,22 @@ impl EventLoopState {
     pub(crate) fn quiet_for_test(&mut self, nickname: &str) {
         let key = self.name_key(nickname);
         self.quiet.insert(key);
+    }
+
+    /// A live member of the roster whose endpoint is `endpoint` and whom this node heard at `at`.
+    pub(crate) fn live_member_for_test(
+        &mut self,
+        nickname: &str,
+        endpoint: EndpointId,
+        at: Instant,
+    ) {
+        let key = self.name_key(nickname);
+        self.peers.insert(key);
+        self.last_seen.insert(key, at);
+        let name = Nickname::try_new(nickname).expect("a test nickname is valid");
+        self.hint_owner.insert(name.clone(), key);
+        self.peer_endpoints
+            .insert(name, EndpointAddr::new(endpoint));
     }
 
     pub(crate) fn last_seen_for_test(&mut self, nickname: &str, at: Instant) {

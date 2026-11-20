@@ -998,17 +998,23 @@ fn refuse_foreign_lock_file(lock: &File, path: &Path) -> Result<()> {
 /// Open the lock file of the member key of `state`, mode 0600.
 #[cfg(all(unix, feature = "host"))]
 fn open_key_lock(state: &Path) -> Result<File> {
+    refuse_shared_state_folder(state)?;
+    open_lock_file(&state.with_extension("key.lock"))
+}
+
+/// Open the lock file at `lock_path`, mode 0600, never through a link, and refuse a file that another user
+/// owns. The folder of the file must exist.
+#[cfg(all(unix, feature = "host"))]
+fn open_lock_file(lock_path: &Path) -> Result<File> {
     use anyhow::Context as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-    refuse_shared_state_folder(state)?;
-    let lock_path = state.with_extension("key.lock");
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(false).mode(0o600);
     let lock: File = options
         .custom_flags(no_link_flags())
-        .open(&lock_path)
+        .open(lock_path)
         .with_context(|| format!("the lock file {} cannot be opened", lock_path.display()))?;
-    refuse_foreign_lock_file(&lock, &lock_path)?;
+    refuse_foreign_lock_file(&lock, lock_path)?;
     Ok(lock)
 }
 
@@ -1345,11 +1351,43 @@ pub(crate) fn default_state_path(base: &Path, mesh: &MeshId, author: &Nickname) 
     util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.state.json"))
 }
 
-/// The chunk folder of a node: `<runtime base>/<mesh folder>/<nickname>.chunks`. A run clears it when it starts.
+/// The chunk folder of a node: `<runtime base>/<mesh folder>/<nickname>.chunks`. The run that holds its lock
+/// (`hold_chunks_folder`) clears it when it starts.
 #[cfg(feature = "host")]
 pub(crate) fn default_chunks_path(base: &Path, mesh: &MeshId, author: &Nickname) -> PathBuf {
     use crate::util;
     util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.chunks"))
+}
+
+/// The lock file of a chunk folder: `<nickname>.chunks.lock`, beside the folder `<nickname>.chunks`.
+#[cfg(all(unix, feature = "host"))]
+fn chunks_lock_path(folder: &Path) -> PathBuf {
+    let mut name = folder.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// Take the exclusive lock of the chunk folder `folder`, and keep it as long as the returned file lives. The
+/// run that holds it clears the folder and is the only one that uses it: a second daemon of the same nickname
+/// on the same mesh and runtime base would otherwise clear the chunks that the first one serves. `Ok(None)`
+/// means another daemon holds the folder. It is an OS lock on the descriptor, so a crash frees it and no sweep
+/// is needed. The caller keeps its chunks in memory when it gets no lock.
+///
+/// # Errors
+///
+/// The lock file cannot be opened, or is not a regular file of this user, or the file system has no file locks.
+#[cfg(all(unix, feature = "host"))]
+pub(crate) fn hold_chunks_folder(folder: &Path) -> Result<Option<File>> {
+    use anyhow::Context as _;
+    use std::fs::TryLockError;
+    let lock_path = chunks_lock_path(folder);
+    let lock = open_lock_file(&lock_path)?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(error)
+            .with_context(|| format!("the lock file {} cannot be locked", lock_path.display())),
+    }
 }
 
 /// The keys of this run, under the state path that [`keys_state_path`] gives. `mesh` is the mesh id and the
@@ -3614,6 +3652,22 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn the_lock_file_of_a_chunk_folder_is_named_after_the_folder() {
+        let _guard = ::habilis_network_test_tracing::init();
+        for (folder, want) in [
+            ("/run/mesh/alice.chunks", "/run/mesh/alice.chunks.lock"),
+            ("/run/mesh/a.b.chunks", "/run/mesh/a.b.chunks.lock"),
+        ] {
+            assert_eq!(
+                super::chunks_lock_path(Path::new(folder)),
+                Path::new(want),
+                "the lock file sits beside the folder and keeps its whole name"
+            );
+        }
     }
 
     // The default of the one bound: 16 direct connections, gossip neighbors, `WebRTC` sessions

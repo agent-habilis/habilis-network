@@ -228,6 +228,12 @@ If the correct fix is large, split it into small steps. Each step compiles and p
 
 Until version 1.0, we do not care about backward compatibility. Before 1.0, break compatibility when it gives a better design, better performance, or better reliability. Do not keep a shim, an alias, or a fallback only for old versions.
 
+## Dependency pins
+
+Never merge a git dependency pinned to a commit that exists only on a branch. This covers every `git` + `rev` entry in `Cargo.toml`, our forks (`agent-habilis/iroh`, `agent-habilis/iroh-gossip`) included. During development, a pin to a branch commit is fine. Before the merge, move the pin to a commit on the `main` of that dependency, for example its squash commit.
+
+A squash merge makes a new commit, so a branch commit never reaches `main`. A pin to it then lacks every later fix of that branch, and a new branch made from it is out of date. To check a pin, run `gh api repos/<owner>/<repo>/compare/main...<rev> --jq .status`: the result must be `behind` or `identical`, never `ahead` or `diverged`.
+
 ## Logging
 
 Developer logs use `tracing`. Message bodies are redacted by default.
