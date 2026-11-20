@@ -83,7 +83,7 @@ mod tests {
     use crate::daemon::state::EventLoopState;
     use crate::testing;
     use crate::util::clock::Instant;
-    use crate::util::tuning::FORCE_NEIGHBOR_AFTER;
+    use crate::util::tuning::{FORCE_NEIGHBOR_AFTER, STARVED};
 
     const TARGET: usize = 4;
 
@@ -136,6 +136,23 @@ mod tests {
             graft_request(&mut state, target(1), TARGET, due, true),
             GraftRequest::Force,
             "a node at TARGET - 1 links, short for the window, asks the refusing peer with a high priority request"
+        );
+    }
+
+    #[test]
+    fn a_starved_node_with_both_due_joins_and_does_not_force() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut state = short_node(TARGET - 2, start);
+        let due = start + STARVED;
+        assert_eq!(
+            graft_request(&mut state, target(1), TARGET, due, true),
+            GraftRequest::Join,
+            "at TARGET - 2 links the starved Join keeps its precedence over the forced request"
+        );
+        assert!(
+            state.forced_neighbor_at.is_none(),
+            "a Join does not use up the window of the forced request"
         );
     }
 

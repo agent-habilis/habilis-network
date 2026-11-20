@@ -212,7 +212,7 @@ mod tests {
 
     use iroh::EndpointAddr;
 
-    use super::retry_candidates_at;
+    use super::{next_fill, retry_candidates_at};
     use crate::daemon::state::EventLoopState;
     use crate::testing;
     use crate::transport::probe::graft_request::{GraftRequest, GraftTarget, graft_request};
@@ -255,6 +255,25 @@ mod tests {
         );
         state.settle_graft_backoff(start + Duration::from_secs(21));
         state
+    }
+
+    #[test]
+    fn the_fill_tick_picks_the_refusing_peer_when_the_window_ends() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let state = node_whose_only_free_peer_refused(start);
+        let early = start + FORCE_NEIGHBOR_AFTER.saturating_sub(Duration::from_secs(1));
+        assert_eq!(
+            next_fill(&state, TARGET, rendezvous(), early, 0),
+            None,
+            "before the window the refusing peer is left alone"
+        );
+        let due = start + FORCE_NEIGHBOR_AFTER;
+        assert_eq!(
+            next_fill(&state, TARGET, rendezvous(), due, 0).map(|address| address.id),
+            Some(peer()),
+            "when the window ends the refusing peer is picked, so that the request is forced"
+        );
     }
 
     #[test]
