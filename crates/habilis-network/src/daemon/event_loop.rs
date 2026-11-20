@@ -20,6 +20,8 @@ use iroh_gossip::net;
 use n0_future::time;
 #[cfg(feature = "host")]
 use serde::de;
+#[cfg(feature = "host")]
+use std::io;
 use std::{future, path, process};
 pub(super) mod ctx_parts;
 mod event_loop_error;
@@ -70,7 +72,7 @@ use super::heal::{GossipLink, ResubscribeEnv, apply_rung_change, resubscribe_tic
 use super::node::SignalHandling;
 #[cfg(feature = "host")]
 use super::shutdown;
-use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
+use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure};
 use super::state::{EventLoopState, FrameOverheads, MeshChunks, MeshSecrets};
 use super::timers;
 use crate::daemon::setup::LiveCount;
@@ -205,7 +207,7 @@ async fn run_checked<Driver: NodeDriver>(
 
     let intervals = build_maintenance_intervals().await;
     #[cfg(feature = "host")]
-    let quit_rx = quit_channel(handle_signals, exit_on_quit, runtime.owner);
+    let quit_rx = quit_channel(handle_signals, exit_on_quit, runtime.owner)?;
     #[cfg(not(feature = "host"))]
     let quit_rx = quit_channel(handle_signals, exit_on_quit);
 
@@ -345,18 +347,18 @@ fn quit_channel(
     handle_signals: SignalHandling,
     exit_on_quit: bool,
     owner: Option<shutdown::Owner>,
-) -> mpsc::Receiver<()> {
-    if handle_signals == SignalHandling::Handle {
-        shutdown::spawn_quit_signal_tasks(exit_on_quit, owner)
-    } else {
-        never_quit()
-    }
+) -> io::Result<Option<mpsc::Receiver<()>>> {
+    (handle_signals == SignalHandling::Handle)
+        .then(|| shutdown::spawn_quit_signal_tasks(exit_on_quit, owner))
+        .transpose()
 }
 
 #[cfg(not(feature = "host"))]
-fn quit_channel(handle_signals: SignalHandling, _exit_on_quit: bool) -> mpsc::Receiver<()> {
-    let _ = handle_signals;
-    never_quit()
+fn quit_channel(
+    _handle_signals: SignalHandling,
+    _exit_on_quit: bool,
+) -> Option<mpsc::Receiver<()>> {
+    None
 }
 
 /// The state file of a host daemon, seeded by the app. `None` when there is no file to write: an
@@ -857,7 +859,8 @@ struct EventLoop<Driver: NodeDriver> {
     /// The in-process typed session channel (in-process: library API or MCP); `None` on the CLI.
     external_req_rx: Option<mpsc::Receiver<Driver::Session>>,
     external_msg_tx: Option<broadcast::Sender<Authored>>,
-    quit_rx: mpsc::Receiver<()>,
+    /// The process signals, or `None` when the session does not handle them.
+    quit_rx: Option<mpsc::Receiver<()>>,
     exit_on_quit: bool,
     /// The application's localhost HTTP binding request channel; `None` off.
     http_rx: Option<mpsc::Receiver<Driver::Http>>,
@@ -884,9 +887,6 @@ struct EventLoop<Driver: NodeDriver> {
     owned: OwnedEndpoints,
 }
 
-/// The daemon's `select!` loop. Never returns normally on the CLI
-/// path (ctrl-c / SIGTERM `std::process::exit`s); in-process drivers
-/// break out via their external quit channel and get `Ok(())`.
 /// Log the one per-daemon build-stamp line into the always-on file (one log
 /// file == one process == one build). The `ready` JSON event carries the same
 /// `version`; this is the file-log counterpart. Explicit pinned target so it
@@ -923,7 +923,7 @@ struct Loop<'node, Driver: NodeDriver> {
     started: Instant,
     external_quit_rx: Option<mpsc::Receiver<()>>,
     external_req_rx: Option<mpsc::Receiver<Driver::Session>>,
-    quit_rx: mpsc::Receiver<()>,
+    quit_rx: Option<mpsc::Receiver<()>>,
     exit_on_quit: bool,
     http_rx: Option<mpsc::Receiver<Driver::Http>>,
     unicast_rx: Option<mpsc::Receiver<transport::UnicastFrame>>,
@@ -1180,8 +1180,6 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         timers::tick_collection_census(&self.state);
     }
 
-    /// The build of a seed of the state channel is done: sign the chain and send it, root first.
-    /// A node that cannot reach the overlay keeps the frames for when it meshes.
     async fn alive(&mut self) {
         self.state.idle.alive += 1;
         let context = self.parts.handler_ctx(&self.sender);
@@ -1256,18 +1254,6 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
                 &self.rendezvous_params,
             )
             .await;
-            maybe_cohost(
-                &mut self.state,
-                &context,
-                &CohostArm {
-                    policy: self.cohost,
-                    params: &self.rendezvous_params,
-                    started: self.started,
-                },
-                &mut self.rendezvous,
-                &mut self.rival_probe,
-            )
-            .await;
         } else {
             // Stream ended: resubscribe instead of healing a dead topic
             // (see `resubscribe_tick`); the beacon keeps the mesh joinable.
@@ -1286,20 +1272,21 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
                 },
             )
             .await?;
-            let context = self.parts.handler_ctx(&self.sender);
-            maybe_cohost(
-                &mut self.state,
-                &context,
-                &CohostArm {
-                    policy: self.cohost,
-                    params: &self.rendezvous_params,
-                    started: self.started,
-                },
-                &mut self.rendezvous,
-                &mut self.rival_probe,
-            )
-            .await;
         }
+        // After the branch: a resubscribe replaces the sender.
+        let context = self.parts.handler_ctx(&self.sender);
+        maybe_cohost(
+            &mut self.state,
+            &context,
+            &CohostArm {
+                policy: self.cohost,
+                params: &self.rendezvous_params,
+                started: self.started,
+            },
+            &mut self.rendezvous,
+            &mut self.rival_probe,
+        )
+        .await;
         Ok(())
     }
 
@@ -1774,7 +1761,7 @@ async fn run_loop<Driver: NodeDriver>(
                 None => { lp.external_req_rx = None; },
                 Some(request) => { lp.session_request(request).await; },
             },
-            _ = lp.quit_rx.recv() => {
+            _ = recv_opt(&mut lp.quit_rx) => {
                 exit_after_release = lp.quit().await;
                 break;
             }
@@ -2031,11 +2018,6 @@ async fn build_maintenance_intervals() -> MaintenanceIntervals {
     }
 }
 
-/// `select!`-friendly receive over an optional mpsc channel: yields
-/// the next item, `None` once the channel closes, and pends forever
-/// when the channel is absent so the arm stays inert for drivers that
-/// don't wire it (CLI/MCP). Shared by the ipc / external-quit /
-/// external-send arms so the idiom isn't written three ways.
 /// Pends while no shed runs; resolves once when the close of the shed beacon is done. A receiver
 /// whose sender was dropped also resolves, so a lost close task cannot hold the re-probe back.
 async fn closed_opt(rx: &mut Option<oneshot::Receiver<()>>) {
@@ -2047,6 +2029,11 @@ async fn closed_opt(rx: &mut Option<oneshot::Receiver<()>>) {
     }
 }
 
+/// `select!`-friendly receive over an optional mpsc channel: yields
+/// the next item, `None` once the channel closes, and pends forever
+/// when the channel is absent so the arm stays inert for drivers that
+/// don't wire it (CLI/MCP). Shared by the ipc / external-quit /
+/// external-send arms so the idiom isn't written three ways.
 async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
     match rx.as_mut() {
         Some(rx) => rx.recv().await,

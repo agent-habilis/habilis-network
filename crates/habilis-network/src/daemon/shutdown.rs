@@ -4,8 +4,7 @@
 //! once, on the way out, and it was the largest block of the file that never
 //! touched a tick.
 
-use std::mem;
-#[cfg(feature = "host")]
+#[cfg(all(feature = "host", not(unix)))]
 use tokio::signal;
 
 mod owned_endpoints;
@@ -15,8 +14,11 @@ mod owner;
 mod owner_pid_error;
 mod quit_params;
 
+#[cfg(feature = "host")]
+use std::io;
 use std::time::Duration;
 
+#[cfg(feature = "host")]
 use tokio::sync::mpsc;
 
 use crate::{gossip, lifecycle};
@@ -123,28 +125,37 @@ pub(super) async fn announce_departure<Driver: NodeDriver>(
 /// daemon for a `/gossip-*` session) tends to send; without catching it
 /// the default action terminated the daemon without cleanup, stranding a
 /// ghost pill on the statusline. Only SIGKILL stays uncatchable.
+///
+/// On unix each handler is registered before this returns, so no signal after it has the default
+/// action, and a handler that cannot be registered is an error of the start.
 #[cfg(feature = "host")]
 pub(super) fn spawn_quit_signal_tasks(
     exit_on_quit: bool,
     owner: Option<Owner>,
-) -> mpsc::Receiver<()> {
+) -> io::Result<mpsc::Receiver<()>> {
     let (quit_tx, quit_rx): (mpsc::Sender<()>, mpsc::Receiver<()>) = mpsc::channel(1);
-    let ctrl_c_tx = quit_tx.clone();
-    tokio::spawn(async move {
-        let _ = signal::ctrl_c().await;
-        let _ = ctrl_c_tx.send(()).await;
-    });
     #[cfg(unix)]
     for kind in [
+        unix::SignalKind::interrupt(),
         unix::SignalKind::terminate(),
         unix::SignalKind::hangup(),
         unix::SignalKind::quit(),
     ] {
+        let mut signal = unix::signal(kind)?;
         let signal_tx = quit_tx.clone();
         tokio::spawn(async move {
-            let mut signal = unix::signal(kind).expect("failed to register termination handler");
             signal.recv().await;
             let _ = signal_tx.send(()).await;
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let ctrl_c_tx = quit_tx.clone();
+        tokio::spawn(async move {
+            // A handler that cannot be registered is no ctrl-c: it must not end the daemon.
+            if signal::ctrl_c().await.is_ok() {
+                let _ = ctrl_c_tx.send(()).await;
+            }
         });
     }
     // Only the CLI daemon owns a process to exit; the in-process driver runs
@@ -154,7 +165,7 @@ pub(super) fn spawn_quit_signal_tasks(
     if exit_on_quit {
         spawn_orphan_watch(quit_tx, owner);
     }
-    quit_rx
+    Ok(quit_rx)
 }
 /// Whether `pid` can own a daemon, with the checks and messages of
 /// `EventLoopConfig::owner_pid`. For a launcher that must refuse a bad
@@ -258,13 +269,6 @@ pub(super) fn orphan_watch_warranted(original_ppid: i32) -> bool {
 #[cfg(all(unix, feature = "host"))]
 pub(super) fn parent_lost(original_ppid: i32, current_ppid: i32) -> bool {
     original_ppid != current_ppid
-}
-/// A quit channel whose sender is deliberately leaked, so the receiver parks
-/// forever. The loop's quit arm then only ever fires from `external_quit_rx`.
-pub(super) fn never_quit() -> mpsc::Receiver<()> {
-    let (quit_tx, quit_rx): (mpsc::Sender<()>, mpsc::Receiver<()>) = mpsc::channel(1);
-    mem::forget(quit_tx);
-    quit_rx
 }
 
 #[cfg(all(unix, feature = "host"))]
