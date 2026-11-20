@@ -50,3 +50,7 @@ test("a proc macro in crates is refused", () => {
   expectExit({ "crates/x/src/a.rs": "#[proc_macro_attribute]\npub fn test(a: TokenStream, b: TokenStream) -> TokenStream { b }" }, 1);
 });
 
+
+test("a derive proc macro, which always has arguments, is refused", () => {
+  expectExit({ "crates/x/src/a.rs": "#[proc_macro_derive(Twice)]\npub fn twice(input: TokenStream) -> TokenStream { input }" }, 1);
+});

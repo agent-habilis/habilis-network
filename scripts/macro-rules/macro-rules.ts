@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-const MACRO = /\bmacro_rules!|#\[proc_macro(_attribute|_derive)?\]/g;
+const MACRO = /\bmacro_rules!|#\[proc_macro(?:_attribute|_derive)?\b/g;
 const SCOPE = /^crates\/.*\.rs$/;
 
 // The files git knows that sit under crates/: tracked, or new and not ignored.
