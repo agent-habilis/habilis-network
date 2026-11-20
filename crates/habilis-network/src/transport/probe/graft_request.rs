@@ -123,7 +123,7 @@ mod tests {
         let linked = &state.linked_endpoints;
         state.graft_backoff.settle(
             at + Duration::from_secs(21),
-            |peer| linked.contains(peer),
+            |endpoint| linked.contains(endpoint),
             BACKOFF_SPREAD,
         );
     }
