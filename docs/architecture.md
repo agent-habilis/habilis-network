@@ -746,6 +746,9 @@ An id of version 1, minted before the policy had its own byte, is refused with a
 
 Every create surface names three mesh-wide choices apart, because they are three concepts.
 `lookup` (`--lookup mdns,dht,relay` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
+Only the beacon publishes the rendezvous to the DHT, under its own key, and a peer never publishes.
+With a relay lookup the record holds the relay URL and no IP address.
+A mesh with no relay lookup (`dht` alone, or `dht` with `mdns`) has no relay URL, so the beacon publishes its IP addresses: **a DHT-only gossip puts the IP addresses of the beacon in the public DHT**, under a key that only the holders of the mesh id can compute.
 `transport` (`--transport udp,webrtc,multihop,gossip,relay`, `transport: ['udp', 'webrtc', 'multihop', 'gossip', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, `multihop` and `gossip` need one of the two next to them, and `udp,webrtc,multihop,relay` is the default (gossip is off, and `relay` is dropped from the default when there is no relay lookup).
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
 `habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.

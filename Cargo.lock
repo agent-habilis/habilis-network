@@ -1617,6 +1617,7 @@ dependencies = [
  "iroh-relay",
  "memchr",
  "n0-future",
+ "n0-mainline",
  "netdev",
  "parking_lot",
  "proptest",

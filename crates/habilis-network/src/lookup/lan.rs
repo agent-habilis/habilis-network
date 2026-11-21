@@ -240,7 +240,10 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     let mdns_handle: Option<super::MdnsHandle> = None;
     if lookups.dht && options.udp {
         #[cfg(all(feature = "host", feature = "dht"))]
-        super::dht::wire(&endpoint)?;
+        super::dht::wire(
+            &endpoint,
+            super::dht::Publish::of(is_beacon, &lookups.relay_lookup),
+        )?;
     }
     tracing::info!(target: "habilis_network::lookup",
         network,
