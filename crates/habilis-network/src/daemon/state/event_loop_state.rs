@@ -642,6 +642,8 @@ pub struct EventLoopState {
     pub(crate) below_target_since: Option<Instant>,
     /// How many peers short of G this node was at the last `note_link_count`.
     pub(crate) links_short: usize,
+    /// The G of the last `note_link_count`, so that a link transition can refresh the count.
+    link_cap: Option<usize>,
     /// When a graft last fell back to a `Join` for a starved node.
     pub(crate) join_fallback_at: Option<Instant>,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
@@ -1123,6 +1125,7 @@ impl EventLoopState {
             last_flooded_addr: None,
             below_target_since: None,
             links_short: 0,
+            link_cap: None,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             redials: redial::Redials::default(),
             join_fallback_at: None,
@@ -1401,11 +1404,20 @@ impl EventLoopState {
     /// clock of a starved node, and G stops it. `linked_endpoints` holds peers only: the link to the
     /// rendezvous is kept in `rendezvous_flags` (`RendezvousFlag::Linked`), never in the set.
     pub(crate) fn note_link_count(&mut self, max_connections: usize, now: Instant) {
+        self.link_cap = Some(max_connections);
         self.links_short = max_connections.saturating_sub(self.linked_endpoints.len());
         if self.links_short > 0 {
             self.below_target_since.get_or_insert(now);
         } else {
             self.below_target_since = None;
+        }
+    }
+
+    /// Count again after a link transition, with the G of the last count, so that the clock does not
+    /// keep the timestamp of a shortfall that a link ended between 2 counts.
+    fn refresh_link_count(&mut self) {
+        if let Some(max_connections) = self.link_cap {
+            self.note_link_count(max_connections, Instant::now());
         }
     }
 
@@ -2054,6 +2066,7 @@ impl EventLoopState {
             self.zero_links_since.get_or_insert_with(Instant::now);
         }
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
+        self.refresh_link_count();
     }
 
     /// Whether the census calls the state a silent partition: a meshed member that knows
@@ -2086,6 +2099,7 @@ impl EventLoopState {
         self.regraft_at.remove(&peer);
         self.graft_backoff.reset(peer);
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
+        self.refresh_link_count();
     }
 
     /// A member's `PeerInfo` read: `flag.held` says it holds the rendezvous. A flag from a

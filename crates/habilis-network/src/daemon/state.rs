@@ -4589,4 +4589,48 @@ mod tests {
             "a node that is not meshed refreshed"
         );
     }
+
+    /// The starvation clock follows the link transitions, not only the count points. A node that
+    /// held G - 1 peers for almost `STARVED` reaches G, and then loses a link before the next
+    /// count: the new shortfall has lasted seconds, so the clock starts again. A node that stays
+    /// below G keeps its first timestamp.
+    #[test]
+    fn a_link_that_reaches_g_and_a_link_that_goes_before_the_next_count_restart_the_starvation_clock()
+     {
+        let _guard = ::habilis_network_test_tracing::init();
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_secs(290))
+            .expect("the host has been up for 5 minutes");
+        let mut state = fresh_state();
+        for seed in [11, 12, 13] {
+            state.link(endpoint_id(seed));
+        }
+        state.note_link_count(4, long_ago);
+        assert_eq!(
+            state.below_target_since,
+            Some(long_ago),
+            "3 of 4 peers: the clock runs from the count"
+        );
+        state.link(endpoint_id(14));
+        assert_eq!(
+            state.below_target_since, None,
+            "a link that reaches G stops the clock at once"
+        );
+
+        state.unlink(endpoint_id(14));
+
+        let restarted = state
+            .below_target_since
+            .expect("below G again: the clock runs");
+        assert!(
+            restarted > long_ago,
+            "the new shortfall kept the timestamp of the old one"
+        );
+        state.unlink(endpoint_id(13));
+        assert_eq!(
+            state.below_target_since,
+            Some(restarted),
+            "a node that stays below G keeps its first timestamp"
+        );
+    }
 }
