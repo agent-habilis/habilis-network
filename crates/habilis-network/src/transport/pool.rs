@@ -1036,6 +1036,91 @@ mod tests {
         );
     }
 
+    /// **A send that registers after a dial published its outcome dials again.**
+    ///
+    /// The dialer publishes, then its guard leaves the map of dials in flight when it drops. A
+    /// register in that gap must not wait on the dial that ended: it would take the old outcome at
+    /// once, without a dial of its own.
+    #[test]
+    fn a_register_after_the_outcome_is_a_new_dialer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, bob, endpoint, _silent) = pool_with_silent_peer().await;
+
+            let super::registration::Registration::Dialer(first) = pool.register_dial(bob) else {
+                panic!("the first register of a peer is its dialer");
+            };
+            first.publish(Err("an old dial failed".to_owned()));
+            let second = pool.register_dial(bob);
+            let is_dialer = matches!(second, super::registration::Registration::Dialer(_));
+            drop(second);
+            drop(first);
+
+            assert!(
+                is_dialer,
+                "a register after the outcome waited on the dial that had ended"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// **The plan of a dial that published is released before its entry leaves the map.**
+    ///
+    /// The dial A publishes, so that its entry leaves and B registers and plans a dial of the same
+    /// peer. The drop of A must not release the plan by peer: that is the reservation of B, and B
+    /// would dial without the unit that its plan holds. With 1 unit, the reservation of B keeps
+    /// another peer out until B ends.
+    #[test]
+    fn the_drop_of_a_dial_that_published_keeps_the_reservation_of_the_next_dial() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, bob, endpoint, _silent) = pool_with_silent_peer().await;
+            let admission = SignalAdmission::new(1);
+            pool.set_admission(admission.clone());
+
+            let first = pool.register_planned_dial(bob, || None);
+            if let super::registration::Registration::Dialer(first) = &first {
+                first.publish(Err("an old dial failed".to_owned()));
+            }
+            let second = pool.register_planned_dial(bob, || None);
+            drop(first);
+
+            let room_for_another = admission.has_room(testing::endpoint_id(8));
+            drop(second);
+            endpoint.close().await;
+            assert!(
+                !room_for_another,
+                "the drop of the old dial released the reservation of the new one"
+            );
+        });
+    }
+
+    /// **The guard of an old dial that drops keeps the entry of the new dialer.**
+    ///
+    /// A third send while the new dial is in flight waits for it, and does not start a second dial.
+    #[test]
+    fn an_old_dial_that_drops_keeps_the_entry_of_the_new_dialer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, bob, endpoint, _silent) = pool_with_silent_peer().await;
+
+            let old = pool.register_dial(bob);
+            if let super::registration::Registration::Dialer(old) = &old {
+                old.publish(Err("an old dial failed".to_owned()));
+            }
+            let new = pool.register_dial(bob);
+            drop(old);
+            let third = pool.register_dial(bob);
+            let is_waiter = matches!(third, super::registration::Registration::Waiter(_));
+            drop(third);
+            drop(new);
+
+            assert!(
+                is_waiter,
+                "the drop of the old dial removed the entry of the new dial"
+            );
+            endpoint.close().await;
+        });
+    }
+
     /// Two sends to a peer that nobody serves: the waiter gets the error of the one dial there was,
     /// and does not dial again. The peer is on the dial-failure cooldown afterwards.
     #[test]

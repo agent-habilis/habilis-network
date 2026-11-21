@@ -97,6 +97,14 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
+        // When every member released the rendezvous, 2 members can claim it a few milliseconds
+        // apart: a holder that is bound and not serving yet answers the probe with a refusal,
+        // which the probe reads as silence. The rival check resolves that overlap by design, and
+        // the relay logs the connection that it replaced.
+        habilis_network_test_tracing::allow_warn(
+            "iroh::socket::transports::relay::actor",
+            "Another endpoint connected with the same endpoint id",
+        );
         let creator = open(
             "member-00",
             membership::JoinOptions::default()

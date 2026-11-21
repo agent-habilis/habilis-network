@@ -491,142 +491,148 @@ mod tests {
         (Fetches::new(done), received)
     }
 
-    #[tokio::test]
-    async fn a_fetched_value_is_shown_once_whole_and_its_chunks_are_kept() {
-        let harness = Harness::spawn().await;
-        let context = harness.context();
-        let author = Identity::generate();
-        let (pointer, stored, value) = author_side(CHUNK_BYTES_USIZE + 4_000, None).await;
-        let mut state = state_waiting(&author, pointer);
-        assert!(
-            harness.sink.state_changes().is_empty(),
-            "nothing is shown before the value is fetched"
-        );
-        let done = FetchDone {
-            channel: Channel::State,
-            author: author.author_key(),
-            pointer,
-            result: Ok(stored),
-        };
-        super::finish(&mut state, &mut Inert, &context, done, Instant::now()).await;
-        let changes = harness.sink.state_changes();
-        assert_eq!(
-            changes.len(),
-            1,
-            "the change is shown once, when the value is whole"
-        );
-        let NodeEvent::StateChanged {
-            channel,
-            document,
-            is_self,
-            ..
-        } = &changes[0]
-        else {
-            panic!("a state change");
-        };
-        assert_eq!(*channel, Channel::State, "the channel of the slice");
-        assert!(!is_self, "the change is not our own");
-        let hex = String::from_utf8_lossy(&author.author_key().hex()).into_owned();
-        assert_eq!(
-            document.get(&hex),
-            Some(&value),
-            "the document must hold the whole value of the author"
-        );
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            2,
-            "the chunks are kept, so this node serves them in turn"
-        );
-        assert!(
-            !state
-                .docs
-                .is_unresolved(Channel::State, &author.author_key()),
-            "the pointer is resolved"
-        );
-        harness.endpoint.close().await;
+    #[test]
+    fn a_fetched_value_is_shown_once_whole_and_its_chunks_are_kept() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let harness = Harness::spawn().await;
+            let context = harness.context();
+            let author = Identity::generate();
+            let (pointer, stored, value) = author_side(CHUNK_BYTES_USIZE + 4_000, None).await;
+            let mut state = state_waiting(&author, pointer);
+            assert!(
+                harness.sink.state_changes().is_empty(),
+                "nothing is shown before the value is fetched"
+            );
+            let done = FetchDone {
+                channel: Channel::State,
+                author: author.author_key(),
+                pointer,
+                result: Ok(stored),
+            };
+            super::finish(&mut state, &mut Inert, &context, done, Instant::now()).await;
+            let changes = harness.sink.state_changes();
+            assert_eq!(
+                changes.len(),
+                1,
+                "the change is shown once, when the value is whole"
+            );
+            let NodeEvent::StateChanged {
+                channel,
+                document,
+                is_self,
+                ..
+            } = &changes[0]
+            else {
+                panic!("a state change");
+            };
+            assert_eq!(*channel, Channel::State, "the channel of the slice");
+            assert!(!is_self, "the change is not our own");
+            let hex = String::from_utf8_lossy(&author.author_key().hex()).into_owned();
+            assert_eq!(
+                document.get(&hex),
+                Some(&value),
+                "the document must hold the whole value of the author"
+            );
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                2,
+                "the chunks are kept, so this node serves them in turn"
+            );
+            assert!(
+                !state
+                    .docs
+                    .is_unresolved(Channel::State, &author.author_key()),
+                "the pointer is resolved"
+            );
+            harness.endpoint.close().await;
+        });
     }
 
-    #[tokio::test]
-    async fn a_value_for_a_pointer_that_a_newer_version_replaced_is_not_shown() {
-        let harness = Harness::spawn().await;
-        let context = harness.context();
-        let author = Identity::generate();
-        let (pointer, stored, _) = author_side(CHUNK_BYTES_USIZE + 4_000, None).await;
-        let mut state = state_waiting(&author, pointer);
-        fixtures::slice_of_peer(
-            &mut state,
-            &author,
-            r#"{"version":2,"value":{"newer":1}}"#,
-            2,
-        );
-        let done = FetchDone {
-            channel: Channel::State,
-            author: author.author_key(),
-            pointer,
-            result: Ok(stored),
-        };
-        super::finish(&mut state, &mut Inert, &context, done, Instant::now()).await;
-        assert!(
-            harness.sink.state_changes().is_empty(),
-            "the late value of a replaced pointer is not shown"
-        );
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            0,
-            "the late value of a replaced pointer is not kept"
-        );
-        harness.endpoint.close().await;
+    #[test]
+    fn a_value_for_a_pointer_that_a_newer_version_replaced_is_not_shown() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let harness = Harness::spawn().await;
+            let context = harness.context();
+            let author = Identity::generate();
+            let (pointer, stored, _) = author_side(CHUNK_BYTES_USIZE + 4_000, None).await;
+            let mut state = state_waiting(&author, pointer);
+            fixtures::slice_of_peer(
+                &mut state,
+                &author,
+                r#"{"version":2,"value":{"newer":1}}"#,
+                2,
+            );
+            let done = FetchDone {
+                channel: Channel::State,
+                author: author.author_key(),
+                pointer,
+                result: Ok(stored),
+            };
+            super::finish(&mut state, &mut Inert, &context, done, Instant::now()).await;
+            assert!(
+                harness.sink.state_changes().is_empty(),
+                "the late value of a replaced pointer is not shown"
+            );
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                0,
+                "the late value of a replaced pointer is not kept"
+            );
+            harness.endpoint.close().await;
+        });
     }
 
-    #[tokio::test]
-    async fn a_fetch_that_failed_shows_nothing_and_starts_again_after_the_wait() {
-        let harness = Harness::spawn().await;
-        let context = harness.context();
-        let author = Identity::generate();
-        let (pointer, _, _) = author_side(CHUNK_BYTES_USIZE + 4_000, None).await;
-        let mut state = state_waiting(&author, pointer);
-        let now = Instant::now();
-        let waiting = state.docs.unresolved();
-        assert_eq!(
-            state
-                .fetches
-                .due(waiting.clone(), now, u64::MAX, ChunkPointer::size)
-                .len(),
-            1,
-            "a pointer that waits is due"
-        );
-        let done = FetchDone {
-            channel: Channel::State,
-            author: author.author_key(),
-            pointer,
-            result: Err(FetchError::NoSource),
-        };
-        super::finish(&mut state, &mut Inert, &context, done, now).await;
-        assert!(
-            harness.sink.state_changes().is_empty(),
-            "a failure shows nothing"
-        );
-        assert!(
-            state
-                .fetches
-                .due(waiting.clone(), now, u64::MAX, ChunkPointer::size)
-                .is_empty(),
-            "a fetch that failed waits before it starts again"
-        );
-        assert_eq!(
-            state
-                .fetches
-                .due(
-                    waiting,
-                    now + CHUNK_FETCH_RETRY,
-                    u64::MAX,
-                    ChunkPointer::size
-                )
-                .len(),
-            1,
-            "the fetch starts again when the wait is over"
-        );
-        harness.endpoint.close().await;
+    #[test]
+    fn a_fetch_that_failed_shows_nothing_and_starts_again_after_the_wait() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let harness = Harness::spawn().await;
+            let context = harness.context();
+            let author = Identity::generate();
+            let (pointer, _, _) = author_side(CHUNK_BYTES_USIZE + 4_000, None).await;
+            let mut state = state_waiting(&author, pointer);
+            let now = Instant::now();
+            let waiting = state.docs.unresolved();
+            assert_eq!(
+                state
+                    .fetches
+                    .due(waiting.clone(), now, u64::MAX, ChunkPointer::size)
+                    .len(),
+                1,
+                "a pointer that waits is due"
+            );
+            let done = FetchDone {
+                channel: Channel::State,
+                author: author.author_key(),
+                pointer,
+                result: Err(FetchError::NoSource),
+            };
+            super::finish(&mut state, &mut Inert, &context, done, now).await;
+            assert!(
+                harness.sink.state_changes().is_empty(),
+                "a failure shows nothing"
+            );
+            assert!(
+                state
+                    .fetches
+                    .due(waiting.clone(), now, u64::MAX, ChunkPointer::size)
+                    .is_empty(),
+                "a fetch that failed waits before it starts again"
+            );
+            assert_eq!(
+                state
+                    .fetches
+                    .due(
+                        waiting,
+                        now + CHUNK_FETCH_RETRY,
+                        u64::MAX,
+                        ChunkPointer::size
+                    )
+                    .len(),
+                1,
+                "the fetch starts again when the wait is over"
+            );
+            harness.endpoint.close().await;
+        });
     }
 
     #[test]
@@ -875,40 +881,42 @@ mod tests {
         });
     }
 
-    #[tokio::test]
-    async fn a_late_fetch_for_a_pointer_that_a_correction_replaced_refuses_nothing() {
-        let harness = Harness::spawn().await;
-        let author = Identity::generate();
-        let plain = serde_json::to_vec(&serde_json::json!({"k": [1, 2]})).expect("JSON");
-        let chunks = MeshChunks::open(None).expect("an in-memory store");
-        let root = chunks.put_value(&plain).await.expect("a value");
-        let corrected = ChunkPointer::of(root, &plain);
-        let mut state = state_waiting(&author, corrected);
-        let size = u64::try_from(plain.len()).expect("a size");
-        let done = FetchDone {
-            channel: Channel::State,
-            author: author.author_key(),
-            pointer: ChunkPointer::new(root, size, 7),
-            result: Ok(chunks.stored_bytes(root).await),
-        };
-        super::finish(
-            &mut state,
-            &mut Inert,
-            &harness.context(),
-            done,
-            Instant::now(),
-        )
-        .await;
-        let listed: Vec<_> = state.syncing(Channel::State).collect();
-        assert_eq!(
-            listed[0].refused, None,
-            "a fetch for a replaced pointer must not refuse the pointer that the slice holds now"
-        );
-        assert!(
-            harness.sink.infos().is_empty(),
-            "a fetch for a replaced pointer must show nothing"
-        );
-        harness.endpoint.close().await;
+    #[test]
+    fn a_late_fetch_for_a_pointer_that_a_correction_replaced_refuses_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let harness = Harness::spawn().await;
+            let author = Identity::generate();
+            let plain = serde_json::to_vec(&serde_json::json!({"k": [1, 2]})).expect("JSON");
+            let chunks = MeshChunks::open(None).expect("an in-memory store");
+            let root = chunks.put_value(&plain).await.expect("a value");
+            let corrected = ChunkPointer::of(root, &plain);
+            let mut state = state_waiting(&author, corrected);
+            let size = u64::try_from(plain.len()).expect("a size");
+            let done = FetchDone {
+                channel: Channel::State,
+                author: author.author_key(),
+                pointer: ChunkPointer::new(root, size, 7),
+                result: Ok(chunks.stored_bytes(root).await),
+            };
+            super::finish(
+                &mut state,
+                &mut Inert,
+                &harness.context(),
+                done,
+                Instant::now(),
+            )
+            .await;
+            let listed: Vec<_> = state.syncing(Channel::State).collect();
+            assert_eq!(
+                listed[0].refused, None,
+                "a fetch for a replaced pointer must not refuse the pointer that the slice holds now"
+            );
+            assert!(
+                harness.sink.infos().is_empty(),
+                "a fetch for a replaced pointer must show nothing"
+            );
+            harness.endpoint.close().await;
+        });
     }
 
     #[test]
@@ -965,39 +973,41 @@ mod tests {
         });
     }
 
-    #[tokio::test]
-    async fn on_a_passworded_mesh_the_sealed_bytes_open_with_the_key_of_the_mesh() {
-        let harness = Harness::spawn().await;
-        let context = harness.context();
-        let mesh_key = SymmetricKey::from([5u8; 32]);
-        let author = Identity::generate();
-        let (pointer, stored, value) =
-            author_side(CHUNK_BYTES_USIZE + 4_000, Some(mesh_key.derive(b"chunks"))).await;
-        let mut state = testing::fresh_state_with_mesh_key(mesh_key.clone());
-        fixtures::name_root_sealed(&mut state, &author, pointer, 1, &mesh_key);
-        let done = FetchDone {
-            channel: Channel::State,
-            author: author.author_key(),
-            pointer,
-            result: Ok(stored),
-        };
-        super::finish(&mut state, &mut Inert, &context, done, Instant::now()).await;
-        let changes = harness.sink.state_changes();
-        assert_eq!(
-            changes.len(),
-            1,
-            "the value of a passworded mesh is shown once"
-        );
-        let NodeEvent::StateChanged { document, .. } = &changes[0] else {
-            panic!("a state change");
-        };
-        let hex = String::from_utf8_lossy(&author.author_key().hex()).into_owned();
-        assert_eq!(
-            document.get(&hex),
-            Some(&value),
-            "the opened value is shown"
-        );
-        harness.endpoint.close().await;
+    #[test]
+    fn on_a_passworded_mesh_the_sealed_bytes_open_with_the_key_of_the_mesh() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let harness = Harness::spawn().await;
+            let context = harness.context();
+            let mesh_key = SymmetricKey::from([5u8; 32]);
+            let author = Identity::generate();
+            let (pointer, stored, value) =
+                author_side(CHUNK_BYTES_USIZE + 4_000, Some(mesh_key.derive(b"chunks"))).await;
+            let mut state = testing::fresh_state_with_mesh_key(mesh_key.clone());
+            fixtures::name_root_sealed(&mut state, &author, pointer, 1, &mesh_key);
+            let done = FetchDone {
+                channel: Channel::State,
+                author: author.author_key(),
+                pointer,
+                result: Ok(stored),
+            };
+            super::finish(&mut state, &mut Inert, &context, done, Instant::now()).await;
+            let changes = harness.sink.state_changes();
+            assert_eq!(
+                changes.len(),
+                1,
+                "the value of a passworded mesh is shown once"
+            );
+            let NodeEvent::StateChanged { document, .. } = &changes[0] else {
+                panic!("a state change");
+            };
+            let hex = String::from_utf8_lossy(&author.author_key().hex()).into_owned();
+            assert_eq!(
+                document.get(&hex),
+                Some(&value),
+                "the opened value is shown"
+            );
+            harness.endpoint.close().await;
+        });
     }
 
     #[test]
@@ -1147,76 +1157,79 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn the_held_bytes_are_those_of_the_values_held_whole_of_every_author_and_channel() {
-        let mut state = testing::fresh_state();
-        let first = Identity::generate();
-        let second = Identity::generate();
-        let waiting = ChunkPointer::new(Root::from_bytes([3; 32]), 70_000, 0);
-        let whole = ChunkPointer::new(Root::from_bytes([4; 32]), 90_000, 0);
-        fixtures::name_root(&mut state, &first, waiting, 1);
-        fixtures::name_root(&mut state, &second, whole, 1);
-        assert_eq!(
-            state.held_chunk_bytes(),
-            0,
-            "a pointer that waits holds nothing"
-        );
-        state
-            .docs
-            .resolve_pointer(
-                Channel::State,
-                &second.author_key(),
-                whole,
-                serde_json::json!({"a": 1}),
-            )
-            .expect("an object");
-        assert_eq!(
-            state.held_chunk_bytes(),
-            90_000,
-            "the value held whole counts, as the store keeps it"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_sweep_tick_frees_the_chunks_of_a_member_that_left_and_starts_the_wait_that_is_over()
-     {
-        let harness = Harness::spawn().await;
-        let context = harness.context();
-        let leaver = Identity::generate();
-        let waiting = Identity::generate();
-        let (held, stored, _) = author_side(CHUNK_BYTES_USIZE + 4_000, None).await;
-        let mut state = state_waiting(&leaver, held);
-        assert!(
+    #[test]
+    fn the_held_bytes_are_those_of_the_values_held_whole_of_every_author_and_channel() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = testing::fresh_state();
+            let first = Identity::generate();
+            let second = Identity::generate();
+            let waiting = ChunkPointer::new(Root::from_bytes([3; 32]), 70_000, 0);
+            let whole = ChunkPointer::new(Root::from_bytes([4; 32]), 90_000, 0);
+            fixtures::name_root(&mut state, &first, waiting, 1);
+            fixtures::name_root(&mut state, &second, whole, 1);
+            assert_eq!(
+                state.held_chunk_bytes(),
+                0,
+                "a pointer that waits holds nothing"
+            );
             state
                 .docs
                 .resolve_pointer(
                     Channel::State,
-                    &leaver.author_key(),
-                    held,
-                    serde_json::json!({"a": 1})
+                    &second.author_key(),
+                    whole,
+                    serde_json::json!({"a": 1}),
                 )
-                .expect("an object"),
-            "the value of the member is whole"
-        );
-        state
-            .chunks
-            .put_stored(&stored)
-            .await
-            .expect("the chunks are kept");
-        let (other, _, _) = author_side(CHUNK_BYTES_USIZE + 9_000, None).await;
-        fixtures::name_root(&mut state, &waiting, other, 1);
-        state.docs.forget(&leaver.author_key(), Instant::now());
-        super::on_sweep(&mut state, &context, Instant::now()).await;
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            0,
-            "the sweep tick frees the chunks that no slice names any more"
-        );
-        assert_eq!(
-            state.fetches.running(),
-            1,
-            "the sweep tick starts the fetch of the pointer that waits"
-        );
-        harness.endpoint.close().await;
+                .expect("an object");
+            assert_eq!(
+                state.held_chunk_bytes(),
+                90_000,
+                "the value held whole counts, as the store keeps it"
+            );
+        });
+    }
+
+    #[test]
+    fn the_sweep_tick_frees_the_chunks_of_a_member_that_left_and_starts_the_wait_that_is_over() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let harness = Harness::spawn().await;
+            let context = harness.context();
+            let leaver = Identity::generate();
+            let waiting = Identity::generate();
+            let (held, stored, _) = author_side(CHUNK_BYTES_USIZE + 4_000, None).await;
+            let mut state = state_waiting(&leaver, held);
+            assert!(
+                state
+                    .docs
+                    .resolve_pointer(
+                        Channel::State,
+                        &leaver.author_key(),
+                        held,
+                        serde_json::json!({"a": 1})
+                    )
+                    .expect("an object"),
+                "the value of the member is whole"
+            );
+            state
+                .chunks
+                .put_stored(&stored)
+                .await
+                .expect("the chunks are kept");
+            let (other, _, _) = author_side(CHUNK_BYTES_USIZE + 9_000, None).await;
+            fixtures::name_root(&mut state, &waiting, other, 1);
+            state.docs.forget(&leaver.author_key(), Instant::now());
+            super::on_sweep(&mut state, &context, Instant::now()).await;
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                0,
+                "the sweep tick frees the chunks that no slice names any more"
+            );
+            assert_eq!(
+                state.fetches.running(),
+                1,
+                "the sweep tick starts the fetch of the pointer that waits"
+            );
+            harness.endpoint.close().await;
+        });
     }
 }

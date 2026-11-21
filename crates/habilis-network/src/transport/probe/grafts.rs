@@ -105,6 +105,8 @@ pub(crate) async fn on_outcome(
     }
     let DirectOutcome { peer, direct, .. } = outcome;
     if direct {
+        // The probe is new information: a refusal of the peer before it no longer holds.
+        state.note_path_proven(peer);
         graft_proven(state, context, peer).await;
     } else if state.demote_unproven(peer) {
         tracing::info!(target: transport::LOG_TARGET, %peer, "no direct path within the probe deadline; peer stays relay-only");
@@ -141,13 +143,16 @@ pub(crate) async fn request_graft(
 }
 
 /// Record `peer` as `Direct`, graft it if it is not linked already and there
-/// is room, and flush any frame parked for it.
+/// is room, and flush any frame parked for it. The path is known when this runs: a probe
+/// that proves it calls `EventLoopState::note_path_proven` first (`on_outcome`), which also drops
+/// the refusal of the peer. The other callers (the fill tick, the retry, the regraft) have no new
+/// proof, so the refusal stays.
 pub(crate) async fn graft_proven(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
     peer: EndpointId,
 ) {
-    state.note_path_proven(peer);
+    state.note_path_known(peer);
     // A session to the rendezvous that attached after this node let go of it
     // must not graft it again: every graft of the rendezvous waits for
     // `rendezvous_wanted`.
@@ -185,7 +190,7 @@ pub(crate) async fn retry_direct(
 ) {
     // Every alive tick, so that the clock of a starved node does not outlive its cause.
     let now = Instant::now();
-    state.note_link_count(state.linked_endpoints.len(), context.max_connections, now);
+    state.note_link_count(context.max_connections, now);
     state.settle_graft_backoff(now);
     if state.relay_transport.relay_allowed() {
         regraft::fill_active_view(state, context).await;

@@ -1,5 +1,5 @@
 //! The relay leg of the lookup layer: the default **relay ladder** (n0
-//! prod), how a [`RelayChoice`] maps to an iroh [`RelayMode`], and the
+//! prod), how a [`RelayChoice`] maps to an iroh [`RelayMode`] of one rung, and the
 //! deterministic "home on the first reachable rung" bootstrap selection
 //! plus its steady-state failover decision.
 //!
@@ -13,25 +13,40 @@
 //! (`beacon::RendezvousParams::bind_ports`).
 
 use std::future;
+mod default_rung;
+mod return_watch;
+mod rung_decision;
+mod rung_follower;
+mod rung_path;
 mod rung_refresh;
 mod stoppable_task;
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use futures_util::future as future_util;
+use futures_util::stream::FuturesUnordered;
+use iroh::defaults::DEFAULT_RELAY_QUIC_PORT;
 use iroh::endpoint::{RelayStatus, presets};
 use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, Watcher};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
+pub use default_rung::DefaultRung;
+pub(crate) use rung_decision::{Generation, RungChange, RungDecision};
+use rung_follower::RungFollower;
+pub use rung_path::RungPath;
 pub(crate) use rung_refresh::RungRefresh;
 pub(crate) use stoppable_task::StoppableTask;
 
 use crate::protocol::meshes::RelayChoice;
 use crate::util::tuning::{
-    RELAY_LIVENESS_FAILS_TO_EVICT, RELAY_LIVENESS_INTERVAL, RELAY_REPROBE_BACKOFF_MAX,
-    RELAY_REPROBE_BACKOFF_MIN, RELAY_RUNG_PROBE,
+    self, RELAY_LIVENESS_FAILS_TO_EVICT, RELAY_REPROBE_BACKOFF_MAX, RELAY_REPROBE_BACKOFF_MIN,
+    RELAY_RUNG_PROBE, RELAY_RUNG_STAGGER,
 };
+use n0_future::time::Instant;
 use n0_future::{task as n0future_task, time as n0future_time};
 
 /// The default relay **ladder** — n0's prod relay set, in fixed
@@ -42,68 +57,91 @@ use n0_future::{task as n0future_task, time as n0future_time};
 /// dial: a creator-independent bootstrap that needs no address lookup to
 /// reach the rendezvous.
 ///
-/// The ladder is iroh `defaults::prod` (NA-east, NA-west, EU, AP). Our own operated relay is
-/// rung 0 only when `OPERATED_RELAY_IS_RUNG_0` is on, and it is off for now. Hardcoded,
-/// **not** `defaults::prod::default_relay_map()`, so members on different
-/// iroh versions still agree on the *same* ladder. Relay infra is
-/// versioned and not cross-compatible (sendme #121): an iroh bump can
-/// move `defaults::prod` off these hosts, silently breaking the
-/// relay-direct bootstrap for members on a different iroh version.
-/// `pinned_ladder_matches_iroh_prod` is the tripwire — it fails
-/// on such a move so we review (do these hosts still operate?) before
-/// shipping the bump.
+/// Rungs 0..3 are our relays, 1 URL for each relay host and path. That must
+/// stay so: iroh opens one relay session per URL, a dial to a peer homed on
+/// another rung opens a session on that rung too, and a relay drops the older
+/// session of an endpoint id, so 2 URLs of one relay process make an endpoint
+/// drop its own session. Rung 0 is direct: it answers QUIC address discovery,
+/// so a member homed on it learns its public address. Rungs 1 and 2 are
+/// tunnels, and a tunnel host has no direct name: the tunnel carries no UDP,
+/// so they answer no QUIC address discovery, and an endpoint that asked them
+/// for it would wait 3 s for its first net report. Rungs 3..7 are iroh
+/// `defaults::prod`, which are direct.
 ///
-/// Last such move: iroh 1.0.1 retired the `iroh-canary` infix for the
-/// stable `*.relay.n0.iroh.link` hosts. Mixed-ladder meshes (binaries
-/// from before/after that bump) still rendezvous via rung 0, which is
-/// ladder-version-independent; only the fallback rungs diverge. The
-/// `relay.agent-habilis.com` cutover then moved rung 0 itself: binaries
-/// from before it home on the retired `swarm-relay.…` host, so they
-/// cannot relay-direct rendezvous with binaries from after.
-pub const RENDEZVOUS_RELAY_LADDER: &[&str] = if OPERATED_RELAY_IS_RUNG_0 {
-    RUNGS.as_slice()
-} else {
-    RUNGS.split_at(1).1
-};
-
-/// Whether our own relay is rung 0 of the default ladder. It is off: `relay.agent-habilis.com` is
-/// behind Cloudflare, which does not proxy UDP 7842, so the relay has no QUIC address discovery.
-/// A peer that homes on it learns no public address and cannot hole-punch. Set this to `true`
-/// when the relay is served without the proxy and answers QUIC address discovery.
-const OPERATED_RELAY_IS_RUNG_0: bool = false;
-
-#[cfg(test)]
-const OPERATED_RELAY_HOST: &str = "relay.agent-habilis.com";
-
-const RUNGS: [&str; 5] = [
+/// Hardcoded, **not** `defaults::prod::default_relay_map()`, so members on
+/// different iroh versions still agree on the *same* ladder. Relay infra is
+/// versioned and not cross-compatible (sendme #121): an iroh bump can move
+/// `defaults::prod` off these hosts. `pinned_ladder_matches_iroh_prod` is
+/// the tripwire: it fails on such a move so we review the n0 rungs before
+/// the bump ships.
+pub const RENDEZVOUS_RELAY_LADDER: &[DefaultRung] = &[
     // No trailing-dot FQDN on any rung. Safari rejects the certificate of a
-    // dotted host, so a browser member could reach none of them. Rung 0 has
-    // a second reason: Cloudflare routes by exact Host header and 404s the
-    // dotted form (including the /relay websocket upgrade).
-    "https://relay.agent-habilis.com/",   // ours (rung 0)
-    "https://use1-1.relay.n0.iroh.link/", // NA-east
-    "https://usw1-1.relay.n0.iroh.link/", // NA-west
-    "https://euc1-1.relay.n0.iroh.link/", // EU
-    "https://aps1-1.relay.n0.iroh.link/", // AP
+    // dotted host, so a browser member could reach none of them. Our tunnel
+    // rungs have a second reason: the tunnel routes by exact Host header and
+    // 404s the dotted form (including the /relay websocket upgrade).
+    DefaultRung {
+        url: "https://nyc-relay1.agent-habilis.com/",
+        path: DIRECT,
+    },
+    DefaultRung {
+        url: "https://nyc-relay2.habilis.network/",
+        path: RungPath::Tunnel,
+    },
+    DefaultRung {
+        url: "https://slz-relay1.habilis.network/",
+        path: RungPath::Tunnel,
+    },
+    DefaultRung {
+        url: "https://use1-1.relay.n0.iroh.link/",
+        path: DIRECT,
+    },
+    DefaultRung {
+        url: "https://usw1-1.relay.n0.iroh.link/",
+        path: DIRECT,
+    },
+    DefaultRung {
+        url: "https://euc1-1.relay.n0.iroh.link/",
+        path: DIRECT,
+    },
+    DefaultRung {
+        url: "https://aps1-1.relay.n0.iroh.link/",
+        path: DIRECT,
+    },
 ];
 
-/// Parsed once; `RelayUrl` clones are `Arc`-backed (cheap).
-static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| {
+/// The path of a direct rung of the default ladder: QUIC address discovery on the default port.
+const DIRECT: RungPath = RungPath::Direct {
+    qad_port: DEFAULT_RELAY_QUIC_PORT,
+};
+
+/// The relay config of each rung of the default ladder, parsed once.
+static RENDEZVOUS_RELAY_LADDER_CONFIGS: LazyLock<Vec<RelayConfig>> = LazyLock::new(|| {
     RENDEZVOUS_RELAY_LADDER
         .iter()
-        .map(|raw| {
-            raw.parse()
-                .expect("RENDEZVOUS_RELAY_LADDER entries are valid relay URL constants")
+        .map(|rung| {
+            let url: RelayUrl = rung
+                .url()
+                .parse()
+                .expect("RENDEZVOUS_RELAY_LADDER entries are valid relay URL constants");
+            config_with_qad(url, rung.path().qad_port())
         })
         .collect()
 });
 
+/// The URLs of the default ladder, in order. `RelayUrl` clones are `Arc`-backed (cheap).
+static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| {
+    RENDEZVOUS_RELAY_LADDER_CONFIGS
+        .iter()
+        .map(|config| config.url.clone())
+        .collect()
+});
+
 /// Resolve a [`RelayChoice`] into the ordered relay **ladder**:
-/// `Disabled` ⇒ empty (no relay), `Pinned` ⇒ the default ladder (our
-/// rung 0, then the n0 prod rungs), `Custom` ⇒ the operator ladder (`--relay a,b,c`, order
+/// `Disabled` ⇒ empty (no relay), `Pinned` ⇒ the default ladder
+/// ([`RENDEZVOUS_RELAY_LADDER`]: our fleet, then the n0 prod rungs), `Custom` ⇒ the operator ladder (`--relay a,b,c`, order
 /// preserved). The beacon homes on, and the joiner pre-registers at, the
 /// first reachable rung (`select_bootstrap_rung`) — the beacon leg of
-/// `relay_mode` and `daemon::setup::register_rendezvous` must agree or
+/// `peer_relay_mode` and `daemon::setup::register_rendezvous` must agree or
 /// the relay-direct bootstrap dial finds nothing.
 ///
 /// # Examples
@@ -125,52 +163,50 @@ pub fn relay_ladder(choice: &RelayChoice) -> impl Iterator<Item = RelayUrl> {
     rungs.into_iter()
 }
 
-/// The relay config of one rung. A rung over plain `http://` has no TLS, and QUIC needs TLS, so
-/// it cannot serve QUIC address discovery. Probing its default QUIC port holds the first net
-/// report until the 3 s probe timeout of iroh, and the endpoint has no home relay until then.
+/// The relay config of one rung, with the QUIC address discovery that the relay answers. An
+/// endpoint that asks a relay for QUIC address discovery that it does not answer holds its first
+/// net report until the 3 s probe timeout of iroh, and has no home relay until then.
+///
+/// The setting belongs to the relay, so it follows the URL: a rung of the default ladder takes its
+/// [`RungPath`] wherever a ladder names it, a one-rung custom ladder of the beacon too. A custom
+/// ladder is URLs only, on the wire and in the API, so a custom rung that the default ladder does
+/// not name takes the rule of its scheme. An `https://` rung asks for QUIC address discovery on
+/// the default port. An `http://` rung has no TLS, and QUIC needs TLS, so it asks for none.
 fn rung_config(url: &RelayUrl) -> RelayConfig {
-    let mut config = RelayConfig::from(url.clone());
-    if url.scheme() == "http" {
-        config.quic = None;
+    if let Some(config) = RENDEZVOUS_RELAY_LADDER_CONFIGS
+        .iter()
+        .find(|config| config.url == *url)
+    {
+        return config.clone();
     }
+    let qad_port = (url.scheme() == "https").then_some(DEFAULT_RELAY_QUIC_PORT);
+    config_with_qad(url.clone(), qad_port)
+}
+
+/// The relay config of `url`, with QUIC address discovery on `qad_port`, or none. The QUIC config
+/// of iroh has no public constructor here, so the port is set on the one that `RelayConfig::from`
+/// makes.
+fn config_with_qad(url: RelayUrl, qad_port: Option<u16>) -> RelayConfig {
+    let mut config = RelayConfig::from(url);
+    let template = config.quic.take();
+    config.quic = qad_port.and_then(|port| {
+        template.map(|mut quic| {
+            quic.port = port;
+            quic
+        })
+    });
     config
 }
 
-/// Map a [`RelayChoice`] to the iroh [`RelayMode`] for an endpoint.
-///
-/// - **Beacon** homes on exactly **one** rung — the deterministic relay
-///   joiners pre-register. The caller encodes that by passing a
-///   one-element `Custom([rung])` (the rung `select_bootstrap_rung`
-///   chose), so the beacon never reaches the multi-relay `Pinned` arm.
-/// - **Peer** on `Pinned` maps to the whole default ladder, our own
-///   rung 0 first, never to the n0 relays alone. A peer endpoint does not
-///   build on this map: [`peer_relay_mode`] narrows it to the first
-///   reachable rung, and falls back to the whole map only when no rung
-///   answers. A `Custom` ladder maps to that whole set.
-///
-/// So `Custom(ladder)` covers both: a 1-rung beacon and a multi-rung
-/// peer alike map to `RelayMode::Custom`.
-pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
-    match choice {
-        RelayChoice::Disabled => {
-            tracing::debug!("relay disabled (not in the lookup allowlist)");
-            RelayMode::Disabled
-        }
-        RelayChoice::Custom(ladder) => {
-            tracing::debug!(rungs = ladder.len(), "endpoint pinned to relay ladder");
-            RelayMode::Custom(ladder.iter().map(rung_config).collect())
-        }
-        RelayChoice::Pinned => {
-            tracing::debug!("peer on the default relay ladder");
-            RelayMode::Custom(
-                RENDEZVOUS_RELAY_LADDER_URLS
-                    .iter()
-                    .map(rung_config)
-                    .collect(),
-            )
-        }
-        _ => RelayMode::Disabled,
-    }
+/// The relay mode of an endpoint homed on `rung` alone, or with no relay. An endpoint never holds 2
+/// rungs in its map: iroh homes on the relay with the lowest latency, not on the first one.
+fn one_rung_mode(rung: Option<&RelayUrl>) -> RelayMode {
+    let Some(rung) = rung else {
+        tracing::debug!("relay disabled (not in the lookup allowlist)");
+        return RelayMode::Disabled;
+    };
+    tracing::debug!(relay = %rung, "endpoint homed on one relay rung");
+    RelayMode::Custom([rung_config(rung)].into_iter().collect())
 }
 
 /// The relay mode of a peer endpoint, and the ladder it must follow when its rung does not connect.
@@ -179,17 +215,13 @@ pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
 /// that holds the whole ladder does not make rung 0 the home. A peer homes the way the beacon
 /// does: on one rung, alone in its map. The bind does not wait for a probe: the endpoint starts on
 /// rung 0, and [`Homing::follow`] moves it to the first reachable rung when rung 0 does not
-/// connect. A one-rung ladder has no choice to make, and neither has an empty one: those keep
-/// [`relay_mode`].
+/// connect. A one-rung ladder has no choice to make, and an empty one has no relay: neither gets a
+/// [`Homing`]. The beacon homes on its rung through a one-rung ladder.
 pub(super) fn peer_relay_mode(choice: &RelayChoice) -> (RelayMode, Option<Homing>) {
     let ladder: Vec<RelayUrl> = relay_ladder(choice).collect();
-    let Some(rung) = ladder.first().filter(|_| ladder.len() > 1).cloned() else {
-        return (relay_mode(choice), None);
-    };
-    (
-        relay_mode(&RelayChoice::Custom(vec![rung.clone()])),
-        Some(Homing { ladder, rung }),
-    )
+    let mode = one_rung_mode(ladder.first());
+    let homing: Option<RelayUrl> = ladder.first().filter(|_| ladder.len() > 1).cloned();
+    (mode, homing.map(|rung| Homing { ladder, rung }))
 }
 
 /// The ladder of a peer endpoint, and the rung that it homes on.
@@ -199,89 +231,412 @@ pub(super) struct Homing {
     rung: RelayUrl,
 }
 
+/// The times of a member that follows its ladder, as parameters so that a test runs it in seconds.
+#[derive(Debug, Clone, Copy)]
+struct HomingTimes {
+    /// The window of one probe of a rung.
+    probe: Duration,
+    /// How often the member reads the liveness of its rung.
+    interval: Duration,
+    /// How often a member on a later rung probes the rungs below it, while one of them answers.
+    return_every: Duration,
+    /// The longest wait between 2 return rounds that found no lower rung.
+    return_backoff_max: Duration,
+    /// How long a lower rung must answer every probe round before the member returns to it.
+    return_hold: Duration,
+    /// How long a move in place waits for the new relay to become the home, before a read of it
+    /// can count as a failure.
+    settle: Duration,
+}
+
+impl HomingTimes {
+    /// The times of a real member: the process tuning, so that a test of the whole daemon can set
+    /// them short. They are read once, when a follower starts, so
+    /// [`tuning::init`] must run before any monitor starts.
+    fn live() -> Self {
+        Self {
+            probe: RELAY_RUNG_PROBE,
+            interval: tuning::relay_liveness_interval(),
+            return_every: tuning::relay_return_probe_interval(),
+            return_backoff_max: tuning::relay_reprobe_backoff_max(),
+            return_hold: tuning::relay_return_hold(),
+            settle: tuning::relay_home_settle(),
+        }
+    }
+}
+
 impl Homing {
-    /// Move the endpoint to the first reachable rung each time its rung does not connect, until
-    /// the endpoint closes. The endpoint swaps its own relay map in place, because a peer endpoint
-    /// cannot be rebuilt under its owner.
-    ///
-    /// A rung is alive when the status of the home relay says that the relay connection is up,
-    /// and, off the browser, the net report of iroh still has a preferred relay. Neither signal is
-    /// enough alone. A relay that answers its HTTP probe and refuses the relay connection can keep a
-    /// preferred relay but has no connection. A relay that dies keeps its connection in the status
-    /// for minutes, and the probes of the net report find it dead. A browser has no net report, so
-    /// the status alone decides there. A rung that has not connected when the probe time of a
-    /// rung ends counts as dead at once. A later read counts one failure per interval.
+    /// Follow the ladder until the endpoint closes ([`follow_rung`]). The endpoint swaps its own
+    /// relay map in place, because a peer endpoint cannot be rebuilt under its owner.
     pub(super) fn follow(self, endpoint: Endpoint) {
-        drop(self.follow_with(endpoint, RELAY_RUNG_PROBE, RELAY_LIVENESS_INTERVAL));
+        drop(self.follow_with(endpoint, HomingTimes::live()));
     }
 
-    /// [`Self::follow`] with its two times as parameters, so that a test runs it in seconds. It
-    /// returns the task, which ends when the endpoint closes.
-    fn follow_with(
-        self,
-        endpoint: Endpoint,
-        probe: Duration,
-        interval: Duration,
-    ) -> n0future_task::JoinHandle<()> {
-        let Self { ladder, mut rung } = self;
+    /// [`Self::follow`] with its times as parameters. It returns the task, which ends when the
+    /// endpoint closes.
+    fn follow_with(self, endpoint: Endpoint, times: HomingTimes) -> n0future_task::JoinHandle<()> {
         n0future_task::spawn(async move {
-            let mut status = endpoint.home_relay_status();
-            let connected_at_start = tokio::select! {
-                connected = n0future_time::timeout(
-                    probe,
-                    wait_for_home_connection(&mut status, &rung),
-                ) => matches!(connected, Ok(true)),
-                _closed = endpoint.closed() => return,
-            };
-            let mut fails: u32 = if connected_at_start {
-                0
-            } else {
-                RELAY_LIVENESS_FAILS_TO_EVICT
-            };
-            // The first walk of a rung that never connected does not probe it again: the probe
-            // would wait out its time. A later walk probes the whole ladder, because a net report
-            // under load can drop the preferred relay of a live rung, and the walk must be able
-            // to stay on it.
-            let mut skip_rung = !connected_at_start;
-            loop {
-                if should_evict_rung(fails) {
-                    fails = 0;
-                    let walk = rungs_to_walk(&ladder, &rung, skip_rung);
-                    skip_rung = false;
-                    // The walk stops when its endpoint closes: dropping `stop_walk` ends the probe in
-                    // flight, and that probe closes its own endpoint before the walk returns.
-                    let (stop_walk, stopped_walk) = watch::channel(());
-                    let walking = select_bootstrap_rung(&walk, probe, Some(&stopped_walk));
-                    tokio::pin!(walking);
-                    let selected = tokio::select! {
-                        selected = &mut walking => selected,
-                        _closed = endpoint.closed() => {
-                            drop(stop_walk);
-                            walking.await;
-                            return;
-                        }
-                    };
-                    if let Some(next) = selected.filter(|next| *next != rung) {
-                        tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, "peer endpoint moves to the next relay rung");
-                        // The relay actor of iroh shares the config of a relay.
-                        let config = Arc::new(rung_config(&next));
-                        endpoint.insert_relay(next.clone(), config).await;
-                        endpoint.remove_relay(&rung).await;
-                        rung = next;
-                    }
-                }
-                tokio::select! {
-                    () = n0future_time::sleep(interval) => {}
-                    _closed = endpoint.closed() => return,
-                }
-                fails = if home_connected(&status.get(), &rung) && probes_answer(&endpoint) {
-                    0
-                } else {
-                    fails + 1
-                };
-            }
+            follow_rung(
+                &endpoint,
+                &self.ladder,
+                self.rung,
+                times,
+                Mover::InPlace,
+                None,
+            )
+            .await;
         })
     }
+}
+
+/// What a member does with a rung that its follower picks.
+#[derive(Debug, Clone, Copy)]
+enum Mover<'tx> {
+    /// A peer endpoint moves its own relay map, and keeps following.
+    InPlace,
+    /// The beacon. A return to a lower rung moves the relay of the beacon in place, as a peer does,
+    /// tells the event loop, and keeps following: the beacon serves on, and a joiner reaches it by
+    /// either rung until the old one is gone. A walk after the rung failed publishes the rung. The
+    /// event loop sheds the beacon and claims a new one on it, with a new follower, so this one
+    /// ends.
+    Publish(&'tx mpsc::UnboundedSender<RungDecision>, Generation),
+}
+
+/// Why a follower moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoveKind {
+    /// The walk after a failed rung picked the next rung.
+    Next,
+    /// A lower rung answered every return round for the hold.
+    Lower,
+}
+
+impl MoveKind {
+    /// The name of the move in the log.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Next => "next",
+            Self::Lower => "lower",
+        }
+    }
+}
+
+/// Follow the ladder from `rung` until the endpoint closes or `stop`'s sender is dropped. The peer
+/// endpoint and the beacon run this one loop, and differ only in their [`Mover`].
+///
+/// A rung is alive when the status of the home relay says that the relay connection is up, and,
+/// off the browser, the net report of iroh still has a preferred relay. Neither signal is enough
+/// alone. A relay that answers its HTTP probe and refuses the relay connection can keep a preferred
+/// relay but has no connection. A relay that dies keeps its connection in the status for minutes,
+/// and the probes of the net report find it dead. A browser has no net report, so the status alone
+/// decides there. A rung that has not connected when the probe time of a rung ends counts as dead
+/// at once. A later read counts one failure per interval. After [`RELAY_LIVENESS_FAILS_TO_EVICT`]
+/// failures in a row, the member walks the ladder.
+///
+/// A walk that finds no rung (a full outage: a sleep, Wi-Fi off) keeps the member on its rung, the
+/// peer and the beacon alike. The next failed reads walk again, and the first rung that comes back
+/// wins. The beacon is not demoted to no relay: that would drop its endpoint and wait out the
+/// backoff of the relay-less monitor (30 s to 5 min) after the outage, while the peers stay. The
+/// rendezvous address names every rung, so a beacon on its dead rung costs a joiner nothing.
+///
+/// On a later rung, the member probes the rungs below it each [`RELAY_RETURN_PROBE_INTERVAL`](tuning::RELAY_RETURN_PROBE_INTERVAL), in a
+/// task beside the liveness reads, so a slow round never holds back a read. It returns to the
+/// lowest rung that answered every round for [`RELAY_RETURN_HOLD`](tuning::RELAY_RETURN_HOLD). A round that finds no lower
+/// rung doubles the wait to the next round, up to [`RELAY_REPROBE_BACKOFF_MAX`].
+async fn follow_rung(
+    endpoint: &Endpoint,
+    ladder: &[RelayUrl],
+    rung: RelayUrl,
+    times: HomingTimes,
+    mover: Mover<'_>,
+    stop: Option<&watch::Receiver<()>>,
+) {
+    let mut status = endpoint.home_relay_status();
+    let connected_at_start = tokio::select! {
+        connected = n0future_time::timeout(
+            times.probe,
+            wait_for_home_connection(&mut status, &rung),
+        ) => matches!(connected, Ok(true)),
+        () = ended(endpoint, stop) => return,
+    };
+    let mut follower = RungFollower::new(ladder, rung, times, connected_at_start, Instant::now());
+    let mut round: Option<ReturnRound> = None;
+    // After a move in place the old relay stays the home until the new one connects, so a read of
+    // the new rung finds it not connected for a while. Those reads count as alive, until the new
+    // rung is the home or the settle time ends.
+    let mut settling_until: Option<Instant> = None;
+    loop {
+        if let Some(walk) = follower.walk_due() {
+            cancel_round(&mut round).await;
+            let selected = walk_until_ended(endpoint, stop, |walk_stopped| async move {
+                select_bootstrap_rung(&walk, times.probe, Some(&walk_stopped)).await
+            })
+            .await;
+            if is_ended(endpoint, stop) {
+                return;
+            }
+            #[cfg(test)]
+            note_walk_ended();
+            match follower.walked(selected, Instant::now()) {
+                Some(next) => {
+                    let Some(next) = mover
+                        .take(endpoint, follower.rung(), next, MoveKind::Next)
+                        .await
+                    else {
+                        return;
+                    };
+                    follower.moved(next, Instant::now());
+                    settling_until = Some(Instant::now() + times.settle);
+                }
+                None => {
+                    tracing::info!(target: "habilis_network::lookup", relay = %follower.rung(), "the walk found no other relay rung; staying on it");
+                }
+            }
+        }
+        let until_read = follower.read_at().saturating_duration_since(Instant::now());
+        match next_wake(until_read, &mut round, endpoint, stop).await {
+            Wake::Read => {
+                let connected = home_connected(&status.get(), follower.rung());
+                if connected {
+                    settling_until = None;
+                }
+                let settling = settling_until.is_some_and(|until| Instant::now() < until);
+                let alive = (connected && probes_answer(endpoint)) || settling;
+                follower.read(alive, Instant::now());
+            }
+            Wake::Round(answered, ended_at) => {
+                if let Some(lower) = follower.round_ended(&answered, ended_at, Instant::now()) {
+                    let Some(next) = mover
+                        .take(endpoint, follower.rung(), lower, MoveKind::Lower)
+                        .await
+                    else {
+                        return;
+                    };
+                    follower.moved(next, Instant::now());
+                    settling_until = Some(Instant::now() + times.settle);
+                }
+            }
+            Wake::Ended => {
+                cancel_round(&mut round).await;
+                return;
+            }
+        }
+        if let Some(below) = follower.round_due(Instant::now()) {
+            round = Some(ReturnRound::spawn(below, times.probe));
+        }
+    }
+}
+
+/// What the follower waited for between 2 passes of its loop.
+enum Wake {
+    /// The next liveness read is due.
+    Read,
+    /// The return round ended: the rungs that answered, and the time at which it ended.
+    Round(Vec<RelayUrl>, Instant),
+    /// The endpoint closed, or the stop was given.
+    Ended,
+}
+
+/// Wait until a read is due, the return round ends, or the follower ends. An end wins over a round
+/// that ended with it: a follower that was stopped (its beacon was shed) acts on nothing.
+async fn next_wake(
+    until_read: Duration,
+    round: &mut Option<ReturnRound>,
+    endpoint: &Endpoint,
+    stop: Option<&watch::Receiver<()>>,
+) -> Wake {
+    tokio::select! {
+        biased;
+        () = ended(endpoint, stop) => Wake::Ended,
+        (answered, ended_at) = round_answers(round) => Wake::Round(answered, ended_at),
+        () = n0future_time::sleep(until_read) => Wake::Read,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: how many walks of a follower ended on this thread, whatever they found. The
+    /// runtime of a test is one thread, so a test reads the walks of its own followers.
+    static WALKS_ENDED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Tests only: count a walk that ended, before the follower acts on what it found.
+#[cfg(test)]
+fn note_walk_ended() {
+    WALKS_ENDED.with(|ended| ended.set(ended.get() + 1));
+}
+
+impl Mover<'_> {
+    /// Take `next` in place of `rung`. Returns the rung that the follower goes on with, or `None`
+    /// when the follower ends.
+    async fn take(
+        self,
+        endpoint: &Endpoint,
+        rung: &RelayUrl,
+        next: RelayUrl,
+        kind: MoveKind,
+    ) -> Option<RelayUrl> {
+        let kind_name = kind.name();
+        match (self, kind) {
+            (Self::InPlace, _) => {
+                tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, kind = kind_name, "peer endpoint moves to another relay rung");
+                move_relay_in_place(endpoint, rung, &next).await;
+                Some(next)
+            }
+            (Self::Publish(rung_tx, generation), MoveKind::Lower) => {
+                tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, kind = kind_name, "beacon moves to a lower relay rung in place");
+                move_relay_in_place(endpoint, rung, &next).await;
+                // No stop check after the move: if a shed stopped this monitor during it, the
+                // generation of the decision is retired, and the loop ignores it.
+                let _ = rung_tx.send(RungDecision {
+                    from: Some(generation),
+                    rung: Some(next.clone()),
+                    change: RungChange::Moved,
+                });
+                Some(next)
+            }
+            (Self::Publish(rung_tx, generation), MoveKind::Next) => {
+                tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, kind = kind_name, "beacon moves to another relay rung");
+                let _ = rung_tx.send(RungDecision {
+                    from: Some(generation),
+                    rung: Some(next),
+                    change: RungChange::Rehome,
+                });
+                None
+            }
+        }
+    }
+}
+
+/// Move the relay of `endpoint` from `rung` to `next`, with the endpoint up. The new relay joins
+/// the map first and the old one leaves it after: the connection to the old relay stays until the
+/// home moves, so a dial by either rung finds the endpoint all the time.
+async fn move_relay_in_place(endpoint: &Endpoint, rung: &RelayUrl, next: &RelayUrl) {
+    // The relay actor of iroh shares the config of a relay.
+    let config = Arc::new(rung_config(next));
+    endpoint.insert_relay(next.clone(), config).await;
+    endpoint.remove_relay(rung).await;
+}
+
+/// One probe round of the rungs below the home, in a task of its own beside the liveness reads.
+#[derive(Debug)]
+struct ReturnRound {
+    stop: watch::Sender<()>,
+    /// The rungs that answered, and the time at which the round ended.
+    task: n0future_task::JoinHandle<(Vec<RelayUrl>, Instant)>,
+}
+
+impl ReturnRound {
+    /// Start a round that probes each of `below`.
+    fn spawn(below: Vec<RelayUrl>, probe: Duration) -> Self {
+        let (stop, stopped) = watch::channel(());
+        let task = n0future_task::spawn(async move {
+            let answered = probe_lower_rungs(&below, probe, &stopped).await;
+            (answered, Instant::now())
+        });
+        Self { stop, task }
+    }
+}
+
+/// The rungs that answered the round in flight, and the time at which it ended, once it ends. A
+/// round that panicked answers none, at the time that it is read. Never resolves without a round.
+async fn round_answers(round: &mut Option<ReturnRound>) -> (Vec<RelayUrl>, Instant) {
+    let Some(running) = round.as_mut() else {
+        return future::pending().await;
+    };
+    let ended = (&mut running.task)
+        .await
+        .unwrap_or_else(|_| (Vec::new(), Instant::now()));
+    *round = None;
+    ended
+}
+
+/// Stop the round in flight, and wait until its probes have closed their endpoints.
+async fn cancel_round(round: &mut Option<ReturnRound>) {
+    if let Some(ReturnRound { stop, task }) = round.take() {
+        drop(stop);
+        drop(task.await);
+    }
+}
+
+/// The wait before the next return round. A round that found a lower rung keeps the rounds at
+/// `return_every`, so the hold is counted. A round that found none doubles the wait, up to
+/// `return_backoff_max`: a member on a later rung while the lower rungs stay down probes them ever
+/// more sparsely. The first wait is the return interval of 1 minute, above the 30 s floor of the
+/// relay-less backoff, so the floor plays no part here.
+fn next_return_wait(current: Duration, found: bool, times: HomingTimes) -> Duration {
+    if found {
+        times.return_every
+    } else {
+        current.saturating_mul(2).min(times.return_backoff_max)
+    }
+}
+
+/// Resolves once `endpoint` closes, or once `stop`'s sender is dropped.
+async fn ended(endpoint: &Endpoint, stop: Option<&watch::Receiver<()>>) {
+    tokio::select! {
+        _closed = endpoint.closed() => {}
+        () = stopped(stop.cloned()) => {}
+    }
+}
+
+/// Whether `endpoint` closed, or `stop`'s sender is gone.
+fn is_ended(endpoint: &Endpoint, stop: Option<&watch::Receiver<()>>) -> bool {
+    endpoint.is_closed() || stop.is_some_and(is_stopped)
+}
+
+/// Run `walk` with a stop that fires when `endpoint` closes or `stop`'s sender is dropped, and
+/// return what it selects. On an end the walk still ends, and closes its probe endpoints, before
+/// this returns.
+async fn walk_until_ended<Walk, Fut>(
+    endpoint: &Endpoint,
+    stop: Option<&watch::Receiver<()>>,
+    walk: Walk,
+) -> Option<RelayUrl>
+where
+    Walk: FnOnce(watch::Receiver<()>) -> Fut,
+    Fut: Future<Output = Option<RelayUrl>>,
+{
+    let (stop_walk, stopped_walk) = watch::channel(());
+    let walking = walk(stopped_walk);
+    tokio::pin!(walking);
+    tokio::select! {
+        selected = &mut walking => selected,
+        () = ended(endpoint, stop) => {
+            drop(stop_walk);
+            walking.await;
+            None
+        }
+    }
+}
+
+/// Probe each of `rungs` at once, and return the rungs that answered, in their order. Each rung
+/// that answers counts, not only the lowest one, so that a rung that flaps does not hold back a
+/// steady rung above it ([`return_watch::ReturnWatch`]). Once `stop`'s sender is dropped, every probe ends and
+/// closes its endpoint before this returns.
+async fn probe_lower_rungs(
+    rungs: &[RelayUrl],
+    probe: Duration,
+    stop: &watch::Receiver<()>,
+) -> Vec<RelayUrl> {
+    let probes = rungs
+        .iter()
+        .map(|rung| relay_rung_reachable(rung, probe, Some(stop.clone())));
+    let answers: Vec<bool> = future_util::join_all(probes).await;
+    let mut answered = Vec::new();
+    let paired = rungs.iter().zip(answers);
+    for (rung, answer) in paired {
+        if answer {
+            answered.push(rung.clone());
+        }
+    }
+    answered
+}
+
+/// The rungs of `ladder` below `home`. Empty when `home` is rung 0, or is not on the ladder.
+fn rungs_below<'ladder>(ladder: &'ladder [RelayUrl], home: &RelayUrl) -> &'ladder [RelayUrl] {
+    let position = ladder.iter().position(|rung| rung == home).unwrap_or(0);
+    ladder.get(..position).unwrap_or_default()
 }
 
 /// The rungs that a walk probes: the whole ladder, or without `rung` when it never connected.
@@ -331,12 +686,19 @@ async fn wait_for_home_connection(
     }
 }
 
-/// Walk a relay ladder in order and return the first **reachable** rung
+/// Walk a relay ladder and return the first **reachable** rung
 /// — the deterministic bootstrap relay every member converges on under
 /// equal visibility. Reachability is "an endpoint pinned to this single
 /// relay reaches `online()` within `per_rung`": iroh pings the relay and
 /// only reports online once a home relay is chosen, so a successful
 /// `online()` against a one-relay `RelayMode` *is* that rung being live.
+///
+/// The walk starts the probe of each rung [`RELAY_RUNG_STAGGER`] after the one
+/// below it, or at once when the rung below says no. A healthy rung 0 answers
+/// before rung 1 starts, so the later rungs see no probe. A ladder of silent
+/// rungs costs one window of `per_rung` plus the staggers, not one window for
+/// each rung. Eight concurrent probes cost about the CPU of eight probes in
+/// order, and about 80 sockets at the peak.
 ///
 /// `None` ⇒ the ladder is empty (relay disabled) or every rung was
 /// unreachable; the caller then leans on mDNS/DHT (the other reliability
@@ -347,14 +709,14 @@ pub(crate) async fn select_bootstrap_rung(
     per_rung: Duration,
     stop: Option<&watch::Receiver<()>>,
 ) -> Option<RelayUrl> {
-    let selected = select_first_reachable(ladder, |rung| async move {
-        let reachable = relay_rung_reachable(&rung, per_rung, stop.cloned()).await;
+    let probe = |rung: RelayUrl, probes_stopped| async move {
+        let reachable = relay_rung_reachable(&rung, per_rung, Some(probes_stopped)).await;
         if !reachable {
-            tracing::debug!(target: "habilis_network::lookup", relay = %rung, "bootstrap relay rung unreachable; trying next");
+            tracing::debug!(target: "habilis_network::lookup", relay = %rung, "bootstrap relay rung did not answer");
         }
         reachable
-    })
-    .await;
+    };
+    let selected = select_first_reachable(ladder, stop, RELAY_RUNG_STAGGER, probe).await;
     match &selected {
         Some(rung) => {
             tracing::info!(target: "habilis_network::lookup", relay = %rung, "selected bootstrap relay rung");
@@ -367,28 +729,134 @@ pub(crate) async fn select_bootstrap_rung(
     selected
 }
 
-/// The pure ladder walk behind [`select_bootstrap_rung`]: probe rungs
-/// **in order from the first** and return the first for which `reachable`
-/// is `true`, else `None`. Always restarting at index 0 is what makes
-/// the selection deterministic across members and gives "reset the
-/// ladder and try again from the first rung" on every (re)selection — a
-/// recovered earlier rung is preferred over a later one. Generic over
-/// the reachability probe so the ordering/short-circuit logic is unit
-/// tested without touching the network.
+/// The pure ladder walk behind [`select_bootstrap_rung`]: start the probe of
+/// rung 0 at once, and of each later rung `stagger` after the one before it,
+/// or at once when a rung says no. Return the lowest rung for which
+/// `reachable` is `true`, else `None`. A rung wins only when every rung
+/// below it said no, so a lower rung that answers late still beats a higher
+/// rung that answers early. That is what makes the selection deterministic
+/// across members, and what makes a recovered earlier rung win over a later
+/// one on every (re)selection.
+///
+/// A rung that answered while a lower rung was still silent has waited for it, and can be offline
+/// by the time that the lower rung says no. The walk asks that rung again before it takes it, and
+/// falls through to the next rung if it says no. A rung whose own answer arrives after every rung
+/// below it said no is taken at once: rung 0 is one probe.
+///
+/// Each probe gets a receiver whose sender the walk drops once it decides, or
+/// once `stop`'s sender is dropped. The walk then starts no more probes and
+/// waits for every probe to end, so no probe outlives it. Generic over the
+/// reachability probe so the order logic is unit tested without touching the
+/// network.
 async fn select_first_reachable<Probe, Fut>(
     ladder: &[RelayUrl],
+    stop: Option<&watch::Receiver<()>>,
+    stagger: Duration,
     mut reachable: Probe,
 ) -> Option<RelayUrl>
 where
-    Probe: FnMut(RelayUrl) -> Fut,
+    Probe: FnMut(RelayUrl, watch::Receiver<()>) -> Fut,
     Fut: Future<Output = bool>,
 {
-    for rung in ladder {
-        if reachable(rung.clone()).await {
-            return Some(rung.clone());
+    use futures_util::StreamExt as _;
+
+    let (stop_probes, probes_stopped) = watch::channel(());
+    let mut stop_probes = Some(stop_probes);
+    let mut probes = FuturesUnordered::new();
+    let mut unstarted = ladder.iter().enumerate();
+    let mut next_start = Instant::now();
+    let mut answers: Vec<Option<bool>> = vec![None; ladder.len()];
+    let mut selected = None;
+    loop {
+        // The caller can have stopped the walk before it began, or between 2 passes: no probe
+        // starts then, as the select below would pick the start before it read the stop.
+        if stop.is_some_and(|caller| caller.has_changed().is_err()) {
+            stop_probes = None;
+        }
+        let may_start = stop_probes.is_some() && unstarted.len() > 0;
+        if may_start && (probes.is_empty() || Instant::now() >= next_start) {
+            if let Some((index, rung)) = unstarted.next() {
+                let probe = reachable(rung.clone(), probes_stopped.clone());
+                probes.push(answer_of(index, probe));
+            }
+            next_start = Instant::now() + stagger;
+            continue;
+        }
+        if probes.is_empty() {
+            return selected;
+        }
+        let until_next_start = next_start.saturating_duration_since(Instant::now());
+        let next = tokio::select! {
+            next = probes.next() => next,
+            () = n0future_time::sleep(until_next_start), if may_start => continue,
+            () = stopped(stop.cloned()), if stop_probes.is_some() => {
+                stop_probes = None;
+                continue;
+            }
+        };
+        let Some((index, answer)) = next else {
+            continue;
+        };
+        if let Some(slot) = answers.get_mut(index) {
+            *slot = Some(answer);
+        }
+        if !answer {
+            next_start = Instant::now();
+        }
+        if stop_probes.is_none() {
+            continue;
+        }
+        match lowest_reachable(&answers) {
+            WalkVerdict::Waiting => {}
+            // The rung answered itself, with every rung below it already said no: its answer is
+            // fresh.
+            WalkVerdict::Rung(lowest) if lowest == index => {
+                selected = ladder.get(lowest).cloned();
+                stop_probes = None;
+            }
+            // A rung below said no after this one answered, and the answer waited behind it. The
+            // rung can be offline now, as the old walk, which probed one rung after the other,
+            // would have found: ask it again, and take the rung above if it says no.
+            WalkVerdict::Rung(lowest) => {
+                if let Some(rung) = ladder.get(lowest)
+                    && let Some(slot) = answers.get_mut(lowest)
+                {
+                    *slot = None;
+                    let probe = reachable(rung.clone(), probes_stopped.clone());
+                    probes.push(answer_of(lowest, probe));
+                }
+            }
+            WalkVerdict::NoRung => stop_probes = None,
         }
     }
-    None
+}
+
+/// The answer of one probe, with the index of the rung that it probed.
+async fn answer_of(index: usize, probe: impl Future<Output = bool>) -> (usize, bool) {
+    (index, probe.await)
+}
+
+/// What the answers of a walk so far decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalkVerdict {
+    /// A rung below the first answer has not answered yet.
+    Waiting,
+    /// The lowest rung that answered, now that every rung below it said no.
+    Rung(usize),
+    /// Every rung said no.
+    NoRung,
+}
+
+/// What the answers of a walk so far decide, rung by rung from the first.
+fn lowest_reachable(answers: &[Option<bool>]) -> WalkVerdict {
+    let Some(first_open) = answers.iter().position(|answer| *answer != Some(false)) else {
+        return WalkVerdict::NoRung;
+    };
+    if answers.get(first_open) == Some(&Some(true)) {
+        WalkVerdict::Rung(first_open)
+    } else {
+        WalkVerdict::Waiting
+    }
 }
 
 /// Probe every rung of `ladder` for reachability, in order, returning each
@@ -513,90 +981,62 @@ fn next_relay_backoff(current: Duration) -> Duration {
 /// beacon, run as its **own** task so relay probes never stall the
 /// gossip co-host or the event loop. It **never stops probing**:
 ///
-/// - **Homed** (`homed`, built with a rung): poll our own
-///   `endpoint.online()` every [`RELAY_LIVENESS_INTERVAL`] — cheap,
-///   reuses the live relay connection. `online()` resolves only when a
-///   relay handshake is connected, so a `timeout` failure means the rung
-///   is unreachable; [`should_evict_rung`] debounces transient blips
-///   (iroh auto-reconnects within a tick). On a sustained outage, re-walk
-///   the ladder once and publish the result (`Some` ⇒ re-home, `None` ⇒
-///   demote to relay-less). Sticky: a healthy rung is polled forever;
-///   other rungs are never probed.
+/// - **Homed** (`home`, the rung the event loop homed the beacon on):
+///   follow the ladder with the signal and the times of a peer endpoint
+///   ([`follow_rung`]). On a sustained outage, re-walk the ladder once and
+///   publish the rung it picks; the event loop re-homes the beacon on it.
+///   A walk that picks the same rung, or finds no rung, publishes nothing,
+///   and the beacon goes on following on its rung. On a later rung, move the relay of the beacon
+///   in place to the lowest rung below it once it answered every round for [`RELAY_RETURN_HOLD`](tuning::RELAY_RETURN_HOLD),
+///   and tell the event loop ([`RungChange::Moved`]). The beacon is not shed and not claimed again,
+///   and the monitor goes on following. The rendezvous address names every rung, and the
+///   connection to the old relay stays until the home moves, so a joiner reaches the beacon all
+///   the time.
 /// - **Relay-less** (no rung): re-walk the ladder; a reachable rung ⇒
 ///   publish it; an empty round ⇒ back off ([`next_relay_backoff`]) and
 ///   loop.
 ///
-/// Every publish flows to the event loop's rung-update arm, which
-/// re-homes the beacon (drop + rebuild) — spawning a fresh monitor for
-/// the new state. So the monitor returns after publishing a change, or
-/// once `beacon::Rendezvous` stops it, publishing nothing.
+/// A publish after a failed rung ([`RungChange::Rehome`]) flows to the event loop's rung-update
+/// arm, which re-homes the beacon (drop + rebuild) — spawning a fresh monitor for the new state. So
+/// the monitor returns after that publish, or once `beacon::Rendezvous` stops it, publishing
+/// nothing. It returns after a move in place only when the beacon stops it.
 #[must_use]
 pub(crate) fn spawn_relay_monitor(
     endpoint: Endpoint,
     ladder: Vec<RelayUrl>,
-    rung_tx: watch::Sender<Option<RelayUrl>>,
-    homed: bool,
+    rung_tx: mpsc::UnboundedSender<RungDecision>,
+    home: Option<RelayUrl>,
+    generation: Generation,
 ) -> StoppableTask {
-    let probe = RELAY_RUNG_PROBE;
     StoppableTask::spawn(|stop| async move {
-        if homed {
-            monitor_homed_rung(&endpoint, &ladder, &rung_tx, probe, &stop).await;
-        } else {
-            monitor_relay_less(&ladder, &rung_tx, probe, &stop).await;
+        let mover = Mover::Publish(&rung_tx, generation);
+        match home {
+            Some(home) => {
+                follow_rung(
+                    &endpoint,
+                    &ladder,
+                    home,
+                    HomingTimes::live(),
+                    mover,
+                    Some(&stop),
+                )
+                .await;
+            }
+            None => {
+                monitor_relay_less(&ladder, &rung_tx, generation, RELAY_RUNG_PROBE, &stop).await;
+            }
         }
     })
 }
 
-/// Poll the rung we're homed on until a sustained outage, then re-walk the
-/// ladder once and publish the result. Split out of [`spawn_relay_monitor`]
-/// so the loop body isn't nested inside the spawned future's `if homed`.
-async fn monitor_homed_rung(
-    endpoint: &Endpoint,
-    ladder: &[RelayUrl],
-    rung_tx: &watch::Sender<Option<RelayUrl>>,
-    probe: Duration,
-    stop: &watch::Receiver<()>,
-) {
-    let mut fails: u32 = 0;
-    loop {
-        let poll = async {
-            n0future_time::sleep(RELAY_LIVENESS_INTERVAL).await;
-            n0future_time::timeout(probe, endpoint.online())
-                .await
-                .is_ok()
-        };
-        let online = tokio::select! {
-            online = poll => online,
-            () = stopped(Some(stop.clone())) => return,
-        };
-        if online {
-            fails = 0;
-            continue;
-        }
-        fails += 1;
-        if !should_evict_rung(fails) {
-            continue;
-        }
-        tracing::info!(
-            target: "habilis_network::lookup",
-            fails,
-            "beacon relay rung unreachable; re-walking the ladder"
-        );
-        let selected = select_bootstrap_rung(ladder, probe, Some(stop)).await;
-        if !is_stopped(stop) {
-            let _ = rung_tx.send(selected);
-        }
-        return;
-    }
-}
-
 /// Relay-less: keep re-walking the ladder to rediscover a rung, backing off
 /// after each fruitless round so an all-down ladder isn't hammered. Never
-/// stops. Split out of [`spawn_relay_monitor`] for the same reason as
-/// [`monitor_homed_rung`].
+/// stops. Split out of [`spawn_relay_monitor`] so the loop body is not
+/// nested in its spawned future.
 async fn monitor_relay_less(
     ladder: &[RelayUrl],
-    rung_tx: &watch::Sender<Option<RelayUrl>>,
+    rung_tx: &mpsc::UnboundedSender<RungDecision>,
+    generation: Generation,
     probe: Duration,
     stop: &watch::Receiver<()>,
 ) {
@@ -612,7 +1052,11 @@ async fn monitor_relay_less(
                 relay = %rung,
                 "relay-less beacon rediscovered a reachable rung"
             );
-            let _ = rung_tx.send(Some(rung));
+            let _ = rung_tx.send(RungDecision {
+                from: Some(generation),
+                rung: Some(rung),
+                change: RungChange::Rehome,
+            });
             return;
         }
         tokio::select! {
@@ -626,36 +1070,41 @@ async fn monitor_relay_less(
 #[cfg(test)]
 mod tests {
     use super::{
-        OPERATED_RELAY_HOST, RELAY_LIVENESS_FAILS_TO_EVICT, RENDEZVOUS_RELAY_LADDER_URLS,
-        RelayChoice, RelayUrl, RungRefresh, next_relay_backoff, plan_rung_refresh, relay_ladder,
+        RELAY_LIVENESS_FAILS_TO_EVICT, RENDEZVOUS_RELAY_LADDER_URLS, RelayChoice, RelayUrl,
+        RungChange, RungDecision, RungRefresh, next_relay_backoff, plan_rung_refresh, relay_ladder,
         select_bootstrap_rung, select_first_reachable, should_evict_rung,
     };
     use crate::lookup::{TransportOpts, build_peer_endpoint, build_peer_webrtc};
     use crate::protocol::meshes::LookupOpts;
+    use iroh::defaults::DEFAULT_RELAY_QUIC_PORT;
     use iroh::{RelayMode, Watcher as _};
     use iroh_relay::server::Server;
     use n0_future::task as n0future_task;
-    use std::collections::{BTreeSet, HashSet};
     use std::net::{Ipv4Addr, TcpListener};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::net::{TcpListener as AsyncListener, TcpStream};
+    use tokio::sync::{mpsc, watch};
     use tokio::task::JoinHandle;
 
+    use crate::beacon::{Rendezvous, RendezvousParams};
     use crate::lookup::test_relay;
+    use crate::transport::PayloadPath;
     use crate::util::tuning;
+    use crate::{daemon, testing};
     use iroh::endpoint::{Builder, presets};
-    use std::cell;
+    use iroh_gossip::proto::TopicId;
     use std::time::Duration as std_Duration;
+    use std::{cell, future};
     use tokio::time;
-    /// Tripwire: the iroh fallback rungs of our pinned rendezvous ladder
-    /// must stay equal to iroh's `defaults::prod` relay hosts, **in
-    /// order** (rung 1 = NA-east). Our own operated relay is not an iroh
-    /// relay, so it is left out when it is on the ladder. Relay infra is versioned and not cross-compatible
-    /// (sendme #121); if an iroh bump moves a prod relay off these hosts,
-    /// the relay-direct bootstrap silently breaks for members on a
-    /// different iroh version. Failing here forces a manual review (are
-    /// these hosts still served?) before the bump ships.
+    /// Tripwire: the last rungs of our pinned rendezvous ladder must stay
+    /// equal to iroh's `defaults::prod` relay hosts, **in order** (NA-east
+    /// first). The rungs before them are our own fleet and are excluded here.
+    /// Relay infra is versioned and not cross-compatible (sendme #121); if an
+    /// iroh bump moves a prod relay off these hosts, the relay-direct bootstrap
+    /// silently breaks for members on a different iroh version. Failing here
+    /// forces a manual review (are these hosts still served?) before the bump
+    /// ships.
     #[test]
     fn pinned_ladder_matches_iroh_prod() {
         use iroh::defaults::prod;
@@ -666,9 +1115,10 @@ mod tests {
             prod::EU_RELAY_HOSTNAME,
             prod::AP_RELAY_HOSTNAME,
         ];
+        let fleet_rungs = RENDEZVOUS_RELAY_LADDER_URLS.len() - expected.len();
         let ours: Vec<&str> = RENDEZVOUS_RELAY_LADDER_URLS
             .iter()
-            .filter(|url| url.host_str() != Some(OPERATED_RELAY_HOST))
+            .skip(fleet_rungs)
             .map(|url| {
                 url.host_str()
                     .expect("ladder relay URL has a host")
@@ -686,33 +1136,109 @@ mod tests {
         );
     }
 
-    /// **The default ladder is the n0 relays.**
-    ///
-    /// `relay.agent-habilis.com` is behind Cloudflare and has no QUIC address discovery on UDP
-    /// 7842. A peer that homes on it learns no public address. The operated relay is off the
-    /// default ladder until `OPERATED_RELAY_IS_RUNG_0` is on, and no default relay map holds it.
+    /// Every member homes on the first reachable rung, so rung 0 carries the
+    /// bootstrap load of every mesh on the default ladder. It is a direct rung,
+    /// so a member homed on it learns its public address.
     #[test]
-    fn the_default_ladder_does_not_hold_the_operated_relay() {
+    fn rung_zero_is_a_direct_rung_with_qad() {
         let _guard = ::habilis_network_test_tracing::init();
-        let hosts: Vec<&str> = RENDEZVOUS_RELAY_LADDER_URLS
-            .iter()
-            .filter_map(|url| url.host_str())
-            .collect();
-        assert!(
-            !hosts.contains(&OPERATED_RELAY_HOST),
-            "the default ladder holds the operated relay: {hosts:?}"
+        let rung_zero = &RENDEZVOUS_RELAY_LADDER_URLS[0];
+        assert_eq!(
+            rung_zero.as_str(),
+            "https://nyc-relay1.agent-habilis.com/",
+            "rung 0 of the default ladder"
         );
         assert_eq!(
-            hosts.first().copied(),
-            Some("use1-1.relay.n0.iroh.link"),
-            "rung 0 of the default ladder is an n0 relay"
+            qad_port(rung_zero),
+            Some(DEFAULT_RELAY_QUIC_PORT),
+            "rung 0 asks for QUIC address discovery on the default port"
         );
-        let mapped: Vec<RelayUrl> = super::relay_mode(&RelayChoice::Pinned).relay_map().urls();
-        assert!(
-            mapped
-                .iter()
-                .all(|url| url.host_str() != Some(OPERATED_RELAY_HOST)),
-            "the relay map of the default choice holds the operated relay: {mapped:?}"
+    }
+
+    /// The QUIC address discovery port of the relay config of a rung, if any.
+    fn qad_port(url: &RelayUrl) -> Option<u16> {
+        super::rung_config(url).quic.map(|quic| quic.port)
+    }
+
+    /// **The default ladder, in order, with the QUIC address discovery of each rung.**
+    ///
+    /// A direct rung answers QUIC address discovery. A tunnel rung carries no UDP, so an endpoint
+    /// that asks it for the discovery waits 3 s for its first net report and has no home relay
+    /// until then.
+    #[test]
+    fn the_default_ladder_is_typed_rung_by_rung() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let direct = Some(DEFAULT_RELAY_QUIC_PORT);
+        let expected = [
+            ("https://nyc-relay1.agent-habilis.com/", direct),
+            ("https://nyc-relay2.habilis.network/", None),
+            ("https://slz-relay1.habilis.network/", None),
+            ("https://use1-1.relay.n0.iroh.link/", direct),
+            ("https://usw1-1.relay.n0.iroh.link/", direct),
+            ("https://euc1-1.relay.n0.iroh.link/", direct),
+            ("https://aps1-1.relay.n0.iroh.link/", direct),
+        ];
+        let actual: Vec<(&str, Option<u16>)> = RENDEZVOUS_RELAY_LADDER_URLS
+            .iter()
+            .map(|url| (url.as_str(), qad_port(url)))
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "each default rung, in order, with its QUIC address discovery port"
+        );
+    }
+
+    /// The QUIC address discovery port of a beacon homed on `raw`: its one-rung custom ladder.
+    fn beacon_qad(raw: &str) -> Option<u16> {
+        let rung: RelayUrl = raw.parse().expect("a literal https URL parses");
+        let relay_map = super::one_rung_mode(Some(&rung)).relay_map();
+        let config = relay_map.get(&rung).expect("the rung is in the relay map");
+        config.quic.as_ref().map(|quic| quic.port)
+    }
+
+    /// **A beacon on a default rung asks for the QUIC address discovery of that rung.**
+    ///
+    /// The beacon homes on its rung through a one-rung custom ladder
+    /// (`beacon::beacon_lookups`), so the setting follows the URL of the rung, not the choice that
+    /// names it.
+    #[test]
+    fn a_beacon_on_a_default_rung_gets_the_qad_of_that_rung() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert_eq!(
+            beacon_qad("https://nyc-relay1.agent-habilis.com/"),
+            Some(DEFAULT_RELAY_QUIC_PORT),
+            "a beacon on a direct rung asks for QUIC address discovery"
+        );
+        assert_eq!(
+            beacon_qad("https://nyc-relay2.habilis.network/"),
+            None,
+            "a beacon on a tunnel rung asks for no QUIC address discovery"
+        );
+    }
+
+    /// **A custom rung that the default ladder does not name keeps the rule of its scheme.**
+    ///
+    /// A custom ladder is URLs only, on the wire and in the API. An https rung asks for QUIC
+    /// address discovery on the default port. An http rung has no TLS, and QUIC needs TLS, so it
+    /// asks for none.
+    #[test]
+    fn a_custom_rung_takes_the_qad_of_its_scheme() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let https: RelayUrl = "https://custom.example/"
+            .parse()
+            .expect("a literal https URL parses");
+        let http: RelayUrl = "http://custom.example/"
+            .parse()
+            .expect("a literal http URL parses");
+        assert_eq!(
+            qad_port(&https),
+            Some(DEFAULT_RELAY_QUIC_PORT),
+            "a custom https rung asks for QUIC address discovery on the default port"
+        );
+        assert_eq!(
+            qad_port(&http),
+            None,
+            "a custom http rung asks for no QUIC address discovery"
         );
     }
 
@@ -760,7 +1286,7 @@ mod tests {
         let pinned: Vec<_> = relay_ladder(&RelayChoice::Pinned).collect();
         assert_eq!(
             pinned, *RENDEZVOUS_RELAY_LADDER_URLS,
-            "Pinned ⇒ the full n0 prod ladder"
+            "Pinned ⇒ the full default ladder"
         );
         assert!(
             relay_ladder(&RelayChoice::Disabled).next().is_none(),
@@ -783,17 +1309,43 @@ mod tests {
     // relay by latency and ignores the order of the map, so a peer can home on a rung that is
     // not the first one. A peer endpoint homes on the first reachable rung of its ladder.
 
-    /// When no rung answers, the map still holds the whole ladder, so the endpoint can find a
-    /// rung that comes back. The default choice never maps to the n0 relays alone.
+    /// **A peer on the default choice starts on rung 0 alone, and follows the whole ladder.**
+    ///
+    /// iroh homes on the relay with the lowest latency, so a map with 2 rungs could home on rung
+    /// 1. The map holds rung 0 alone, and the ladder that the endpoint follows holds every rung.
     #[test]
-    fn the_default_relay_choice_maps_to_the_whole_ladder() {
+    fn a_default_peer_starts_on_rung_0_alone_and_follows_the_whole_ladder() {
         let _guard = ::habilis_network_test_tracing::init();
-        let urls: Vec<RelayUrl> = super::relay_mode(&RelayChoice::Pinned).relay_map().urls();
-        let ladder: BTreeSet<RelayUrl> = RENDEZVOUS_RELAY_LADDER_URLS.iter().cloned().collect();
-        let mapped: BTreeSet<RelayUrl> = urls.into_iter().collect();
+        let (mode, homing) = super::peer_relay_mode(&RelayChoice::Pinned);
+        let held: Vec<RelayUrl> = mode.relay_map().urls();
         assert_eq!(
-            mapped, ladder,
-            "the relay map of the default choice is the whole ladder"
+            held,
+            vec![RENDEZVOUS_RELAY_LADDER_URLS[0].clone()],
+            "the relay map of a default peer holds rung 0 alone"
+        );
+        let homing = homing.expect("a ladder of 7 rungs has a choice to make");
+        assert_eq!(
+            homing.ladder, *RENDEZVOUS_RELAY_LADDER_URLS,
+            "the endpoint follows the whole default ladder"
+        );
+    }
+
+    #[test]
+    fn the_rungs_below_a_home() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let ladder = rungs(&["a", "b", "c"]);
+        assert_eq!(
+            super::rungs_below(&ladder, &rung("c")),
+            &ladder[..2],
+            "the rungs below rung 2 are rungs 0 and 1"
+        );
+        assert!(
+            super::rungs_below(&ladder, &rung("a")).is_empty(),
+            "rung 0 has no rung below it"
+        );
+        assert!(
+            super::rungs_below(&ladder, &rung("elsewhere")).is_empty(),
+            "a home that is not on the ladder has no rung below it"
         );
     }
 
@@ -939,6 +1491,974 @@ mod tests {
         });
     }
 
+    /// Short times for a test of the return to a lower rung: a probe of 2 s, a liveness read and
+    /// a return probe each second, and a hold of `hold`.
+    fn return_times(hold: std_Duration) -> super::HomingTimes {
+        super::HomingTimes {
+            probe: std_Duration::from_secs(2),
+            interval: std_Duration::from_secs(1),
+            return_every: std_Duration::from_secs(1),
+            return_backoff_max: std_Duration::from_hours(1),
+            return_hold: hold,
+            settle: std_Duration::from_secs(10),
+        }
+    }
+
+    /// A relay URL in front of `real` that holds each new connection for `delay` before it forwards.
+    async fn spawn_slow_relay(real: &RelayUrl, delay: std_Duration) -> RelayUrl {
+        use tokio::io::copy_bidirectional;
+        let host = real.host_str().expect("the relay URL has a host");
+        let upstream = format!("{host}:{}", real.port().expect("the relay URL has a port"));
+        let listener: AsyncListener = AsyncListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("a free loopback port");
+        let port = listener.local_addr().expect("the bound address").port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _peer)) = listener.accept().await {
+                let upstream = upstream.clone();
+                tokio::spawn(async move {
+                    time::sleep(delay).await;
+                    if let Ok(mut onward) = TcpStream::connect(&upstream).await {
+                        drop(copy_bidirectional(&mut stream, &mut onward).await);
+                    }
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+            .parse()
+            .expect("a literal http URL parses")
+    }
+
+    /// **A follower does not walk while the home relay of a move in place is still connecting.**
+    ///
+    /// The old relay stays the home until the new one connects, and a read of the new rung before
+    /// that finds it not connected. Rung 0 takes 2 s to connect, and 2 failed reads of 0.5 s start a
+    /// walk, so a follower that counts those reads walks 1 s after the return, and a failed walk
+    /// of a healthy beacon sheds it. The reads of the new rung count once it is the home.
+    #[test]
+    fn a_follower_does_not_walk_while_the_relay_of_a_move_in_place_connects() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            allow_refused_rung_warnings();
+            let (real_one, _real_one_server) =
+                test_relay::spawn_plain().await.expect("a local relay");
+            let (second, _second_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let first = spawn_slow_relay(&real_one, std_Duration::from_secs(1)).await;
+            let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&second)));
+            let endpoint = builder.bind().await.expect("bind the endpoint");
+            home_of(&endpoint).await;
+            let mut times = return_times(std_Duration::from_secs(2));
+            times.interval = std_Duration::from_millis(500);
+            times.probe = std_Duration::from_secs(8);
+            let homing = super::Homing {
+                ladder: vec![first.clone(), second.clone()],
+                rung: second,
+            };
+            let before = walks_ended();
+            let follower = homing.follow_with(endpoint.clone(), times);
+
+            let returned =
+                time::timeout(std_Duration::from_secs(30), home_becomes(&endpoint, &first)).await;
+            time::sleep(std_Duration::from_secs(6)).await;
+            let walks = walks_ended() - before;
+            let home = home_of(&endpoint).await;
+            endpoint.close().await;
+            drop(follower.await);
+
+            assert!(returned.is_ok(), "the endpoint never returned to rung 0");
+            assert_eq!(walks, 0, "the follower walked while rung 0 connected");
+            assert_eq!(home, vec![first], "the endpoint left rung 0 again");
+        });
+    }
+
+    /// **A peer endpoint returns to rung 0 once rung 0 answers again for the hold time.**
+    ///
+    /// Rung 0 refuses the relay connection, so the endpoint moves to rung 1. Then rung 0 comes
+    /// back. A move on failure alone keeps the endpoint on rung 1 for good: rung 1 never fails.
+    /// The endpoint probes the rungs below its own, and returns once rung 0 answered every round
+    /// for the hold time, not before: about 6 s after rung 0 comes back, with a hold of 4 s. The
+    /// bound is 15 s, well before a later walk of the ladder could find rung 0 by another path.
+    #[test]
+    fn a_peer_endpoint_returns_to_rung_0_after_the_hold() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::net_report::reportgen",
+                "probe failed",
+            );
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Failed to connect to relay server",
+            );
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Lost connection to relay server",
+            );
+            let (real, _real_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (front, half_open) = spawn_switchable_relay(&real).await;
+            let (second, _second_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&front)));
+            let endpoint = builder.bind().await.expect("bind the endpoint");
+            let homing = super::Homing {
+                ladder: vec![front.clone(), second.clone()],
+                rung: front.clone(),
+            };
+            let hold = std_Duration::from_secs(4);
+            let follower = homing.follow_with(endpoint.clone(), return_times(hold));
+            assert_eq!(
+                home_of(&endpoint).await,
+                vec![front.clone()],
+                "the first home relay"
+            );
+
+            half_open.store(true, Ordering::SeqCst);
+            let moved = time::timeout(
+                std_Duration::from_secs(30),
+                home_becomes(&endpoint, &second),
+            )
+            .await;
+            half_open.store(false, Ordering::SeqCst);
+            let back_at = time::Instant::now();
+            let walks_at_back = walks_ended();
+            let returned =
+                time::timeout(std_Duration::from_secs(15), home_becomes(&endpoint, &front)).await;
+            let took = back_at.elapsed();
+            // The move is in place: the reads of the new rung count only once it is the home, so
+            // the follower walks no more.
+            time::sleep(std_Duration::from_secs(8)).await;
+            let walks_after_back = walks_ended() - walks_at_back;
+            endpoint.close().await;
+            drop(follower.await);
+
+            assert!(moved.is_ok(), "the endpoint never left the dead rung 0");
+            assert!(
+                returned.is_ok(),
+                "the endpoint stayed on rung 1 for 15 s after rung 0 came back"
+            );
+            assert!(
+                took >= hold,
+                "the endpoint returned {took:?} after rung 0 came back, before the hold of {hold:?}"
+            );
+            assert_eq!(
+                walks_after_back, 0,
+                "the follower walked the ladder after a return in place, while its home moved"
+            );
+        });
+    }
+
+    /// **A beacon on a later rung moves to rung 0 in place once rung 0 answers for the hold time.**
+    ///
+    /// The monitor moves the relay of the beacon, tells the event loop that the beacon moved, and
+    /// goes on following. A monitor that acts only on a failure of its own rung never moves while
+    /// rung 1 is healthy, so the beacon stays on rung 1 for good.
+    #[test]
+    fn a_beacon_on_a_later_rung_moves_to_rung_0_in_place_after_the_hold() {
+        ::habilis_network_test_tracing::run(
+            ::habilis_network_test_tracing::init(),
+            move_a_beacon_in_place(None),
+        );
+    }
+
+    /// **The old relay connection of a beacon that moved in place closes when it is idle.**
+    ///
+    /// iroh closes the connection to a relay that is not the home after 60 s without traffic
+    /// (`RELAY_INACTIVE_CLEANUP_TIME`), so the beacon does not keep a session on the rung that it left.
+    #[test]
+    #[ignore = "90 s: waits for the inactive timeout of 60 s of the relay actor of iroh"]
+    fn the_old_relay_connection_of_a_beacon_that_moved_in_place_closes_when_idle() {
+        ::habilis_network_test_tracing::run(
+            ::habilis_network_test_tracing::init(),
+            move_a_beacon_in_place(Some(std_Duration::from_secs(90))),
+        );
+    }
+
+    /// Run a beacon on rung 1 until its monitor moves it to rung 0 in place, and check the move.
+    /// With `old_closes_within`, also wait for the connection to rung 1 to close.
+    async fn move_a_beacon_in_place(old_closes_within: Option<std_Duration>) {
+        const ALPN: &[u8] = b"habilis-network/test-moved";
+        let (first, _first_server) = test_relay::spawn_plain().await.expect("a local relay");
+        let (second, second_server) = test_relay::spawn_plain().await.expect("a local relay");
+        let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(super::one_rung_mode(Some(&second)))
+            .alpns(vec![ALPN.to_vec()]);
+        let endpoint = builder.bind().await.expect("bind the beacon endpoint");
+        home_of(&endpoint).await;
+        let accepting = endpoint.clone();
+        let accept = n0future_task::spawn(async move {
+            while let Some(incoming) = accepting.accept().await {
+                if let Ok(connection) = incoming.await {
+                    n0future_task::spawn(async move {
+                        connection.closed().await;
+                    });
+                }
+            }
+        });
+        let (rung_tx, mut rung_rx): (
+            mpsc::UnboundedSender<RungDecision>,
+            mpsc::UnboundedReceiver<RungDecision>,
+        ) = mpsc::unbounded_channel();
+        let mut published: Option<RungDecision> = None;
+        let (_stop, stopped) = watch::channel(());
+        let hold = std_Duration::from_secs(3);
+        let ladder = [first.clone(), second.clone()];
+
+        let started = time::Instant::now();
+        let following = super::follow_rung(
+            &endpoint,
+            &ladder,
+            second.clone(),
+            return_times(hold),
+            super::Mover::Publish(&rung_tx, super::Generation::next()),
+            Some(&stopped),
+        );
+        tokio::pin!(following);
+        let moved = time::timeout(std_Duration::from_secs(30), async {
+            tokio::select! {
+                () = &mut following => false,
+                decided = rung_rx.recv() => {
+                    published = decided;
+                    published.is_some()
+                }
+            }
+        })
+        .await;
+        let took = started.elapsed();
+        let decision: RungDecision = published.unwrap_or_default();
+        // The old relay stays the home until iroh moves the home: the connection to it is up all
+        // the time.
+        let home_moved =
+            time::timeout(std_Duration::from_secs(30), home_becomes(&endpoint, &first))
+                .await
+                .is_ok();
+        let old_closed = match old_closes_within {
+            Some(within) => time::timeout(within, async {
+                while second_server.metrics().server.disconnects.get() == 0 {
+                    time::sleep(std_Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .is_ok(),
+            None => true,
+        };
+        // Once the old relay connection is gone, a joiner that holds rung 0 only still reaches the
+        // beacon by an address that names both rungs.
+        let joiner_builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(super::one_rung_mode(Some(&first)));
+        let joiner = joiner_builder
+            .bind()
+            .await
+            .expect("bind the joiner endpoint");
+        let endpoint_address = iroh::EndpointAddr::new(endpoint.id());
+        let address: iroh::EndpointAddr = endpoint_address
+            .with_relay_url(first.clone())
+            .with_relay_url(second.clone());
+        let dialed: bool = if old_closes_within.is_some() {
+            time::timeout(std_Duration::from_secs(10), joiner.connect(address, ALPN))
+                .await
+                .is_ok_and(|connected| connected.is_ok())
+        } else {
+            true
+        };
+        let still_following = time::timeout(std_Duration::from_millis(200), &mut following)
+            .await
+            .is_err();
+        accept.abort();
+        joiner.close().await;
+        endpoint.close().await;
+
+        assert_eq!(
+            moved,
+            Ok(true),
+            "the monitor of a healthy rung 1 moved nothing for 30 s"
+        );
+        assert_eq!(
+            decision.rung,
+            Some(first.clone()),
+            "the monitor moves to rung 0"
+        );
+        assert_eq!(
+            decision.change,
+            RungChange::Moved,
+            "the beacon moved in place: the loop must not shed it"
+        );
+        assert!(
+            home_moved,
+            "the home relay of the beacon never became rung 0"
+        );
+        assert!(old_closed, "the beacon kept its connection to rung 1");
+        assert!(
+            dialed,
+            "a joiner did not reach the beacon after the old relay closed"
+        );
+        assert!(still_following, "the monitor ended after a move in place");
+        assert!(
+            took >= hold,
+            "the monitor moved to rung 0 after {took:?}, before the hold of {hold:?}"
+        );
+    }
+
+    /// The parameters that the event loop holds for a beacon with the id `id`, homed on `home`.
+    fn beacon_params(id: iroh::EndpointId, home: &RelayUrl) -> RendezvousParams {
+        RendezvousParams {
+            topic_id: TopicId::from_bytes([7u8; 32]),
+            id,
+            secret: iroh::SecretKey::generate(),
+            bind_ports: Vec::new(),
+            lookups: LookupOpts::loopback(),
+            relay_transport: PayloadPath::DirectOnly,
+            bootstrap_relay: Some(home.clone()),
+            rung_tx: mpsc::unbounded_channel().0,
+        }
+    }
+
+    /// Dial `address` with `joiner` every 100 ms, until 3 s after the loop applied a decision of
+    /// the monitor (`decided_at`), or for 60 s. Returns how many dials reached the beacon, and how
+    /// many did not in 2 s.
+    async fn dial_through_a_return(
+        joiner: &iroh::Endpoint,
+        address: &iroh::EndpointAddr,
+        alpn: &[u8],
+        decided_at: &cell::Cell<Option<time::Instant>>,
+    ) -> (u32, u32) {
+        let (mut reached, mut missed) = (0_u32, 0_u32);
+        let started = time::Instant::now();
+        loop {
+            let after_decision = decided_at
+                .get()
+                .is_some_and(|at| at.elapsed() >= std_Duration::from_secs(3));
+            if after_decision || started.elapsed() >= std_Duration::from_secs(60) {
+                return (reached, missed);
+            }
+            match time::timeout(
+                std_Duration::from_secs(2),
+                joiner.connect(address.clone(), alpn),
+            )
+            .await
+            {
+                Ok(Ok(connection)) => {
+                    reached += 1;
+                    connection.close(0_u32.into(), b"done");
+                }
+                _ => missed += 1,
+            }
+            time::sleep(std_Duration::from_millis(100)).await;
+        }
+    }
+
+    /// **A return of the beacon to rung 0 leaves it reachable by a joiner that has only the relays.**
+    ///
+    /// The beacon is on rung 1 while rung 0 is down. Rung 0 comes back, answers for the hold, and
+    /// the monitor returns the beacon to it. A joiner with no mDNS, no DHT and no direct address
+    /// dials the rendezvous id every 100 ms, by an address that names both rungs, from before the
+    /// return to after it. The loop handles the decision of the monitor as the event loop does.
+    /// The beacon must stay one endpoint, held by the loop, that every dial reaches, and it must end
+    /// homed on rung 0. A beacon that the loop sheds for the return is closed for the time that the
+    /// next claim takes, and a joiner in that time reaches nothing.
+    #[test]
+    fn a_return_of_the_beacon_leaves_it_reachable_for_a_relay_only_joiner() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            const ALPN: &[u8] = b"habilis-network/test-return";
+            allow_refused_rung_warnings();
+            let (real_one, _real_one_server) =
+                test_relay::spawn_plain().await.expect("a local relay");
+            let (real_two, _real_two_server) =
+                test_relay::spawn_plain().await.expect("a local relay");
+            let (first, first_refuses) = spawn_switchable_relay(&real_one).await;
+            let (second, _second_refuses) = spawn_switchable_relay(&real_two).await;
+            first_refuses.store(true, Ordering::SeqCst);
+
+            let beacon_builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&second)))
+                .alpns(vec![ALPN.to_vec()]);
+            let beacon = beacon_builder
+                .bind()
+                .await
+                .expect("bind the beacon endpoint");
+            assert_eq!(
+                home_of(&beacon).await,
+                vec![second.clone()],
+                "the home of the beacon"
+            );
+            let accepting = beacon.clone();
+            let accept = n0future_task::spawn(async move {
+                while let Some(incoming) = accepting.accept().await {
+                    if let Ok(connection) = incoming.await {
+                        n0future_task::spawn(async move {
+                            connection.closed().await;
+                        });
+                    }
+                }
+            });
+            // The joiner holds rung 0 only, and dials by an address that names both rungs.
+            let joiner_builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&first)));
+            let joiner = joiner_builder
+                .bind()
+                .await
+                .expect("bind the joiner endpoint");
+            let beacon_address = iroh::EndpointAddr::new(beacon.id());
+            let address: iroh::EndpointAddr = beacon_address
+                .with_relay_url(first.clone())
+                .with_relay_url(second.clone());
+
+            // What the event loop holds: the beacon, the parameters, and the rung that it applies.
+            let mut params = beacon_params(beacon.id(), &second);
+            let mut state = testing::fresh_state();
+            let beacon_held = Rendezvous::for_test(beacon.clone(), None);
+            let generation = beacon_held.generation;
+            let mut rendezvous = Some(beacon_held);
+            let (rung_tx, mut rung_rx): (
+                mpsc::UnboundedSender<RungDecision>,
+                mpsc::UnboundedReceiver<RungDecision>,
+            ) = mpsc::unbounded_channel();
+            let (_stop, stopped) = watch::channel(());
+            let ladder = [first.clone(), second.clone()];
+            let decided_at: cell::Cell<Option<time::Instant>> = cell::Cell::new(None);
+
+            let applying = async {
+                while let Some(decision) = rung_rx.recv().await {
+                    decided_at.set(Some(time::Instant::now()));
+                    daemon::apply_rung_change(&mut state, &mut params, &mut rendezvous, decision);
+                }
+            };
+            let following = async {
+                // Rung 0 comes back after a second of dials against the beacon on rung 1.
+                time::sleep(std_Duration::from_secs(1)).await;
+                first_refuses.store(false, Ordering::SeqCst);
+                super::follow_rung(
+                    &beacon,
+                    &ladder,
+                    second.clone(),
+                    return_times(std_Duration::from_secs(3)),
+                    super::Mover::Publish(&rung_tx, generation),
+                    Some(&stopped),
+                )
+                .await;
+                let never: future::Pending<()> = future::pending();
+                never.await;
+            };
+            let (reached, missed) = tokio::select! {
+                dials = dial_through_a_return(&joiner, &address, ALPN, &decided_at) => dials,
+                () = following => unreachable!("the follower never ends"),
+                () = applying => unreachable!("the receiver never closes"),
+            };
+            let home: Vec<RelayUrl> = beacon.addr().relay_urls().cloned().collect();
+            let closed = beacon.is_closed();
+            let still_held = rendezvous.is_some();
+            accept.abort();
+            joiner.close().await;
+            beacon.close().await;
+
+            assert!(
+                decided_at.get().is_some(),
+                "the monitor never decided a return in 60 s"
+            );
+            assert!(
+                reached > 10,
+                "the joiner reached the beacon {reached} times only"
+            );
+            assert_eq!(
+                missed, 0,
+                "the joiner missed the beacon {missed} times in {reached} dials: it was closed for the return"
+            );
+            assert!(
+                !closed && still_held,
+                "the loop shed the beacon for a return"
+            );
+            assert_eq!(
+                home,
+                vec![first],
+                "the beacon is not homed on rung 0 after the return"
+            );
+        });
+    }
+
+    /// **A peer on a healthy rung without QUIC address discovery is not evicted.**
+    ///
+    /// iroh measures a relay in an incremental net report by QUIC address discovery only. A rung
+    /// without it, a tunnel rung or a plain `http://` rung, gets no latency there, so every second
+    /// periodic report, every 20 to 26 s, has no preferred relay for one period. A liveness read
+    /// that takes that as a dead rung evicts a healthy rung and walks the ladder.
+    ///
+    /// A walk probes rung 0 first, at once, with an endpoint of its own, and that endpoint is a new
+    /// client key of the relay. The endpoint under test is the only other client of rung 0, so a
+    /// count of 1 says that no walk started. The count of rung 1 cannot say it: a healthy rung 0
+    /// answers inside the stagger, the walk stops there, and rung 1 sees nothing.
+    #[test]
+    #[ignore = "60 s: waits for 2 periods of the net report of iroh"]
+    fn a_peer_on_a_healthy_rung_without_qad_is_not_evicted() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (first, first_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (second, _second_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&first)));
+            let endpoint = builder.bind().await.expect("bind the endpoint");
+            let homing = super::Homing {
+                ladder: vec![first.clone(), second],
+                rung: first.clone(),
+            };
+            let follower =
+                homing.follow_with(endpoint.clone(), return_times(std_Duration::from_hours(1)));
+            assert_eq!(home_of(&endpoint).await, vec![first], "the home relay");
+
+            time::sleep(std_Duration::from_secs(60)).await;
+            let clients = relay_clients(&first_server);
+            endpoint.close().await;
+            drop(follower.await);
+
+            assert_eq!(
+                clients, 1,
+                "the endpoint judged its healthy rung dead and walked the ladder: a probe endpoint of the walk joined rung 0"
+            );
+        });
+    }
+
+    /// **A home on rung 0 starts no return round; a later home starts one when it is due.**
+    #[test]
+    fn a_return_round_starts_only_below_a_later_home() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (silent, _held) = spawn_silent_rung().await;
+            let mut times = return_times(std_Duration::from_hours(1));
+            times.return_every = std_Duration::ZERO;
+            let ladder = vec![silent.clone(), rung("later")];
+            let now = time::Instant::now();
+
+            let mut on_rung_0 = super::RungFollower::new(&ladder, silent, times, true, now);
+            assert_eq!(
+                on_rung_0.round_due(now),
+                None,
+                "rung 0 has no rung below it"
+            );
+
+            let mut on_rung_1 = super::RungFollower::new(&ladder, rung("later"), times, true, now);
+            let below = on_rung_1
+                .round_due(now)
+                .expect("a due round of a later home starts");
+            let mut round = Some(super::ReturnRound::spawn(below, times.probe));
+            super::cancel_round(&mut round).await;
+            assert!(round.is_none(), "a cancel ends the round");
+        });
+    }
+
+    /// **A return round reports every lower rung that answers, not only the lowest.**
+    #[test]
+    fn a_return_round_reports_every_rung_that_answers() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (first, _first_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (silent, _held) = spawn_silent_rung().await;
+            let (third, _third_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (_stop, stopped) = watch::channel(());
+
+            let answered = super::probe_lower_rungs(
+                &[first.clone(), silent, third.clone()],
+                std_Duration::from_secs(2),
+                &stopped,
+            )
+            .await;
+
+            assert_eq!(
+                answered,
+                vec![first, third],
+                "the 2 live rungs answer, and the silent rung between them does not"
+            );
+        });
+    }
+
+    /// **A follower that is stopped acts on no return round that ended at the same time.**
+    ///
+    /// The event loop stops the monitor of a beacon that it sheds. A round that ended before the
+    /// stop is read by the monitor after it, and a decision on it would move the registration of
+    /// the beacon that the loop holds next. Both are ready: the stop must win, every time.
+    #[test]
+    fn a_stop_wins_over_a_return_round_that_ended_with_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind an endpoint without a relay");
+            let (stop, stopped) = watch::channel(());
+            drop(stop);
+            for pass in 0..64 {
+                let task = n0future_task::spawn(async { (Vec::new(), time::Instant::now()) });
+                let mut round = Some(super::ReturnRound {
+                    stop: watch::channel(()).0,
+                    task,
+                });
+                while !round.as_ref().is_some_and(|round| round.task.is_finished()) {
+                    time::sleep(std_Duration::from_millis(1)).await;
+                }
+
+                let wake = super::next_wake(
+                    std_Duration::from_hours(1),
+                    &mut round,
+                    &endpoint,
+                    Some(&stopped),
+                )
+                .await;
+
+                assert!(
+                    matches!(wake, super::Wake::Ended),
+                    "pass {pass}: the follower read a round after it was stopped"
+                );
+                super::cancel_round(&mut round).await;
+            }
+            endpoint.close().await;
+        });
+    }
+
+    /// **A return round that is stopped ends at once, and closes its probes.**
+    ///
+    /// iroh logs an error for an endpoint that is dropped open, and the test fails on it.
+    #[test]
+    fn a_stopped_return_round_ends_at_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (one, _held_one) = spawn_silent_rung().await;
+            let (two, _held_two) = spawn_silent_rung().await;
+            let (stop, stopped) = watch::channel(());
+            let stopping = async {
+                time::sleep(std_Duration::from_millis(200)).await;
+                drop(stop);
+            };
+
+            let started = time::Instant::now();
+            let silent = [one, two];
+            let (answered, ()) = tokio::join!(
+                super::probe_lower_rungs(&silent, std_Duration::from_secs(30), &stopped),
+                stopping
+            );
+            let took = started.elapsed();
+
+            assert!(answered.is_empty(), "a stopped round reports no rung");
+            assert!(
+                took < std_Duration::from_secs(5),
+                "the stopped round of 30 s probes took {took:?}"
+            );
+        });
+    }
+
+    /// **A beacon leaves a rung that dies silently, in the bound of a peer.**
+    ///
+    /// A relay that dies keeps its connection in the status for minutes, and `online()` reads that
+    /// status, so a beacon that asks `online()` only stays on the dead rung while the peers move.
+    /// The net report finds the dead relay at its next run, every 20 to 26 s.
+    #[test]
+    #[ignore = "60 s: waits for a net report of iroh to find the dead relay"]
+    fn a_beacon_leaves_a_rung_that_dies_silently() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::net_report::reportgen",
+                "probe failed",
+            );
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh_relay::server::http_server",
+                "error accepting upgraded connection",
+            );
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Failed to connect to relay server",
+            );
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Lost connection to relay server",
+            );
+            let (first, first_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (second, _second_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&first)));
+            let endpoint = builder.bind().await.expect("bind the beacon endpoint");
+            assert_eq!(
+                home_of(&endpoint).await,
+                vec![first.clone()],
+                "the first home relay"
+            );
+            let (rung_tx, mut rung_rx): (
+                mpsc::UnboundedSender<RungDecision>,
+                mpsc::UnboundedReceiver<RungDecision>,
+            ) = mpsc::unbounded_channel();
+            let (_stop, stopped) = watch::channel(());
+            let ladder = [first.clone(), second.clone()];
+
+            drop(first_server);
+            let published = time::timeout(
+                std_Duration::from_secs(60),
+                super::follow_rung(
+                    &endpoint,
+                    &ladder,
+                    first,
+                    return_times(std_Duration::from_hours(1)),
+                    super::Mover::Publish(&rung_tx, super::Generation::next()),
+                    Some(&stopped),
+                ),
+            )
+            .await;
+            endpoint.close().await;
+
+            assert!(
+                published.is_ok(),
+                "the beacon stayed on its dead rung for 60 s"
+            );
+            let decision: Option<RungDecision> = rung_rx.try_recv().ok();
+            assert_eq!(
+                decision.and_then(|decision| decision.rung),
+                Some(second),
+                "the beacon moves to rung 1"
+            );
+        });
+    }
+
+    /// **A slow return round does not hold back the liveness read of the home rung.**
+    ///
+    /// Rung 0 accepts connections and never answers, so each return round waits its full probe
+    /// window of 8 s. While a round runs, the home rung starts to refuse the relay connection.
+    /// The endpoint must judge it dead within 2 reads, not after the round: then the walk of 8 s
+    /// finds rung 2, about 10 s after the refusal. A round that blocks the reads adds its 8 s.
+    #[test]
+    #[ignore = "25 s: waits for a return round and a walk of 8 s each"]
+    fn a_slow_return_round_does_not_hold_back_the_liveness_read() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::net_report::reportgen",
+                "probe failed",
+            );
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Failed to connect to relay server",
+            );
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Lost connection to relay server",
+            );
+            let (silent, _held) = spawn_silent_rung().await;
+            let (real, _real_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (front, half_open) = spawn_switchable_relay(&real).await;
+            let (third, _third_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&front)));
+            let endpoint = builder.bind().await.expect("bind the endpoint");
+            let homing = super::Homing {
+                ladder: vec![silent, front.clone(), third.clone()],
+                rung: front.clone(),
+            };
+            let times = super::HomingTimes {
+                probe: std_Duration::from_secs(8),
+                interval: std_Duration::from_secs(1),
+                return_every: std_Duration::from_secs(1),
+                return_backoff_max: std_Duration::from_hours(1),
+                return_hold: std_Duration::from_hours(1),
+                settle: std_Duration::from_secs(10),
+            };
+            let follower = homing.follow_with(endpoint.clone(), times);
+            assert_eq!(
+                home_of(&endpoint).await,
+                vec![front],
+                "the first home relay"
+            );
+            // The first return round starts after 1 s and runs until about 9 s.
+            time::sleep(std_Duration::from_secs(3)).await;
+
+            half_open.store(true, Ordering::SeqCst);
+            let refused_at = time::Instant::now();
+            let moved =
+                time::timeout(std_Duration::from_secs(30), home_becomes(&endpoint, &third)).await;
+            let took = refused_at.elapsed();
+            endpoint.close().await;
+            drop(follower.await);
+
+            assert!(moved.is_ok(), "the endpoint never left the refusing rung");
+            assert!(
+                took < std_Duration::from_secs(13),
+                "the endpoint left the refusing rung {took:?} after the refusal: the round held \
+                 back the liveness read"
+            );
+        });
+    }
+
+    /// The warnings of a test whose rungs refuse the relay connection on purpose.
+    fn allow_refused_rung_warnings() {
+        ::habilis_network_test_tracing::allow_warn("iroh::net_report::reportgen", "probe failed");
+        ::habilis_network_test_tracing::allow_warn(
+            "iroh::socket::transports::relay::actor",
+            "Failed to connect to relay server",
+        );
+        ::habilis_network_test_tracing::allow_warn(
+            "iroh::socket::transports::relay::actor",
+            "Lost connection to relay server",
+        );
+    }
+
+    /// **A walk that finds no rung keeps the follower of a peer alive.**
+    ///
+    /// Both rungs refuse connections, as in a full outage (a sleep, Wi-Fi off). The walk finds no
+    /// rung. The follower must stay on its rung and go on, or the peer never leaves a dead rung
+    /// again, and never returns to a lower one.
+    #[test]
+    fn a_walk_that_finds_no_rung_keeps_the_follower_alive() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            allow_refused_rung_warnings();
+            let first = refused_rung();
+            let (second, walk_probes) = spawn_closing_rung().await;
+            let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&first)));
+            let endpoint = builder.bind().await.expect("bind the endpoint");
+            let homing = super::Homing {
+                ladder: vec![first.clone(), second],
+                rung: first,
+            };
+            let before = walks_ended();
+            let follower =
+                homing.follow_with(endpoint.clone(), return_times(std_Duration::from_hours(1)));
+
+            // The first walk finds no rung. The follower walks again only if it went on: it needs 2
+            // more failed reads for a second walk.
+            time::timeout(std_Duration::from_secs(60), wait_for_walks(before, 2))
+                .await
+                .expect("the follower did not walk twice in 60 s");
+            let alive = !follower.is_finished();
+            let walked = walk_probes.load(Ordering::SeqCst);
+            endpoint.close().await;
+            drop(follower.await);
+
+            assert!(
+                walked > 0,
+                "no walk probed the last rung, so the test proves nothing"
+            );
+            assert!(alive, "the follower ended while its endpoint was open");
+        });
+    }
+
+    /// **After a walk that finds no rung, a peer moves to the first rung that comes back.**
+    #[test]
+    #[ignore = "20 s: waits for a walk with no rung, then for the next one"]
+    fn a_peer_moves_to_a_rung_that_comes_back_after_a_full_outage() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            allow_refused_rung_warnings();
+            let (real_one, _real_one_server) =
+                test_relay::spawn_plain().await.expect("a local relay");
+            let (real_two, _real_two_server) =
+                test_relay::spawn_plain().await.expect("a local relay");
+            let (first, first_refuses) = spawn_switchable_relay(&real_one).await;
+            let (second, second_refuses) = spawn_switchable_relay(&real_two).await;
+            let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&first)));
+            let endpoint = builder.bind().await.expect("bind the endpoint");
+            let homing = super::Homing {
+                ladder: vec![first.clone(), second.clone()],
+                rung: first.clone(),
+            };
+            let before = walks_ended();
+            let follower =
+                homing.follow_with(endpoint.clone(), return_times(std_Duration::from_hours(1)));
+            assert_eq!(
+                home_of(&endpoint).await,
+                vec![first],
+                "the first home relay"
+            );
+
+            first_refuses.store(true, Ordering::SeqCst);
+            second_refuses.store(true, Ordering::SeqCst);
+            // 2 failed reads and a walk of refused rungs: the walk finds no rung. Rung 1 comes back
+            // only after that walk ended, so that the move needs the walk after it.
+            time::timeout(std_Duration::from_secs(60), wait_for_walks(before, 1))
+                .await
+                .expect("no walk ended in 60 s");
+            second_refuses.store(false, Ordering::SeqCst);
+            let moved = time::timeout(
+                std_Duration::from_secs(30),
+                home_becomes(&endpoint, &second),
+            )
+            .await;
+            endpoint.close().await;
+            drop(follower.await);
+
+            assert!(
+                moved.is_ok(),
+                "the peer stayed on its dead rung after rung 1 came back"
+            );
+        });
+    }
+
+    /// **A walk that finds no rung does not demote the beacon.**
+    ///
+    /// The peers stay on their rung through a short full outage, and so does the beacon: it
+    /// publishes no `None`, which would make the event loop rebuild it with no relay and wait out
+    /// the backoff of the relay-less monitor (30 s to 5 min). When a rung comes back, the beacon
+    /// publishes it.
+    #[test]
+    #[ignore = "20 s: waits for a walk with no rung, then for the next one"]
+    fn a_walk_that_finds_no_rung_does_not_demote_the_beacon() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            allow_refused_rung_warnings();
+            let (real_one, _real_one_server) =
+                test_relay::spawn_plain().await.expect("a local relay");
+            let (real_two, _real_two_server) =
+                test_relay::spawn_plain().await.expect("a local relay");
+            let (first, first_refuses) = spawn_switchable_relay(&real_one).await;
+            let (second, second_refuses) = spawn_switchable_relay(&real_two).await;
+            let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&first)));
+            let endpoint = builder.bind().await.expect("bind the beacon endpoint");
+            assert_eq!(
+                home_of(&endpoint).await,
+                vec![first.clone()],
+                "the first home relay"
+            );
+            let (rung_tx, mut rung_rx): (
+                mpsc::UnboundedSender<RungDecision>,
+                mpsc::UnboundedReceiver<RungDecision>,
+            ) = mpsc::unbounded_channel();
+            let (_stop, stopped) = watch::channel(());
+            let ladder = [first.clone(), second.clone()];
+
+            let before = walks_ended();
+            first_refuses.store(true, Ordering::SeqCst);
+            second_refuses.store(true, Ordering::SeqCst);
+            let following = super::follow_rung(
+                &endpoint,
+                &ladder,
+                first.clone(),
+                return_times(std_Duration::from_hours(1)),
+                super::Mover::Publish(&rung_tx, super::Generation::next()),
+                Some(&stopped),
+            );
+            tokio::pin!(following);
+            // The follower ends in the outage, or its first walk ends and finds no rung. The test
+            // polls `following`, so the walk runs here.
+            let ended_early = tokio::select! {
+                () = &mut following => true,
+                waited = time::timeout(std_Duration::from_secs(60), wait_for_walks(before, 1)) => {
+                    waited.expect("no walk ended in 60 s");
+                    false
+                }
+            };
+            let early: Option<RungDecision> = rung_rx.try_recv().ok();
+            let published_early = early.is_some();
+            let held: RungDecision = early.unwrap_or_default();
+            second_refuses.store(false, Ordering::SeqCst);
+            let later = if ended_early {
+                false
+            } else {
+                time::timeout(std_Duration::from_secs(30), &mut following)
+                    .await
+                    .is_ok()
+            };
+            endpoint.close().await;
+
+            assert!(!ended_early, "the beacon follower ended in the outage");
+            assert!(
+                !published_early,
+                "the beacon published {held:?} in the outage"
+            );
+            assert!(later, "the beacon never left its dead rung");
+            let decision: Option<RungDecision> = rung_rx.try_recv().ok();
+            assert_eq!(
+                decision.and_then(|decision| decision.rung),
+                Some(second),
+                "the beacon publishes the rung that came back"
+            );
+        });
+    }
+
     /// A relay URL in front of `real`. While the flag is off, it forwards every connection. When
     /// the flag turns on, it cuts the open connections, still forwards a plain request, and
     /// refuses the relay upgrade with 403.
@@ -1029,14 +2549,22 @@ mod tests {
             }
             let first = ladder[0].clone();
             let builder: Builder = iroh::Endpoint::builder(presets::Minimal)
-                .relay_mode(super::relay_mode(&RelayChoice::Custom(vec![first.clone()])));
+                .relay_mode(super::one_rung_mode(Some(&first)));
             let endpoint = builder.bind().await.expect("bind the endpoint");
             let homing = super::Homing {
                 ladder,
                 rung: first,
             };
             let probe = std_Duration::from_secs(3);
-            let follower = homing.follow_with(endpoint.clone(), probe, std_Duration::from_secs(1));
+            let times = super::HomingTimes {
+                probe,
+                interval: std_Duration::from_secs(1),
+                return_every: std_Duration::from_hours(1),
+                return_backoff_max: std_Duration::from_hours(1),
+                return_hold: std_Duration::from_hours(1),
+                settle: std_Duration::from_secs(10),
+            };
+            let follower = homing.follow_with(endpoint.clone(), times);
 
             // The first walk starts after the 3 s that the rung gets to connect, and it takes 9 s.
             time::sleep(std_Duration::from_millis(4500)).await;
@@ -1094,6 +2622,19 @@ mod tests {
         );
     }
 
+    /// How many walks of followers ended on this thread so far.
+    fn walks_ended() -> usize {
+        super::WALKS_ENDED.with(cell::Cell::get)
+    }
+
+    /// Wait until `count` more walks than `before` ended, whatever they found. A walk is over when
+    /// its verdict is known, so a rung that comes back after this cannot change it.
+    async fn wait_for_walks(before: usize, count: usize) {
+        while walks_ended() < before + count {
+            time::sleep(std_Duration::from_millis(50)).await;
+        }
+    }
+
     /// Wait until the home relay of the endpoint is `rung`.
     async fn home_becomes(endpoint: &iroh::Endpoint, rung: &RelayUrl) {
         loop {
@@ -1105,15 +2646,39 @@ mod tests {
         }
     }
 
-    fn is_n0_relay(url: &RelayUrl) -> bool {
-        url.host_str()
-            .is_some_and(|host| host.ends_with(".relay.n0.iroh.link"))
+    /// How many distinct endpoints connected to a relay as clients. A probe endpoint of a walk is
+    /// a new one each time.
+    fn relay_clients(server: &Server) -> u64 {
+        server.metrics().server.unique_client_keys.get()
     }
 
     /// How many HTTP connections a relay accepted. An endpoint that holds a relay in its map
     /// connects to it to measure the latency, even when it does not home on it.
     fn http_connections(server: &Server) -> u64 {
         server.metrics().server.http_connections.get()
+    }
+
+    /// A relay URL on a local port that accepts each connection, counts it, and closes it at once.
+    /// The endpoint holds only its own rung, so each connection to this rung is a probe of a walk.
+    async fn spawn_closing_rung() -> (RelayUrl, Arc<AtomicUsize>) {
+        let listener: AsyncListener = AsyncListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("a free loopback port");
+        let address = listener.local_addr().expect("the bound address");
+        let port: u16 = address.port();
+        // The count is shared with the accept task and with the test.
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        n0future_task::spawn(async move {
+            while let Ok((stream, _peer)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/")
+            .parse()
+            .expect("a literal http URL parses");
+        (url, accepted)
     }
 
     /// A relay URL on a local port that refuses connections.
@@ -1132,13 +2697,13 @@ mod tests {
         lookups
     }
 
-    /// **A default peer endpoint homes on an n0 relay and learns its public address.**
+    /// **A default peer endpoint homes on rung 0 and learns its public address.**
     ///
-    /// The n0 relays answer QUIC address discovery, so the net report has a public address and
-    /// `udp_v4`. Rung 0 of the old ladder had none. This test needs the internet.
+    /// Rung 0 is a direct rung: it answers QUIC address discovery, so the net report has a public
+    /// address and `udp_v4`. This test needs the internet.
     #[test]
-    #[ignore = "needs the internet: it builds a peer endpoint on the n0 relays"]
-    fn a_default_peer_endpoint_homes_on_n0_and_has_a_public_address() {
+    #[ignore = "needs the internet, and the direct relay of rung 0 deployed: it builds a peer endpoint on the default ladder"]
+    fn a_default_peer_endpoint_homes_on_rung_0_and_has_a_public_address() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let endpoint = build_peer_endpoint(&LookupOpts::new(RelayChoice::Pinned))
                 .await
@@ -1153,9 +2718,10 @@ mod tests {
             let udp_v4 = report.udp_v4;
             endpoint.close().await;
 
-            assert!(
-                home.iter().all(is_n0_relay),
-                "the home relay is not an n0 relay: {home:?}"
+            assert_eq!(
+                home,
+                vec![RENDEZVOUS_RELAY_LADDER_URLS[0].clone()],
+                "the home relay is not rung 0"
             );
             assert!(udp_v4, "the net report has no udp_v4");
             assert!(global_v4.is_some(), "the net report has no public address");
@@ -1181,8 +2747,13 @@ mod tests {
         });
     }
 
+    /// The walk probes every rung at once, so its own throwaway probe endpoints reach the last
+    /// rung. The endpoint itself must hold no rung after its home: an endpoint that holds a relay
+    /// in its map probes it in each net report, every 20 to 26 s. So the count of the last relay
+    /// is read once the endpoint is home and the walk has closed its probes, and must not grow
+    /// over one net report period.
     #[test]
-    #[ignore = "10 s: waits for the probe budget of the dead rung"]
+    #[ignore = "40 s: waits for the probe budget of the dead rung, then one net report period"]
     fn a_peer_endpoint_homes_on_the_next_rung_when_rung_0_is_down() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             // Rung 0 refuses connections on purpose, so the probe of its latency fails.
@@ -1198,12 +2769,14 @@ mod tests {
                     .expect("a peer endpoint");
 
             assert_eq!(home_of(&endpoint).await, vec![next], "the home relay");
-            assert_eq!(
-                http_connections(&last_server),
-                0,
-                "a rung after the first reachable one never sees the endpoint"
-            );
+            let after_the_walk = http_connections(&last_server);
+            time::sleep(std_Duration::from_secs(30)).await;
+            let later = http_connections(&last_server);
             endpoint.close().await;
+            assert_eq!(
+                later, after_the_walk,
+                "a rung after the first reachable one sees the endpoint after the walk"
+            );
         });
     }
 
@@ -1269,6 +2842,75 @@ mod tests {
             );
             blob.close().await;
             member.close().await;
+        });
+    }
+
+    /// **A healthy rung 0 leaves the later rungs unprobed.**
+    ///
+    /// The walk starts rung 1 a stagger after rung 0, and a healthy rung 0 answers before that.
+    /// A walk that starts every rung at once sends a probe to every relay of the ladder, the n0
+    /// relays too, each time a member walks.
+    #[test]
+    fn a_healthy_rung_0_leaves_the_later_rungs_unprobed() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (first, _first_server) = test_relay::spawn_plain().await.expect("a local relay");
+            let (second, second_server) = test_relay::spawn_plain().await.expect("a local relay");
+
+            let selected =
+                select_bootstrap_rung(&[first.clone(), second], std_Duration::from_secs(2), None)
+                    .await;
+
+            assert_eq!(selected, Some(first), "the walk picks rung 0");
+            assert_eq!(
+                http_connections(&second_server),
+                0,
+                "rung 1 saw a probe, though rung 0 answered"
+            );
+        });
+    }
+
+    /// **A walk over silent rungs costs about one window, not one window for each rung.**
+    ///
+    /// A walk that probes one rung after the other waits a full window for each silent rung
+    /// before it reaches a live one: 3 silent rungs cost 3 windows. The walk starts each rung a
+    /// stagger after the one below it, so it waits one window plus the staggers for the silent
+    /// rungs below the live one, and every member still picks the same rung.
+    #[test]
+    fn the_walk_of_silent_rungs_costs_about_one_window() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::net_report::reportgen",
+                "probe failed",
+            );
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Failed to connect to relay server",
+            );
+            let mut ladder = Vec::new();
+            let mut silent = Vec::new();
+            for _ in 0..3 {
+                let (rung, listener) = spawn_silent_rung().await;
+                ladder.push(rung);
+                silent.push(listener);
+            }
+            let (live, _live_server) = test_relay::spawn_plain().await.expect("a local relay");
+            ladder.push(live.clone());
+            let window = std_Duration::from_secs(2);
+
+            let probe = |rung: RelayUrl, probes_stopped| async move {
+                super::relay_rung_reachable(&rung, window, Some(probes_stopped)).await
+            };
+
+            let started = time::Instant::now();
+            let stagger = std_Duration::from_millis(200);
+            let selected = select_first_reachable(&ladder, None, stagger, probe).await;
+            let took = started.elapsed();
+
+            assert_eq!(selected, Some(live), "the walk picks the live rung");
+            assert!(
+                took < window * 2,
+                "3 silent rungs and a live one took {took:?}, more than 2 windows of {window:?}"
+            );
         });
     }
 
@@ -1339,6 +2981,33 @@ mod tests {
         );
     }
 
+    /// **A return round that finds no lower rung backs off; one that finds a rung resets.**
+    #[test]
+    fn a_return_round_that_finds_no_rung_backs_off() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let times = super::HomingTimes::live();
+        let every = times.return_every;
+        let after_a_miss = super::next_return_wait(every, false, times);
+        assert_eq!(
+            after_a_miss,
+            every * 2,
+            "a round with no answer doubles the wait"
+        );
+        let mut wait = every;
+        for _ in 0..10 {
+            wait = super::next_return_wait(wait, false, times);
+        }
+        assert_eq!(
+            wait, times.return_backoff_max,
+            "the wait saturates at the backoff cap"
+        );
+        assert_eq!(
+            super::next_return_wait(wait, true, times),
+            every,
+            "a round that finds a lower rung goes back to the return interval"
+        );
+    }
+
     #[test]
     fn backoff_doubles_then_saturates_at_max() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -1358,9 +3027,9 @@ mod tests {
 
     // --- ladder walk (`select_first_reachable`) ---------------------
     //
-    // Exhaustive, network-free coverage of "reset and start from the
-    // first rung": a fake reachability predicate marks chosen rungs
-    // down, and we assert which rung wins and how many were probed.
+    // Network-free coverage of the walk: a fake probe answers after a delay,
+    // up or down, and ends early when the walk stops it. We assert which rung
+    // wins, which rungs started, and which probes the walk stopped.
 
     fn rungs(hosts: &[&str]) -> Vec<RelayUrl> {
         hosts.iter().map(|host| rung(host)).collect()
@@ -1377,50 +3046,116 @@ mod tests {
         rung.map(short_host)
     }
 
-    /// Run the ladder walk with a set of hosts treated as unreachable;
-    /// returns `(selected, probed_in_order)`.
-    async fn walk(ladder: &[RelayUrl], down: &[&str]) -> (Option<RelayUrl>, Vec<String>) {
-        let down: HashSet<String> = down.iter().map(|host| (*host).to_string()).collect();
-        let probed = cell::RefCell::new(Vec::new());
-        let selected = select_first_reachable(ladder, |rung| {
+    /// The fake answer of one rung: after `delay`, up or down.
+    struct FakeRung {
+        host: &'static str,
+        delay: std_Duration,
+        up: bool,
+    }
+
+    /// What a walk over fake rungs did. `started` is in the order the probes started, and
+    /// `stopped` is sorted.
+    struct Walk {
+        selected: Option<String>,
+        started: Vec<String>,
+        stopped: Vec<String>,
+    }
+
+    /// The stagger of the fake walks: a rung that answers in 10 ms answers before the next starts.
+    const FAKE_STAGGER: std_Duration = std_Duration::from_millis(100);
+
+    /// Run the ladder walk over fake rungs, with `stop` as the stop of the caller. The time is
+    /// paused, so the order of the probes depends on the delays of the fakes alone: a late poll of
+    /// the walk on a loaded machine does not start a probe before a fast rung answers.
+    async fn walk_with(
+        fakes: &[FakeRung],
+        stop: Option<&watch::Receiver<()>>,
+        stagger: std_Duration,
+    ) -> Walk {
+        time::pause();
+        let hosts: Vec<&str> = fakes.iter().map(|fake| fake.host).collect();
+        let ladder = rungs(&hosts);
+        let started = cell::RefCell::new(Vec::new());
+        let stopped = cell::RefCell::new(Vec::new());
+        let selected = select_first_reachable(&ladder, stop, stagger, |rung, probes_stopped| {
             let host = short_host(&rung);
-            probed.borrow_mut().push(host.clone());
-            let up = !down.contains(&host);
-            async move { up }
+            let fake = fakes
+                .iter()
+                .find(|fake| fake.host == host)
+                .expect("each rung has a fake");
+            let (delay, up) = (fake.delay, fake.up);
+            started.borrow_mut().push(host.clone());
+            let stopped = &stopped;
+            async move {
+                let answer = tokio::select! {
+                    () = time::sleep(delay) => Some(up),
+                    () = super::stopped(Some(probes_stopped)) => None,
+                };
+                if answer.is_none() {
+                    stopped.borrow_mut().push(host);
+                }
+                answer.unwrap_or(false)
+            }
         })
         .await;
-        (selected, probed.into_inner())
+        let mut stopped = stopped.into_inner();
+        stopped.sort();
+        Walk {
+            selected: host_of(selected.as_ref()),
+            started: started.into_inner(),
+            stopped,
+        }
+    }
+
+    async fn walk(fakes: &[FakeRung]) -> Walk {
+        walk_with(fakes, None, FAKE_STAGGER).await
+    }
+
+    fn fake(host: &'static str, delay: std_Duration, up: bool) -> FakeRung {
+        FakeRung { host, delay, up }
     }
 
     #[test]
     fn ladder_picks_first_when_all_reachable() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let ladder = rungs(&["a", "b", "c"]);
-            let (selected, probed) = walk(&ladder, &[]).await;
+            let walked = walk(&[
+                fake("a", std_Duration::from_millis(400), true),
+                fake("b", std_Duration::from_millis(10), true),
+                fake("c", std_Duration::from_millis(10), true),
+            ])
+            .await;
             assert_eq!(
-                host_of(selected.as_ref()).as_deref(),
+                walked.selected.as_deref(),
                 Some("a"),
-                "the first rung is picked when all are reachable"
+                "the first rung is picked when all are reachable, though it answers last"
             );
-            assert_eq!(probed, vec!["a"], "stops at the first reachable rung");
+            assert_eq!(
+                walked.started,
+                vec!["a", "b", "c"],
+                "a slow rung 0 lets the later rungs start, one stagger after the other"
+            );
         });
     }
 
     #[test]
     fn ladder_falls_through_to_next_reachable() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let ladder = rungs(&["a", "b", "c"]);
-            // rung 0 down → rung 1 wins, having probed a then b.
-            let (selected, probed) = walk(&ladder, &["a"]).await;
+            // rung 0 down → rung 1 wins once rung 0 said no; the slow rung 2 is stopped.
+            let walked = walk(&[
+                fake("a", std_Duration::from_millis(300), false),
+                fake("b", std_Duration::from_millis(10), true),
+                fake("c", std_Duration::from_millis(5000), true),
+            ])
+            .await;
             assert_eq!(
-                host_of(selected.as_ref()).as_deref(),
+                walked.selected.as_deref(),
                 Some("b"),
                 "the ladder falls through to the next reachable rung"
             );
             assert_eq!(
-                probed,
-                vec!["a", "b"],
-                "the ladder probes the dead first rung and then the second"
+                walked.stopped,
+                vec!["c"],
+                "the walk stops the probe of a higher rung once it decides"
             );
         });
     }
@@ -1428,17 +3163,21 @@ mod tests {
     #[test]
     fn ladder_skips_multiple_dead_prefix_rungs() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let ladder = rungs(&["a", "b", "c"]);
-            let (selected, probed) = walk(&ladder, &["a", "b"]).await;
+            let walked = walk(&[
+                fake("a", std_Duration::from_millis(30), false),
+                fake("b", std_Duration::from_millis(30), false),
+                fake("c", std_Duration::from_millis(10), true),
+            ])
+            .await;
             assert_eq!(
-                host_of(selected.as_ref()).as_deref(),
+                walked.selected.as_deref(),
                 Some("c"),
                 "the ladder skips multiple dead prefix rungs"
             );
             assert_eq!(
-                probed,
+                walked.started,
                 vec!["a", "b", "c"],
-                "the ladder probes each dead rung in order"
+                "the walk starts each rung in order"
             );
         });
     }
@@ -1449,12 +3188,21 @@ mod tests {
             // "reset and start from the first": the walk always re-picks the
             // earliest reachable rung, so a recovered rung 0 wins over a
             // still-up rung 1.
-            let ladder = rungs(&["a", "b", "c"]);
-            let (selected, _) = walk(&ladder, &[]).await;
+            let walked = walk(&[
+                fake("a", std_Duration::from_millis(5), true),
+                fake("b", std_Duration::from_millis(5), true),
+                fake("c", std_Duration::from_millis(5), true),
+            ])
+            .await;
             assert_eq!(
-                host_of(selected.as_ref()).as_deref(),
+                walked.selected.as_deref(),
                 Some("a"),
                 "the first rung is preferred again once it recovers"
+            );
+            assert_eq!(
+                walked.started,
+                vec!["a"],
+                "a rung 0 that answers within the stagger starts no later rung"
             );
         });
     }
@@ -1462,19 +3210,225 @@ mod tests {
     #[test]
     fn ladder_all_down_is_none() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let ladder = rungs(&["a", "b", "c"]);
-            let (selected, probed) = walk(&ladder, &["a", "b", "c"]).await;
-            assert!(selected.is_none(), "every rung down ⇒ None (use mDNS/DHT)");
-            assert_eq!(probed, vec!["a", "b", "c"], "probes the whole ladder");
+            let walked = walk(&[
+                fake("a", std_Duration::from_millis(10), false),
+                fake("b", std_Duration::from_millis(10), false),
+                fake("c", std_Duration::from_millis(10), false),
+            ])
+            .await;
+            assert!(
+                walked.selected.is_none(),
+                "every rung down ⇒ None (use mDNS/DHT)"
+            );
+            assert_eq!(
+                walked.started,
+                vec!["a", "b", "c"],
+                "probes the whole ladder"
+            );
         });
     }
 
     #[test]
     fn ladder_empty_is_none_without_probing() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let (selected, probed) = walk(&[], &[]).await;
-            assert!(selected.is_none(), "an empty ladder selects nothing");
-            assert!(probed.is_empty(), "an empty ladder probes nothing");
+            let walked = walk(&[]).await;
+            assert!(walked.selected.is_none(), "an empty ladder selects nothing");
+            assert!(walked.started.is_empty(), "an empty ladder probes nothing");
+        });
+    }
+
+    /// **A rung that says no starts the next rung at once, not after the stagger.**
+    #[test]
+    fn a_rung_that_says_no_starts_the_next_at_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let started = time::Instant::now();
+            let fakes = [
+                fake("a", std_Duration::from_millis(10), false),
+                fake("b", std_Duration::from_millis(10), true),
+            ];
+            let walked = walk_with(&fakes, None, std_Duration::from_secs(10)).await;
+            let took = started.elapsed();
+            assert_eq!(walked.selected.as_deref(), Some("b"), "rung 1 answers");
+            assert!(
+                took < std_Duration::from_secs(1),
+                "the walk waited {took:?} for a stagger of 10 s after rung 0 said no"
+            );
+        });
+    }
+
+    /// **A walk that its caller stops ends every probe before it returns.**
+    #[test]
+    fn the_walk_stops_every_probe_when_its_caller_stops() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (stop, stopped) = watch::channel(());
+            let stopping = async {
+                time::sleep(std_Duration::from_millis(300)).await;
+                drop(stop);
+            };
+            let fakes = [
+                fake("a", std_Duration::from_millis(5000), true),
+                fake("b", std_Duration::from_millis(5000), true),
+            ];
+            let (walked, ()) =
+                tokio::join!(walk_with(&fakes, Some(&stopped), FAKE_STAGGER), stopping);
+            assert!(walked.selected.is_none(), "a stopped walk selects nothing");
+            assert_eq!(
+                walked.stopped,
+                vec!["a", "b"],
+                "the walk stops every probe in flight"
+            );
+        });
+    }
+
+    /// **A walk whose caller stopped it before it began starts no probe.**
+    ///
+    /// The first pass of the loop queued rung 0 before it looked at the stop of the caller, and the
+    /// probe, which checks only the stop of the walk, could start to bind an endpoint during a
+    /// shutdown.
+    #[test]
+    fn a_walk_that_its_caller_stopped_before_it_began_starts_no_probe() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (stop, stopped) = watch::channel(());
+            drop(stop);
+            let fakes = [
+                fake("a", std_Duration::from_millis(5), true),
+                fake("b", std_Duration::from_millis(5), true),
+            ];
+
+            let walked = walk_with(&fakes, Some(&stopped), FAKE_STAGGER).await;
+
+            assert!(walked.selected.is_none(), "a stopped walk selects nothing");
+            assert!(
+                walked.started.is_empty(),
+                "the walk started the probes {:?} after its caller stopped it",
+                walked.started
+            );
+        });
+    }
+
+    /// The script of one fake rung: what each probe of it answers, after how many milliseconds.
+    /// The probe that is the n-th of the rung takes the n-th answer, or the last one when the
+    /// script is shorter.
+    type Script = (&'static str, &'static [(u64, bool)]);
+
+    /// Run the ladder walk over scripted rungs on paused time. Returns the selected rung and the
+    /// rungs of the probes, in the order that they started.
+    async fn walk_scripted(
+        script: &[Script],
+        stagger: std_Duration,
+    ) -> (Option<String>, Vec<String>) {
+        time::pause();
+        let hosts: Vec<&str> = script.iter().map(|(host, _)| *host).collect();
+        let ladder = rungs(&hosts);
+        let started = cell::RefCell::new(Vec::new());
+        let selected = select_first_reachable(&ladder, None, stagger, |rung, probes_stopped| {
+            let host = short_host(&rung);
+            let (_, answers) = script
+                .iter()
+                .find(|(scripted, _)| *scripted == host)
+                .expect("each rung has a script");
+            let nth: usize = started
+                .borrow()
+                .iter()
+                .filter(|seen| **seen == host)
+                .count();
+            let scripted = answers.get(nth).or_else(|| answers.last());
+            let (delay, up) = scripted
+                .copied()
+                .expect("each rung scripts one answer at least");
+            let delay = std_Duration::from_millis(delay);
+            started.borrow_mut().push(host);
+            async move {
+                tokio::select! {
+                    () = time::sleep(delay) => up,
+                    () = super::stopped(Some(probes_stopped)) => false,
+                }
+            }
+        })
+        .await;
+        (host_of(selected.as_ref()), started.into_inner())
+    }
+
+    /// **A rung that answered while a lower rung was still silent is asked again before the walk
+    /// takes it.**
+    ///
+    /// Rung 0 is silent for 3 s. Rung 1 answers at 1.5 s, and is offline again when rung 0 says
+    /// no. Rung 2 stays up. The old sequential walk first probed rung 1 after rung 0 timed out,
+    /// found it dead, and fell through to rung 2.
+    #[test]
+    fn a_rung_that_answered_behind_a_silent_one_is_asked_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (selected, started) = walk_scripted(
+                &[
+                    ("a", &[(3000, false)]),
+                    ("b", &[(1500, true), (10, false)]),
+                    ("c", &[(2000, true)]),
+                ],
+                std_Duration::from_secs(1),
+            )
+            .await;
+            assert_eq!(
+                selected.as_deref(),
+                Some("c"),
+                "rung 1 went offline while rung 0 was silent: the walk falls through to rung 2"
+            );
+            assert_eq!(
+                started,
+                vec!["a", "b", "c", "b"],
+                "rung 1 is asked again when rung 0 says no"
+            );
+        });
+    }
+
+    /// **A rung that still answers when it is asked again is the pick.**
+    #[test]
+    fn a_rung_that_answers_again_behind_a_silent_one_is_picked() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (selected, started) = walk_scripted(
+                &[
+                    ("a", &[(3000, false)]),
+                    ("b", &[(1500, true), (10, true)]),
+                    ("c", &[(2000, true)]),
+                ],
+                std_Duration::from_secs(1),
+            )
+            .await;
+            assert_eq!(selected.as_deref(), Some("b"), "rung 1 is still up");
+            assert_eq!(
+                started,
+                vec!["a", "b", "c", "b"],
+                "rung 1 is asked once more, after rung 0 says no"
+            );
+        });
+    }
+
+    /// **A rung 0 that answers at once is picked on its first answer.**
+    ///
+    /// The fast path stays: no later rung is probed, and nothing is asked twice.
+    #[test]
+    fn a_rung_that_answers_first_with_nothing_below_it_is_not_asked_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (selected, started) = walk_scripted(
+                &[("a", &[(10, true)]), ("b", &[(10, true)])],
+                std_Duration::from_secs(1),
+            )
+            .await;
+            assert_eq!(selected.as_deref(), Some("a"), "rung 0 answers");
+            assert_eq!(started, vec!["a"], "one probe, and no later rung");
+        });
+    }
+
+    /// **A rung that answers after every lower rung said no is picked on its first answer.**
+    #[test]
+    fn a_rung_that_answers_after_the_lower_ones_said_no_is_not_asked_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (selected, started) = walk_scripted(
+                &[("a", &[(10, false)]), ("b", &[(10, true)])],
+                std_Duration::from_secs(1),
+            )
+            .await;
+            assert_eq!(selected.as_deref(), Some("b"), "rung 1 answers");
+            assert_eq!(started, vec!["a", "b"], "each rung is probed once");
         });
     }
 
@@ -1505,23 +3459,25 @@ mod tests {
     /// the 3 s probe timeout of iroh before its first net report, and has no home relay until
     /// then: a peer that dials it through the relay in that time meets a relay that drops the
     /// packet.
-    #[tokio::test]
-    async fn an_endpoint_on_a_plain_http_rung_is_online_without_the_probe_timeout() {
-        let (url, _server) = test_relay::spawn_plain()
-            .await
-            .expect("a plain local relay");
-        let endpoint = iroh::Endpoint::builder(presets::Minimal)
-            .relay_mode(super::relay_mode(&RelayChoice::Custom(vec![url])))
-            .bind()
-            .await
-            .expect("bind an endpoint on the rung");
+    #[test]
+    fn an_endpoint_on_a_plain_http_rung_is_online_without_the_probe_timeout() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (url, _server) = test_relay::spawn_plain()
+                .await
+                .expect("a plain local relay");
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(super::one_rung_mode(Some(&url)))
+                .bind()
+                .await
+                .expect("bind an endpoint on the rung");
 
-        let online = time::timeout(std_Duration::from_secs(2), endpoint.online())
-            .await
-            .is_ok();
-        endpoint.close().await;
+            let online = time::timeout(std_Duration::from_secs(2), endpoint.online())
+                .await
+                .is_ok();
+            endpoint.close().await;
 
-        assert!(online, "no home relay after 2 s");
+            assert!(online, "no home relay after 2 s");
+        });
     }
 
     #[test]

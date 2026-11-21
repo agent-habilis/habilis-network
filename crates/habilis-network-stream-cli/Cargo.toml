@@ -22,6 +22,10 @@ workspace = true
 [[bin]]
 name = "habilis-network-stream"
 path = "src/main.rs"
+# The binary shares its name with the lib of `habilis-network-stream`, so both documented to
+# `habilis_network_stream/index.html` and cargo warned of an output filename collision. The lib has
+# the API docs; the binary has none to publish.
+doc = false
 
 [dependencies]
 habilis-network = { path = "../habilis-network", default-features = false }

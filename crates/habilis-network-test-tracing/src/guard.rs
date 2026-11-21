@@ -461,10 +461,30 @@ impl Drop for Guard {
         let problems = self.slot.problems();
         assert!(
             problems.is_empty(),
-            "the test logged:\n{}",
-            problems.join("\n")
+            "the test logged:\n{}{}",
+            problems.join("\n"),
+            captured_context()
         );
     }
+}
+
+/// The number of captured lines that a failure prints.
+const CONTEXT_LINES: usize = 200;
+
+/// The last lines of the capture buffer, for a failure of a test that [`init_capturing`] set up.
+/// That buffer reaches no output, so without this text a failure shows only the offending line.
+fn captured_context() -> String {
+    if INSTALLED.get() != Some(&Mode::Capture) {
+        return String::new();
+    }
+    let captured = CAPTURED.lock();
+    let lines: Vec<&str> = captured.lines().collect();
+    let tail = &lines[lines.len().saturating_sub(CONTEXT_LINES)..];
+    format!(
+        "\nthe last {} captured lines:\n{}",
+        tail.len(),
+        tail.join("\n")
+    )
 }
 
 #[derive(Debug)]

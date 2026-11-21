@@ -1,10 +1,10 @@
 use iroh::{EndpointId, RelayUrl, SecretKey};
 use iroh_gossip::proto::TopicId;
-use tokio::sync::watch;
+use tokio::sync::mpsc;
 
 use crate::protocol::meshes::LookupOpts;
 
-use crate::transport;
+use crate::{lookup, transport};
 /// Everything `ensure` needs to (re)build the rendezvous endpoint.
 /// Cheap to clone-hold for the event loop's lifetime.
 #[derive(Debug, Clone)]
@@ -43,11 +43,14 @@ pub(crate) struct RendezvousParams {
     pub(crate) bootstrap_relay: Option<RelayUrl>,
     /// How the off-loop rung selectors (the backgrounded startup probe
     /// and the beacon co-host's liveness self-monitor) publish a freshly
-    /// chosen rung. The event loop holds the matching receiver and, on a
-    /// change, updates [`Self::bootstrap_relay`], re-registers the
+    /// chosen rung. Each decision is an event, and the loop reads them in the order that they were
+    /// sent: a channel that kept the last value only would lose a move in place that a failover
+    /// followed before the loop read it. The event loop holds the matching receiver and, on a
+    /// decision, updates [`Self::bootstrap_relay`], re-registers the
     /// rendezvous, and re-homes the beacon — so the heavy ladder walk
-    /// never runs on the sole event loop.
-    pub(crate) rung_tx: watch::Sender<Option<RelayUrl>>,
+    /// never runs on the sole event loop. A beacon that moved its own relay in place to a lower rung
+    /// is not re-homed: the loop updates the rung and the registration only.
+    pub(crate) rung_tx: mpsc::UnboundedSender<lookup::RungDecision>,
 }
 
 impl RendezvousParams {

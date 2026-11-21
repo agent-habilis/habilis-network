@@ -60,15 +60,16 @@ const MAX_WRITERS: usize = 64;
 /// the only bound, and it multiplies by the writer count instead of capping it.
 const FORWARD_QUEUE_BYTES: usize = 32 * 1024 * 1024;
 
-/// Hops of delivered cells that the forwarder remembers, so that a reply along a reversed route
-/// can tell its first hop. The ids come off the wire, so the set has a ceiling.
+/// Hops that cells arrived from that the forwarder remembers, so that a reply along a reversed
+/// route can tell its first hop. The ids are those of connections that anyone can open, so the set
+/// has a ceiling.
 const HEARD_HOPS_CAP: usize = 1024;
 
 /// Hops without a vector that get a log line of their own. The ids come off the wire, so the map
 /// that remembers them has a ceiling.
 const UNRESOLVED_SEEN_CAP: usize = 128;
 
-/// The hops that named a cell this node delivered, newest last. Past [`HEARD_HOPS_CAP`] hops
+/// The hops that a cell arrived from, newest last. Past [`HEARD_HOPS_CAP`] hops
 /// the oldest is forgotten.
 #[derive(Debug, Default)]
 struct HeardHops {
@@ -1141,6 +1142,76 @@ mod tests {
         });
     }
 
+    /// The own vector of a forwarder that links to `neighbor` only.
+    fn link_only_to(forwarder: &Forwarder, neighbor: AppId) {
+        let own_key = SecretKey::from_bytes(&[99; 32]);
+        let own_vector = LinkVector::signed(
+            &own_key,
+            topology::wall_clock_ms(),
+            EndpointAddr::new(forwarder.underlay.id()),
+            vec![(neighbor, 1)],
+        );
+        assert!(
+            forwarder
+                .topology
+                .write()
+                .expect("topology lock poisoned")
+                .ingest(own_vector),
+            "the vector of this node is accepted"
+        );
+    }
+
+    /// The number of warnings that `body` logs on this thread.
+    fn warnings_in(body: impl FnOnce()) -> usize {
+        // the test counts warnings from the code under test and reads the count after
+        let warnings = Arc::new(AtomicUsize::new(0));
+        subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), body);
+        warnings.load(Ordering::Relaxed)
+    }
+
+    /// This node is in the middle of a route `A -> this -> B`. A cell of `A` passes, and its
+    /// connection proves that it arrived from `A`. The reply of `B` goes back to `A`, whose first
+    /// link-vector has not arrived, and this node links to `B` only. The reply is not a warning.
+    #[test]
+    fn a_middle_hop_of_a_reply_route_whose_origin_has_no_vector_is_not_a_warning() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            let (origin, destination) = (stranger(160), stranger(161));
+            link_only_to(&forwarder, destination.app_id);
+            let forward = cell(vec![self_hop(&forwarder), destination], 0, origin);
+            forwarder.handle_cell(forward, origin.underlay_id);
+            let reply = cell(vec![self_hop(&forwarder), origin], 0, destination);
+            let warnings = warnings_in(|| forwarder.handle_cell(reply, destination.underlay_id));
+            assert_eq!(
+                forwarder.counters().forwarded,
+                2,
+                "both cells were forwarded"
+            );
+            assert_eq!(
+                warnings, 0,
+                "the middle hop of a reply route is not a warning"
+            );
+            forwarder.underlay.close().await;
+        });
+    }
+
+    /// The hop that a forwarded cell arrived from is the only hop that this node hears. A hop that
+    /// the cell only names, such as the next hop of a reply, stays a warning.
+    #[test]
+    fn a_middle_hop_still_warns_for_a_hop_that_no_cell_arrived_from() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            let (origin, destination, other) = (stranger(160), stranger(161), stranger(162));
+            link_only_to(&forwarder, destination.app_id);
+            let forward = cell(vec![self_hop(&forwarder), destination], 0, origin);
+            forwarder.handle_cell(forward, origin.underlay_id);
+            let reply = cell(vec![self_hop(&forwarder), other], 0, destination);
+            let warnings = warnings_in(|| forwarder.handle_cell(reply, destination.underlay_id));
+            assert_eq!(warnings, 1, "a hop that no cell arrived from is a warning");
+            forwarder.underlay.close().await;
+        });
+    }
+
     #[test]
     fn a_hop_without_a_vector_is_logged_once_each() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -1249,7 +1320,37 @@ mod tests {
         });
     }
 
-    /// The hops that delivered cells named are remembered past [`HEARD_HOPS_CAP`]: the oldest
+    /// A delivered cell names its source and the hops of its route, but only the hop that it
+    /// arrived from is proven by the connection. The hop that the cell arrived from is heard. A
+    /// hop that the cell only names, such as a source that no cell of its own reached this node
+    /// from, stays a warning when this node dials it.
+    #[test]
+    fn a_hop_that_a_delivered_cell_only_names_is_a_warning() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (forwarder, _app, _received) = forwarder().await;
+            let (previous, named_source) = (stranger(170), stranger(171));
+            let delivered = cell(vec![previous, self_hop(&forwarder)], 1, named_source);
+            forwarder.handle_cell(delivered, previous.underlay_id);
+            assert_eq!(forwarder.counters().delivered, 1, "the cell was delivered");
+            assert_eq!(
+                warnings_in(|| {
+                    forwarder.dial_addr(&previous);
+                }),
+                0,
+                "the hop that the cell arrived from is explained"
+            );
+            assert_eq!(
+                warnings_in(|| {
+                    forwarder.dial_addr(&named_source);
+                }),
+                1,
+                "a source that the connection does not prove is not explained"
+            );
+            forwarder.underlay.close().await;
+        });
+    }
+
+    /// The hops that delivered cells arrived from are remembered past [`HEARD_HOPS_CAP`]: the oldest
     /// hop is forgotten, and a reply to the newest cell is explained.
     #[test]
     fn a_hop_named_by_a_cell_past_the_heard_cap_is_not_a_warning() {

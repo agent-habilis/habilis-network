@@ -10,6 +10,7 @@
 use crate::daemon::state::TestHold;
 use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
 use std::time::Duration;
+use tokio::sync::oneshot;
 
 use iroh::{Endpoint, EndpointId};
 
@@ -114,6 +115,22 @@ pub(super) fn may_cohost(cohost: CoHostPolicy, meshed: bool, started: Instant) -
         CoHostPolicy::Eager | CoHostPolicy::EagerProbed => true,
         CoHostPolicy::Deferred => meshed || started.elapsed() >= tuning::cohost_grace(),
     }
+}
+/// Does this member read the busy rungs of a private ladder by itself? A member that is not meshed
+/// and may not co-host yet has no walk that acts on a probe report, and its book offers only the
+/// rungs that were read as ours: the read finds the rung of the beacon. It holds for every policy
+/// that may not co-host, a `discover` session (`Never`) included: the session dials the beacon and
+/// has no other way to learn its rung.
+pub(super) fn reads_ladder_while_unmeshed(
+    cohost: CoHostPolicy,
+    meshed: bool,
+    started: Instant,
+    ladder_len: usize,
+    holds_beacon: bool,
+    reclaim_open: bool,
+) -> bool {
+    let walk_acts = may_cohost(cohost, meshed, started) && reclaim_open;
+    !meshed && !holds_beacon && !walk_acts && ladder_len > 0
 }
 /// The co-host decision inputs a heal/reclaim tick needs: which policy
 /// governs this session, the rendezvous params to (re)claim under, and
@@ -335,6 +352,15 @@ pub(super) async fn wait_for_shed_close(state: &mut EventLoopState) {
     }
 }
 
+/// Waits for the closes of the endpoints that read the busy rungs at setup, so that the run does
+/// not end with one of them in flight. Each is bounded where it was spawned, and a receiver whose
+/// task was cancelled ends its wait too.
+pub(super) async fn wait_for_prober_closes(closes: Vec<oneshot::Receiver<()>>) {
+    for closed in closes {
+        let _ = closed.await;
+    }
+}
+
 /// Let go of the beacon at once and read the ladder again: the endpoint is closed, the address of
 /// the shed beacon leaves the book, and the reclaim window opens, so that the next walk reads
 /// whoever holds a rung (and claims the lowest free one when nobody does).
@@ -350,14 +376,42 @@ fn shed_beacon(
         target: "habilis_network::gossip",
         "beacon shed: a lower rung of the ladder answers as our mesh"
     );
+    let released = held
+        .rung_in(&params.bind_ports)
+        .map(|index| params.bind_ports[index]);
     state.beacon_closing = Some(held.shed_then());
     state.next_rival_recheck = None;
     state.cancel_rendezvous_round();
-    state.address_book.remove_endpoint_info(params.id);
-    super::setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
+    forget_the_shed_rung(state, params, released);
     state.rendezvous_flags.remove(&RendezvousFlag::Linked);
     state.forget_rendezvous_verdict();
     state.arm_reclaim(Instant::now());
+}
+
+/// The book after the beacon was shed on the rung `released`. A shed is evidence about one rung:
+/// the rung that the beacon was on is not ours any more, and so is a rung that a reading took back
+/// (`RungWatch::not_ours_rungs`). Every other rung of the ladder stays, as at the heal registration:
+/// a rung that was read as ours and that nobody read since is no evidence against it. The endpoint
+/// forgets the released rung at the next heal tick (`RungWatch::take_retired`). A public mesh has
+/// no ladder: the entry holds the addresses of the beacon that was shed and what the mesh
+/// registered by itself (a relay rung), which is written back.
+fn forget_the_shed_rung(
+    state: &mut EventLoopState,
+    params: &beacon::RendezvousParams,
+    released: Option<u16>,
+) {
+    if let Some(port) = released {
+        state.rungs.release_rung(port);
+    }
+    if params.bind_ports.is_empty() {
+        state.address_book.remove_endpoint_info(params.id);
+    } else {
+        let not_ours = state.rungs.not_ours_rungs();
+        beacon::forget_rungs_in_book(params, &state.address_book, |port| {
+            released == Some(port) || not_ours.contains(&port)
+        });
+    }
+    super::setup::register_rendezvous(&state.address_book, params, &state.rungs.offered_rungs());
 }
 
 /// Tests only: make the beacon stop answering, if a test asked for it (`Beacons::StallBeacon`).
@@ -615,21 +669,19 @@ pub(super) fn shed_rival_beacon_if_due(
     // `NeighborDown` instead of a zombie that only dies at the QUIC idle
     // timeout — the zombie both stalls the post-shed re-graft and leaves
     // a poisoned pool entry under the shared id.
+    let mut released: Option<u16> = None;
     if let Some(held) = rendezvous.take() {
+        released = held
+            .rung_in(&arm.params.bind_ports)
+            .map(|index| arm.params.bind_ports[index]);
         state.beacon_closing = Some(held.shed_then());
     }
     state.next_rival_recheck = None;
     state.rival_recheck_rounds = state.rival_recheck_rounds.saturating_add(1);
     // A round that was running against our own beacon now has nothing to find.
     state.cancel_rendezvous_round();
-    // The book still names the beacon just shed; the next holder writes its own address. What the
-    // mesh registered for the id by itself (a relay rung) is written back.
-    state.address_book.remove_endpoint_info(arm.params.id);
-    super::setup::register_rendezvous(
-        &state.address_book,
-        arm.params,
-        &state.rungs.withheld_rungs(),
-    );
+    // The book still names the beacon just shed; the next holder writes its own address.
+    forget_the_shed_rung(state, arm.params, released);
     // Don't wait for that `NeighborDown` either — clear the link flag now
     // (mirroring the hard resume edge), or a yielding node's heal ticks
     // idle on "rendezvous linked" instead of grafting the rival's beacon.
@@ -656,7 +708,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::beacon::claim;
-    use crate::daemon::{config, state};
+    use crate::daemon::{cohost_arm, config, state};
     use crate::protocol::meshes;
     use crate::transport::PayloadPath;
     use crate::util::{clock, tuning};
@@ -664,8 +716,153 @@ mod tests {
     use iroh_gossip::proto;
     use n0_future::task;
     use std::{future, net};
-    use tokio::sync::{mpsc, oneshot, watch};
+    use tokio::sync::{mpsc, oneshot};
     use tokio::time;
+
+    /// A shed takes out of the book the rung that the beacon was on, and nothing else on evidence
+    /// that it is not ours: a rung that was read as ours before, and that nobody read since, stays,
+    /// as the heal registration keeps it. The rung that was released is queued for the endpoint.
+    #[test]
+    fn a_shed_forgets_the_rung_it_released_and_keeps_the_rung_that_was_read_as_ours() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut params = public_params();
+        params.bind_ports = vec![41_001, 41_002];
+        let at = |port: u16| {
+            iroh::EndpointAddr::new(params.id)
+                .with_ip_addr(net::SocketAddr::from((net::Ipv4Addr::LOCALHOST, port)))
+        };
+        let mut state = testing::fresh_state();
+        state.rungs.clear_foreign(41_001);
+        state.rungs.clear_foreign(41_002);
+        lookup::add_peer_addr(&state.address_book, at(41_001));
+        lookup::add_peer_addr(&state.address_book, at(41_002));
+        state.rungs.expire_ours();
+
+        cohost_arm::forget_the_shed_rung(&mut state, &params, Some(41_001));
+
+        let info = state.address_book.get_endpoint_info(params.id);
+        let mut booked: Vec<u16> = Vec::new();
+        if let Some(info) = info {
+            booked = info.ip_addrs().map(net::SocketAddr::port).collect();
+        }
+        assert_eq!(
+            booked,
+            vec![41_002],
+            "the book keeps the rung that was read as ours, and only that one"
+        );
+        assert_eq!(
+            state.rungs.take_retired(),
+            vec![41_001],
+            "the endpoint is told to forget the rung that was released"
+        );
+    }
+
+    /// A `discover` session never co-hosts and dials the beacon, and its book offers only the
+    /// rungs that were read as ours, so it reads the ladder while it is not meshed, as a joiner.
+    #[test]
+    fn a_discover_session_reads_the_ladder_while_it_is_not_meshed() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let started = clock::Instant::now();
+        assert!(
+            cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Never,
+                false,
+                started,
+                8,
+                false,
+                false
+            ),
+            "a discover session that is not meshed reads the ladder"
+        );
+        assert!(
+            !cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Never,
+                true,
+                started,
+                8,
+                false,
+                false
+            ),
+            "a meshed session reads no ladder"
+        );
+        assert!(
+            !cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Never,
+                false,
+                started,
+                0,
+                false,
+                false
+            ),
+            "a public mesh has no ladder"
+        );
+        assert!(
+            cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Deferred,
+                false,
+                started,
+                8,
+                false,
+                false
+            ),
+            "a deferred joiner that is not meshed reads the ladder"
+        );
+        assert!(
+            !cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Eager,
+                false,
+                started,
+                8,
+                false,
+                true
+            ),
+            "an eager member walks the ladder while the reclaim window is open"
+        );
+    }
+
+    /// An eager joiner walks the ladder only while the reclaim window is open (6 s). After that
+    /// no walk acts on a probe report until the heal tick, 15 s later, and the book offers only the
+    /// rungs read as ours: a probe that timed out on a loaded host left the joiner with no address
+    /// for the 30 s that iroh-gossip waits before it warns. It reads the ladder by itself then.
+    #[test]
+    fn an_eager_joiner_without_a_proven_rung_reads_the_ladder_when_the_walk_is_over() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let started = clock::Instant::now();
+        assert!(
+            cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Eager,
+                false,
+                started,
+                8,
+                false,
+                false
+            ),
+            "the walk is over: the joiner reads the ladder"
+        );
+        assert!(
+            !cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Eager,
+                false,
+                started,
+                8,
+                false,
+                true
+            ),
+            "the walk acts while the reclaim window is open"
+        );
+        assert!(
+            !cohost_arm::reads_ladder_while_unmeshed(
+                CoHostPolicy::Eager,
+                false,
+                started,
+                8,
+                true,
+                false
+            ),
+            "a member that holds the beacon does not read its own rung"
+        );
+    }
+
     /// A shed cuts the rendezvous a browser reached us through, and the tab
     /// has nothing else: its roster empties mid-transfer. Observed as a
     /// terminal cycling claim and release while a tab saw no peers at all.
@@ -687,7 +884,7 @@ mod tests {
             lookups: meshes::LookupOpts::loopback(),
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
-            rung_tx: watch::channel(None).0,
+            rung_tx: mpsc::unbounded_channel().0,
         }
     }
 
@@ -988,7 +1185,7 @@ mod tests {
                 lookups: LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(None).0,
+                rung_tx: mpsc::unbounded_channel().0,
             };
 
             let endpoint = lookup::build_endpoint(
@@ -1085,7 +1282,7 @@ mod tests {
             lookups: LookupOpts::loopback(),
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
-            rung_tx: watch::channel(None).0,
+            rung_tx: mpsc::unbounded_channel().0,
         };
 
         // The holder: another member of the same room, on the only rung.
@@ -1274,7 +1471,7 @@ mod tests {
                     lookups: LookupOpts::loopback(),
                     relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
-                    rung_tx: watch::channel(None).0,
+                    rung_tx: mpsc::unbounded_channel().0,
                 }
             };
             let params = params_of(6);
@@ -1399,7 +1596,7 @@ mod tests {
                 lookups: meshes::LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(None).0,
+                rung_tx: mpsc::unbounded_channel().0,
             };
             // A beacon of another mesh holds the first rung: this member reads it as foreign and
             // binds the second.
@@ -1412,7 +1609,7 @@ mod tests {
                 lookups: meshes::LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(None).0,
+                rung_tx: mpsc::unbounded_channel().0,
             };
             let other_endpoint = loopback_endpoint().await;
             let other_book = lookup::address_book(&other_endpoint);
@@ -1558,6 +1755,33 @@ mod tests {
         }
     }
 
+    /// The rung of a beacon that was shed is not ours any more: another mesh whose ladder shares the
+    /// port can bind it, and each heal tick registers what the watch offers. A rung that stays in
+    /// `ours` after the shed goes back into the book with the next registration.
+    #[test]
+    fn a_shed_beacon_leaves_its_rung_out_of_what_the_book_offers() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut holder = HolderOnTheSecondRung::new().await;
+            let shed_rung = holder.params.bind_ports[1];
+            // The loop binds through its own watch, which then reads the rung of its beacon as ours.
+            holder.state.rungs.clear_foreign(shed_rung);
+            let (lower_endpoint, lower_beacon) = holder.another_member_takes_the_first_rung().await;
+
+            holder.heal_tick().await;
+
+            let shed = holder.rendezvous.is_none();
+            let offered = holder.state.rungs.offered_rungs();
+            Box::pin(holder.close()).await;
+            lower_beacon.shed_and_wait().await;
+            lower_endpoint.close().await;
+            assert!(shed, "the holder on the second rung did not shed");
+            assert!(
+                !offered.contains(&shed_rung),
+                "the rung {shed_rung} of the shed beacon is still offered: {offered:?}"
+            );
+        });
+    }
+
     /// A holder on a rung above a live one yields it. A split of two beacons on one ladder came
     /// from a rung probe that timed out, and nothing on a loopback ladder ever repaired it: the
     /// holder on the higher rung stayed for ever.
@@ -1681,6 +1905,45 @@ mod tests {
                 state.beacon_closing.is_none(),
                 "the wait leaves the close of the beacon in the state"
             );
+        });
+    }
+
+    /// The run ends after the closes of the endpoints that read the busy rungs at setup. Closing
+    /// one that dialed a silent rung takes seconds, and a host that ends the loop and drops its
+    /// runtime cuts a close that nothing waits for short: iroh logs an ERROR for the endpoint.
+    #[test]
+    fn the_end_of_the_run_waits_for_the_closes_of_the_rung_probers() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            const CLOSE_TAKES: Duration = Duration::from_millis(200);
+            let (done, closed) = oneshot::channel();
+            task::spawn(async move {
+                time::sleep(CLOSE_TAKES).await;
+                let _ = done.send(());
+            });
+            let started = time::Instant::now();
+
+            super::wait_for_prober_closes(vec![closed]).await;
+
+            assert!(
+                started.elapsed() >= CLOSE_TAKES,
+                "the end of the run returned before the close of a rung prober was done"
+            );
+        });
+    }
+
+    /// A prober close that was cancelled never answers, and the end of the run must not wait for it.
+    #[test]
+    fn the_end_of_the_run_does_not_wait_for_a_prober_close_that_was_cancelled() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (done, closed): (oneshot::Sender<()>, _) = oneshot::channel();
+            drop(done);
+
+            time::timeout(
+                Duration::from_secs(5),
+                super::wait_for_prober_closes(vec![closed]),
+            )
+            .await
+            .expect("the wait ends when the close task is gone");
         });
     }
 
@@ -1869,7 +2132,7 @@ mod tests {
                 lookups: LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(None).0,
+                rung_tx: mpsc::unbounded_channel().0,
             };
 
             let endpoint = lookup::build_endpoint(
@@ -1975,7 +2238,7 @@ mod tests {
                 lookups: LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(None).0,
+                rung_tx: mpsc::unbounded_channel().0,
             };
 
             let endpoint = lookup::build_endpoint(
@@ -2289,6 +2552,284 @@ mod tests {
             settled >= RIVAL_RECHECK_ALONE,
             "the settled delay reaches the alone ceiling"
         );
+    }
+
+    /// **A rung that the monitor of a retired beacon decided is not applied.**
+    ///
+    /// A beacon that was shed ends its monitor, and a decision that the monitor published at the
+    /// same time can still reach the loop. The loop must not re-home the beacon that it holds now
+    /// on it: that beacon has a monitor of its own.
+    #[test]
+    fn a_rung_decision_of_a_retired_monitor_is_ignored() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rung_of = |host: &str| -> iroh::RelayUrl {
+                format!("https://{host}.example/")
+                    .parse()
+                    .expect("a test host forms a valid https URL")
+            };
+            let mut params = public_params();
+            params.bootstrap_relay = Some(rung_of("second"));
+            let mut state = testing::fresh_state();
+            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
+            let retired = lookup::Generation::next();
+            let decision = lookup::RungDecision {
+                from: Some(retired),
+                rung: Some(rung_of("first")),
+                change: lookup::RungChange::Rehome,
+            };
+            let mut rendezvous = Some(beacon);
+
+            super::super::heal::apply_rung_change(
+                &mut state,
+                &mut params,
+                &mut rendezvous,
+                decision,
+            );
+
+            assert_eq!(
+                params.bootstrap_relay,
+                Some(rung_of("second")),
+                "a retired monitor moved the rung of the beacon that it did not watch"
+            );
+            let held = rendezvous
+                .take()
+                .expect("a retired monitor shed the beacon that it did not watch");
+            held.shed_and_wait().await;
+        });
+    }
+
+    /// **The rung that the monitor of the held beacon decided, or the startup probe, is applied.**
+    #[test]
+    fn a_rung_decision_of_the_held_beacon_or_of_the_startup_probe_is_applied() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rung_of = |host: &str| -> iroh::RelayUrl {
+                format!("https://{host}.example/")
+                    .parse()
+                    .expect("a test host forms a valid https URL")
+            };
+            for from_monitor in [true, false] {
+                let mut params = public_params();
+                params.bootstrap_relay = Some(rung_of("second"));
+                let mut state = testing::fresh_state();
+                let endpoint = loopback_endpoint().await;
+                let beacon = beacon::Rendezvous::for_test(endpoint.clone(), None);
+                let from = from_monitor.then_some(beacon.generation);
+                let decision = lookup::RungDecision {
+                    from,
+                    rung: Some(rung_of("first")),
+                    change: lookup::RungChange::Rehome,
+                };
+                let mut rendezvous = Some(beacon);
+
+                super::super::heal::apply_rung_change(
+                    &mut state,
+                    &mut params,
+                    &mut rendezvous,
+                    decision,
+                );
+                endpoint.close().await;
+
+                assert_eq!(
+                    params.bootstrap_relay,
+                    Some(rung_of("first")),
+                    "the rung is applied (from the monitor: {from_monitor})"
+                );
+                assert!(
+                    rendezvous.is_none(),
+                    "the beacon is shed for a re-home (from the monitor: {from_monitor})"
+                );
+            }
+        });
+    }
+
+    /// **A failover that follows a move in place is applied, whatever the loop read in between.**
+    ///
+    /// The beacon on rung 1 returns to rung 0 and connects, and its monitor publishes `Moved(0)`.
+    /// Rung 0 fails before the loop reads that, and the monitor publishes `Rehome(1)`. The loop
+    /// must see both, in order: the move sets the rung of the beacon to 0, and the failover to 1
+    /// then differs from it and sheds the beacon. A channel that keeps the last value only lost the
+    /// move, compared `Rehome(1)` with the rung 1 that was registered before, found no change, and
+    /// left the beacon on the failed rung 0 with no monitor to publish again.
+    #[test]
+    fn a_move_in_place_and_a_failover_that_the_loop_reads_together_shed_the_beacon() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rung_of = |host: &str| -> iroh::RelayUrl {
+                format!("https://{host}.example/")
+                    .parse()
+                    .expect("a test host forms a valid https URL")
+            };
+            let mut params = public_params();
+            params.bootstrap_relay = Some(rung_of("second"));
+            let mut state = testing::fresh_state();
+            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
+            let generation = beacon.generation;
+            let (tx, mut rx): (
+                mpsc::UnboundedSender<lookup::RungDecision>,
+                mpsc::UnboundedReceiver<lookup::RungDecision>,
+            ) = mpsc::unbounded_channel();
+            tx.send(lookup::RungDecision {
+                from: Some(generation),
+                rung: Some(rung_of("first")),
+                change: lookup::RungChange::Moved,
+            })
+            .expect("the receiver is alive");
+            tx.send(lookup::RungDecision {
+                from: Some(generation),
+                rung: Some(rung_of("second")),
+                change: lookup::RungChange::Rehome,
+            })
+            .expect("the receiver is alive");
+            let mut rendezvous = Some(beacon);
+
+            while let Ok(decision) = rx.try_recv() {
+                super::super::heal::apply_rung_change(
+                    &mut state,
+                    &mut params,
+                    &mut rendezvous,
+                    decision,
+                );
+            }
+
+            assert_eq!(
+                params.bootstrap_relay,
+                Some(rung_of("second")),
+                "the failover rung is the one of the next claim"
+            );
+            let shed = rendezvous.is_none();
+            if let Some(held) = rendezvous.take() {
+                held.shed_and_wait().await;
+            }
+            assert!(
+                shed,
+                "the beacon stayed on the failed rung 0: the failover was compared with a rung that the move had not set"
+            );
+        });
+    }
+
+    /// **The move in place of a retired monitor does not take the place of the failover that the
+    /// replacement published before it.**
+    ///
+    /// A beacon that is shed drops the stop of its monitor, which may still be in the await of its
+    /// move in place. The replacement beacon fails over and publishes `Rehome`, and the old monitor
+    /// then publishes its `Moved`. A channel that kept the last value only held the `Moved` of the
+    /// retired generation, which the loop ignores, and the `Rehome` was lost, with no monitor left
+    /// to publish it again. The loop reads both: it ignores the old one and applies the failover.
+    #[test]
+    fn a_retired_move_after_a_failover_does_not_hide_the_failover() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rung_of = |host: &str| -> iroh::RelayUrl {
+                format!("https://{host}.example/")
+                    .parse()
+                    .expect("a test host forms a valid https URL")
+            };
+            let mut params = public_params();
+            params.bootstrap_relay = Some(rung_of("first"));
+            let mut state = testing::fresh_state();
+            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
+            let (tx, mut rx): (
+                mpsc::UnboundedSender<lookup::RungDecision>,
+                mpsc::UnboundedReceiver<lookup::RungDecision>,
+            ) = mpsc::unbounded_channel();
+            tx.send(lookup::RungDecision {
+                from: Some(beacon.generation),
+                rung: Some(rung_of("second")),
+                change: lookup::RungChange::Rehome,
+            })
+            .expect("the receiver is alive");
+            tx.send(lookup::RungDecision {
+                from: Some(lookup::Generation::next()),
+                rung: Some(rung_of("first")),
+                change: lookup::RungChange::Moved,
+            })
+            .expect("the receiver is alive");
+            let mut rendezvous = Some(beacon);
+
+            while let Ok(decision) = rx.try_recv() {
+                super::super::heal::apply_rung_change(
+                    &mut state,
+                    &mut params,
+                    &mut rendezvous,
+                    decision,
+                );
+            }
+
+            assert_eq!(
+                params.bootstrap_relay,
+                Some(rung_of("second")),
+                "the failover of the held beacon was lost behind the move of a retired one"
+            );
+            let shed = rendezvous.is_none();
+            if let Some(held) = rendezvous.take() {
+                held.shed_and_wait().await;
+            }
+            assert!(shed, "the beacon was not re-homed on the failover rung");
+        });
+    }
+
+    /// **A beacon that moved its own relay in place is followed by the loop, not shed.**
+    ///
+    /// The beacon serves on, so nothing of a new claim applies: the beacon stays held, the epoch of
+    /// the rival re-check goes on, and the reading of the rendezvous stays. The loop only follows
+    /// the rung: the parameters of the next claim, and the address that joiners are given.
+    #[test]
+    fn a_beacon_that_moved_in_place_is_followed_not_shed() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rung_of = |host: &str| -> iroh::RelayUrl {
+                format!("https://{host}.example/")
+                    .parse()
+                    .expect("a test host forms a valid https URL")
+            };
+            let mut params = public_params();
+            params.bootstrap_relay = Some(rung_of("second"));
+            let mut state = testing::fresh_state();
+            state.rival_recheck_rounds = 5;
+            state
+                .rendezvous_flags
+                .insert(state::RendezvousFlag::ProbeReadFree);
+            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
+            let decision = lookup::RungDecision {
+                from: Some(beacon.generation),
+                rung: Some(rung_of("first")),
+                change: lookup::RungChange::Moved,
+            };
+            let mut rendezvous = Some(beacon);
+
+            super::super::heal::apply_rung_change(
+                &mut state,
+                &mut params,
+                &mut rendezvous,
+                decision,
+            );
+
+            assert_eq!(
+                params.bootstrap_relay,
+                Some(rung_of("first")),
+                "the next claim homes on the rung that the beacon moved to"
+            );
+            let info = state.address_book.get_endpoint_info(params.id);
+            let first_rung = rung_of("first");
+            assert!(
+                info.is_some_and(|info| info
+                    .into_endpoint_addr()
+                    .relay_urls()
+                    .any(|url| *url == first_rung)),
+                "joiners are not given the rung that the beacon moved to"
+            );
+            assert_eq!(
+                state.rival_recheck_rounds, 5,
+                "a move in place starts no new arbitration epoch"
+            );
+            assert!(
+                state
+                    .rendezvous_flags
+                    .contains(&state::RendezvousFlag::ProbeReadFree),
+                "a move in place forgot the reading of the rendezvous"
+            );
+            let held = rendezvous
+                .take()
+                .expect("the loop shed a beacon that moved in place");
+            held.shed_and_wait().await;
+        });
     }
 
     /// A rehome is a fresh arbitration epoch, so the backoff restarts with it.

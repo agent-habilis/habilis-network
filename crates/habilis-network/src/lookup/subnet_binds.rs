@@ -330,54 +330,56 @@ mod tests {
     }
 
     /// Two chosen addresses bind for real, with the default one first in the list.
-    #[tokio::test]
-    async fn an_endpoint_binds_every_chosen_address_with_the_default_first_in_the_list() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let nics = vec![
-            nic("lo-a", 1, [127, 0, 0, 1], 8, true),
-            nic("lo-b", 2, [127, 0, 0, 1], 16, false),
-            nic("lo-c", 3, [127, 0, 0, 1], 8, false),
-        ];
-        let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
-        let endpoint = bind_nics(builder, &nics)
-            .expect("the bind list is valid")
-            .bind()
-            .await
-            .expect("bind the endpoint");
-        let v4: Vec<SocketAddr> = endpoint
-            .bound_sockets()
-            .into_iter()
-            .filter(SocketAddr::is_ipv4)
-            .collect();
-        assert_eq!(v4.len(), 2, "two IPv4 sockets, got {v4:?}");
-        endpoint.close().await;
+    #[test]
+    fn an_endpoint_binds_every_chosen_address_with_the_default_first_in_the_list() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let nics = vec![
+                nic("lo-a", 1, [127, 0, 0, 1], 8, true),
+                nic("lo-b", 2, [127, 0, 0, 1], 16, false),
+                nic("lo-c", 3, [127, 0, 0, 1], 8, false),
+            ];
+            let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
+            let endpoint = bind_nics(builder, &nics)
+                .expect("the bind list is valid")
+                .bind()
+                .await
+                .expect("bind the endpoint");
+            let v4: Vec<SocketAddr> = endpoint
+                .bound_sockets()
+                .into_iter()
+                .filter(SocketAddr::is_ipv4)
+                .collect();
+            assert_eq!(v4.len(), 2, "two IPv4 sockets, got {v4:?}");
+            endpoint.close().await;
+        });
     }
 
     /// The wiring: two interfaces in one subnet give an endpoint one bound `IPv4` socket.
-    #[tokio::test]
-    async fn an_endpoint_binds_one_socket_for_two_interfaces_in_one_subnet() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let nics = vec![
-            nic("lo-a", 1, [127, 0, 0, 1], 8, true),
-            nic("lo-b", 2, [127, 0, 0, 1], 8, false),
-        ];
-        let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
-        let endpoint = bind_nics(builder, &nics)
-            .expect("the bind list is valid")
-            .bind()
-            .await
-            .expect("bind the endpoint");
-        let v4: Vec<SocketAddr> = endpoint
-            .bound_sockets()
-            .into_iter()
-            .filter(SocketAddr::is_ipv4)
-            .collect();
-        assert_eq!(v4.len(), 1, "one IPv4 socket, got {v4:?}");
-        assert_eq!(
-            v4[0].ip(),
-            Ipv4Addr::LOCALHOST,
-            "the socket is on the chosen address"
-        );
-        endpoint.close().await;
+    #[test]
+    fn an_endpoint_binds_one_socket_for_two_interfaces_in_one_subnet() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let nics = vec![
+                nic("lo-a", 1, [127, 0, 0, 1], 8, true),
+                nic("lo-b", 2, [127, 0, 0, 1], 8, false),
+            ];
+            let builder = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled);
+            let endpoint = bind_nics(builder, &nics)
+                .expect("the bind list is valid")
+                .bind()
+                .await
+                .expect("bind the endpoint");
+            let v4: Vec<SocketAddr> = endpoint
+                .bound_sockets()
+                .into_iter()
+                .filter(SocketAddr::is_ipv4)
+                .collect();
+            assert_eq!(v4.len(), 1, "one IPv4 socket, got {v4:?}");
+            assert_eq!(
+                v4[0].ip(),
+                Ipv4Addr::LOCALHOST,
+                "the socket is on the chosen address"
+            );
+            endpoint.close().await;
+        });
     }
 }
