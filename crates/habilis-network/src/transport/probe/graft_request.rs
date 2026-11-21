@@ -217,4 +217,30 @@ mod tests {
             "2 peers short for STARVED: one Join, with no refusal read"
         );
     }
+
+    /// Pins the accepted cost of the rule: a node that stays 1 peer short and refused, as the
+    /// sum of the caps is odd or the 2 short nodes are linked to each other, asks 1 `Join` per
+    /// `STARVED` for ever, and none in between. Nothing in the loop changes its links. A later
+    /// fix that ends the chain changes this test on purpose.
+    #[test]
+    fn a_node_that_stays_at_g_minus_one_asks_one_join_every_five_minutes_for_ever() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = state_with_links(3, false);
+        let start = Instant::now();
+        let candidates = all_candidates_refuse(&mut state, start);
+
+        for round in 1..=6_u32 {
+            let due = start + STARVED * round;
+            assert_eq!(
+                ask(&mut state, candidates[0], due),
+                GraftRequest::Join,
+                "round {round}: the node is still 1 peer short and refused, so it asks a Join"
+            );
+            assert_ne!(
+                ask(&mut state, candidates[1], due + SECOND),
+                GraftRequest::Join,
+                "round {round}: the Join restarted the clock, so a second ask at once is no Join"
+            );
+        }
+    }
 }
