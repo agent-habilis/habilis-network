@@ -76,8 +76,11 @@ pub(crate) fn register_offered(
     offered: &[u16],
     address: EndpointAddr,
 ) {
-    let kept = book.get_endpoint_info(params.id).map(|info| {
-        keeping_rungs(info.into_endpoint_addr(), |port| {
+    let booked: Option<EndpointAddr> = book
+        .get_endpoint_info(params.id)
+        .map(|info| info.into_endpoint_addr());
+    let kept: Option<EndpointAddr> = booked.map(|entry| {
+        keeping_rungs(entry, |port| {
             offered.contains(&port) || !params.bind_ports.contains(&port)
         })
     });

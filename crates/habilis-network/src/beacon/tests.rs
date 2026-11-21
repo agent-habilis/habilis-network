@@ -1844,10 +1844,12 @@ fn a_heal_registration_takes_a_rung_that_is_no_longer_offered_out_of_the_book() 
         let peer = loopback_endpoint().await;
         let book = lookup::address_book(&peer);
         let booked = || -> Vec<u16> {
-            book.get_endpoint_info(params.id)
-                .map(EndpointInfo::into_endpoint_addr)
-                .map(|address| address.ip_addrs().map(net::SocketAddr::port).collect())
-                .unwrap_or_default()
+            let info = book.get_endpoint_info(params.id);
+            let entry: Option<iroh::EndpointAddr> = info.map(EndpointInfo::into_endpoint_addr);
+            let Some(entry) = entry else {
+                return Vec::new();
+            };
+            entry.ip_addrs().map(net::SocketAddr::port).collect()
         };
         let mut rungs = super::RungWatch::detached();
         rungs.clear_foreign(ports[0]);
