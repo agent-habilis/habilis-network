@@ -18,6 +18,8 @@ pub use crate::daemon::setup::{
     BROWSER_HAS_NO_PATH, BROWSER_NEEDS_RELAY_LOOKUP, InjectedEndpoint, LiveCount, SetupKind,
     SetupParams, refuse_in_browser, setup_mesh,
 };
+#[cfg(all(unix, feature = "host"))]
+pub use crate::daemon::setup::{DeadMember, take_dead_member};
 #[cfg(feature = "host")]
 pub use crate::daemon::{OwnerPidError, validate_owner_pid};
 pub use crate::lookup::MdnsHandle;

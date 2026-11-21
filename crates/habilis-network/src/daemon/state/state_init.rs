@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
+use crate::protocol::MeshId;
 use crate::protocol::identity::Identity;
 
 use iroh::address_lookup::memory;
@@ -42,6 +43,22 @@ pub(crate) struct RunKeys {
         expect(dead_code, reason = "only the binding of a host to its owner reads it")
     )]
     pub(crate) keys_state: Option<PathBuf>,
+}
+
+impl RunKeys {
+    /// These keys as the loop uses them on `mesh`: the member key is the one that the seed in the file
+    /// names, derived with the mesh id, so the proofs of this run and the key that peers read are the
+    /// key of this mesh and never the key of the seed.
+    #[must_use]
+    pub(crate) fn for_mesh(self, mesh: &MeshId) -> Self {
+        Self {
+            member: self
+                .member
+                // shared with the loop and its handlers, which hold clones
+                .map(|member| Arc::new(member.for_mesh(mesh.as_str()))),
+            ..self
+        }
+    }
 }
 
 /// Everything `EventLoopState::new` needs beyond the clock, grouped for the

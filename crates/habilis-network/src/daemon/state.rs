@@ -4633,4 +4633,132 @@ mod tests {
             "a node that stays below G keeps its first timestamp"
         );
     }
+
+    /// A receiver that holds the `joined` proof of a session that `member` signed for the nickname `proved`, and
+    /// has that session in its roster under the nickname `shown`. `claimant_enters` false keeps the proof pending.
+    fn receiver_with_a_proved_peer(
+        member: &protocol::identity::Identity,
+        proved: &str,
+        shown: &str,
+        claimant_enters: bool,
+    ) -> (EventLoopState, AuthorKey) {
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let session = protocol::identity::Identity::generate();
+        let key = session.author_key();
+        let proof = member.prove(&key, proved, mesh.as_ref(), 1);
+        let joined = Message::new_joined_with_proof(&mesh, &nick(proved), &proof).sign(&session);
+        receiver.note_joined_proof(&joined, &mesh, &nick("reader"), claimant_enters);
+        receiver.peers.insert(key);
+        receiver.names.insert(key, nick(shown));
+        receiver.surfaced.insert(key);
+        (receiver, key)
+    }
+
+    /// The roster shows the member key that a held proof of the session names, for the nickname that
+    /// the proof names.
+    #[test]
+    fn the_roster_shows_the_member_key_that_a_held_proof_names() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let member = protocol::identity::Identity::generate();
+        let (receiver, _) = receiver_with_a_proved_peer(&member, "alice", "alice", true);
+
+        let snapshot = receiver.roster_snapshot();
+
+        let row = snapshot.peers.first().expect("the peer is in the roster");
+        assert_eq!(
+            row.member,
+            Some(member.author_key()),
+            "the member key of a verified proof"
+        );
+    }
+
+    /// A pending proof (valid, and its sender is not live) is never shown for a row, a peer with no proof
+    /// shows null, and a session that proved one nickname and speaks as another shows null for it.
+    #[test]
+    fn the_roster_shows_no_member_key_for_a_pending_proof_no_proof_or_another_nickname() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let member = protocol::identity::Identity::generate();
+
+        let (pending, _) = receiver_with_a_proved_peer(&member, "alice", "alice", false);
+        let (renamed, _) = receiver_with_a_proved_peer(&member, "alice", "mallory", true);
+        let mut bare = fresh_state();
+        bare.peer_for_test("swift-cedar");
+        bare.surfaced_for_test("swift-cedar");
+
+        assert_eq!(
+            pending
+                .roster_snapshot()
+                .peers
+                .first()
+                .map(|row| row.member),
+            Some(None),
+            "a pending proof is not shown for a live row"
+        );
+        assert_eq!(
+            renamed
+                .roster_snapshot()
+                .peers
+                .first()
+                .map(|row| row.member),
+            Some(None),
+            "a session that proved alice shows null as mallory"
+        );
+        assert_eq!(
+            bare.roster_snapshot().peers.first().map(|row| row.member),
+            Some(None),
+            "a peer with no proof shows null"
+        );
+    }
+
+    /// A quiet peer keeps the member key of its held proof, and the snapshot names our own member key.
+    #[test]
+    fn a_quiet_row_keeps_its_member_key_and_the_snapshot_names_our_own() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let member = protocol::identity::Identity::generate();
+        let (mut receiver, key) = receiver_with_a_proved_peer(&member, "alice", "alice", true);
+        receiver.peers.remove(&key);
+        receiver.quiet.insert(key);
+
+        let snapshot = receiver.roster_snapshot();
+
+        let row = snapshot
+            .peers
+            .first()
+            .expect("the quiet peer is in the roster");
+        assert!(row.quiet, "the premise: the row is quiet");
+        assert_eq!(
+            row.member,
+            Some(member.author_key()),
+            "a quiet row keeps it"
+        );
+        assert_eq!(
+            snapshot.own_member,
+            receiver
+                .member_identity
+                .as_ref()
+                .map(|own| own.author_key()),
+            "the snapshot names our own member key"
+        );
+        assert!(
+            snapshot.own_member.is_some(),
+            "a test state has a member key"
+        );
+    }
+
+    /// The JSON of a row has the key `member`: the 64 hex digits, or null.
+    #[test]
+    fn the_json_of_a_roster_row_has_a_member_field() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let member = protocol::identity::Identity::generate();
+        let (receiver, _) = receiver_with_a_proved_peer(&member, "alice", "alice", true);
+
+        let json = serde_json::to_value(receiver.roster_snapshot()).expect("a snapshot serializes");
+
+        assert_eq!(
+            json["peers"][0]["member"],
+            serde_json::Value::String(member.author_key().to_string()),
+            "the member key as hex"
+        );
+    }
 }

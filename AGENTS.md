@@ -102,6 +102,8 @@ Layer: identity. Keyed by public key.
 
 The Ed25519 key that a process makes when it creates or joins a mesh. The public key is the identity of an author. The nickname is a display label and no claim. Every message is signed with this key, and a receiver verifies it.
 
+The session key is new at each start. The member key is the stable half: the seed in `<state>.key` names it, it is derived with the mesh id so each mesh shows another member key, and a clean leave keeps it for a run that has an owner or a named state file. It signs the proof that a session speaks as a nickname, and the roster shows it as `member` only for a proof that the node verified for that session.
+
 Code: `protocol::identity`, `AuthorKey`.
 
 ### surfaced

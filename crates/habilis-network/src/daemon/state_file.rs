@@ -96,6 +96,9 @@ pub struct StateFile {
     /// key and run counter cannot be deleted under it. Held, never read.
     // shared with the loop state, which holds the same lock for as long as this node runs
     key_lock: Option<sync::Arc<fs::File>>,
+    /// Whether the member key and the run counter stay when this file is cleaned up. A run that keeps
+    /// its identity is the same member when it starts again on the same state path.
+    keeps_identity: bool,
 }
 
 /// The keys of the state file that the daemon owns. A discovery field of the application never
@@ -123,6 +126,13 @@ impl StateFile {
         self
     }
 
+    /// Keep the member key and the run counter when this file is cleaned up (see the field of the same
+    /// name).
+    pub(crate) fn keeps_identity(mut self, keeps_identity: bool) -> Self {
+        self.keeps_identity = keeps_identity;
+        self
+    }
+
     pub(crate) fn new(
         path: PathBuf,
         mesh: &MeshId,
@@ -143,6 +153,7 @@ impl StateFile {
             topic: None,
             owner_pid: None,
             key_lock: None,
+            keeps_identity: false,
             discovery: sync::Mutex::new(serde_json::Map::new()),
             write_failing: atomic::AtomicBool::new(false),
         }
@@ -291,12 +302,18 @@ impl StateFile {
         fs::rename(&temp, &self.path)
     }
 
-    /// Delete the state file, and the member key and the run counter that live beside it. A process
-    /// that leaves takes its identity with it: the next process with the same pid, which names the
-    /// same state file, starts as a new member. Safe to call on a path that does not exist.
+    /// Delete the state file, and the member key and the run counter that live beside it, unless this
+    /// run keeps its identity ([`Self::keeps_identity`]): then the next start on the same path is the
+    /// same member, and only the state file and the temp file of the counter go. A run that does not
+    /// keep it takes its identity with it, so the next process with the same pid, which names the same
+    /// state file, starts as a new member. Safe to call on a path that does not exist.
     pub(crate) fn remove(&self) {
         let _ = fs::remove_file(&self.path);
-        for extension in ["key", "run", "run.tmp"] {
+        let _ = fs::remove_file(self.path.with_extension("run.tmp"));
+        if self.keeps_identity {
+            return;
+        }
+        for extension in ["key", "run"] {
             let _ = fs::remove_file(self.path.with_extension(extension));
         }
     }
@@ -986,6 +1003,89 @@ mod tests {
 
         for file in &beside {
             assert!(!file.exists(), "remove deletes {}", file.display());
+        }
+    }
+
+    /// A run that keeps its identity leaves the member key and the run counter beside the state file: the
+    /// next start on the same path is the same member. The state file and the temp file of the counter go.
+    #[test]
+    fn remove_keeps_the_member_key_and_the_run_counter_of_a_run_that_keeps_its_identity() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let path = unique_path("keeps-identity");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("test"),
+            &Nickname::from("n"),
+            &name("cool-team"),
+            &author(),
+        )
+        .keeps_identity(true);
+        state_file.write(0, false);
+        fs::write(path.with_extension("key"), b"key").expect("a member key file");
+        fs::write(path.with_extension("run"), b"7").expect("a run counter file");
+        fs::write(path.with_extension("run.tmp"), b"8").expect("a temp file of the counter");
+
+        state_file.remove();
+
+        assert!(!path.exists(), "the state file goes");
+        assert!(
+            !path.with_extension("run.tmp").exists(),
+            "the temp file of the counter goes"
+        );
+        for kept in ["key", "run"] {
+            assert!(
+                path.with_extension(kept).exists(),
+                "remove keeps the {kept} file of a run that keeps its identity"
+            );
+        }
+        for kept in ["key", "run"] {
+            let _ = fs::remove_file(path.with_extension(kept));
+        }
+    }
+
+    /// The twin of the test of the lock for a run that keeps its identity: the files stay, and the lock
+    /// is free once the file is gone.
+    #[cfg(unix)]
+    #[test]
+    fn the_lock_of_the_member_key_is_freed_and_the_key_stays_for_a_run_that_keeps_its_identity() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let path = unique_path("key-lock-kept");
+        let lock_path = path.with_extension("key.lock");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        let held: fs::File = options.open(&lock_path).expect("the lock file opens");
+        held.try_lock().expect("the lock is free");
+        fs::write(path.with_extension("key"), b"key").expect("a member key file");
+        fs::write(path.with_extension("run"), b"7").expect("a run counter file");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("test"),
+            &Nickname::from("n"),
+            &name("cool-team"),
+            &author(),
+        )
+        // shared with the loop state in production; here the file is the only holder
+        .key_lock(Some(Arc::new(held)))
+        .keeps_identity(true);
+        let mut rival_options = fs::OpenOptions::new();
+        rival_options.write(true);
+        let rival: fs::File = rival_options
+            .open(&lock_path)
+            .expect("a second handle on the lock file");
+
+        drop(state_file);
+
+        assert!(path.with_extension("key").exists(), "the member key stays");
+        assert!(
+            path.with_extension("run").exists(),
+            "and the run counter beside it"
+        );
+        assert!(
+            rival.try_lock().is_ok(),
+            "the lock is free once the state file is gone, so the next start can take it"
+        );
+        for kept in ["key", "run", "key.lock"] {
+            let _ = fs::remove_file(path.with_extension(kept));
         }
     }
 

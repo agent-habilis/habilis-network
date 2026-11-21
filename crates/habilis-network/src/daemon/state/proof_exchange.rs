@@ -219,6 +219,14 @@ impl ProofExchange {
         holder.map(|(_, (_, proof))| proof.identity)
     }
 
+    /// The member key that the held proof of `session` names, when that proof is for `nickname`. Only a
+    /// proof that was verified for exactly this session and held as active counts: a pending proof, a proof
+    /// for another nickname, and no proof give `None`.
+    pub(crate) fn member_of(&self, session: &AuthorKey, nickname: &Nickname) -> Option<AuthorKey> {
+        let (named, proof) = self.book.get(session)?;
+        (named == nickname).then(|| AuthorKey::from(*proof.identity.as_bytes()))
+    }
+
     /// Whether some held session of the roster binds `nickname`.
     pub(crate) fn is_bound(
         &self,

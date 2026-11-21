@@ -1317,6 +1317,7 @@ impl EventLoopState {
             heard.or_else(|| self.last_seen.get(key))
         };
         let lane = |key: &AuthorKey| transport::lane_for(key, self);
+        let member_of = |key: &AuthorKey, nick: &Nickname| self.proofs.member_of(key, nick);
         let shown = self.peers.iter().filter(|key| self.surfaced.contains(*key));
         // One row per key: two live keys under one nickname are two rows.
         let mut peers: Vec<RosterEntry> = shown
@@ -1325,6 +1326,7 @@ impl EventLoopState {
                 Some(RosterEntry {
                     key: *key,
                     nickname: nick.clone(),
+                    member: member_of(key, nick),
                     // Active peers: when they were really heard. A stall forgiveness moves
                     // `last_seen`, not `heard`.
                     last_seen_secs_ago: heard_at(key).map(secs_since),
@@ -1338,6 +1340,7 @@ impl EventLoopState {
                 Some(RosterEntry {
                     key: *key,
                     nickname: nick.clone(),
+                    member: member_of(key, nick),
                     // Quiet peers: their last-heard instant, retained in
                     // `quiet_since` (the eviction drops `last_seen`). A quiet
                     // peer has no live link, so it is always `Gossip`.
@@ -1352,9 +1355,12 @@ impl EventLoopState {
             .collect();
         // Most-recently-seen first; unknown recency (no heartbeat yet) sorts last.
         peers.sort_by_key(|entry| entry.last_seen_secs_ago.unwrap_or(u64::MAX));
+        let own: Option<&Identity> = self.member_identity.as_deref();
+        let own_member: Option<AuthorKey> = own.map(Identity::author_key);
         RosterSnapshot {
             peers,
             count: self.member_count(),
+            own_member,
             live: self.live_nicknames().cloned().collect(),
         }
     }

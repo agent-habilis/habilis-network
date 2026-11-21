@@ -149,7 +149,7 @@ async fn run_checked<Driver: NodeDriver>(
     let leave_label = leave_label(&mesh);
     let chunks = open_chunks(runtime.runtime_base.as_deref(), &mesh.mesh, &mesh.author)?;
     let mut state: EventLoopState = initial_state(
-        mesh.keys,
+        mesh.keys.for_mesh(&mesh.mesh),
         MeshSecrets {
             password: mesh.mesh_password.take(),
             key: mesh.mesh_key.take(),
@@ -363,6 +363,14 @@ fn quit_channel(handle_signals: SignalHandling, _exit_on_quit: bool) -> mpsc::Re
     never_quit()
 }
 
+/// Whether the member key and the run counter stay at a clean end. A state file that the caller named, or an
+/// owner of the run, is what ties a kept member key to one node: the default path of a run with neither is
+/// not named by anyone, and the key leaves with the run.
+#[cfg(feature = "host")]
+fn keeps_identity(explicit_state_file: bool, has_owner: bool) -> bool {
+    explicit_state_file || has_owner
+}
+
 /// The state file of a host daemon, seeded by the app. `None` when there is no file to write: an
 /// in-process session that keeps no file.
 #[cfg(feature = "host")]
@@ -372,6 +380,7 @@ fn host_state_file<Driver: NodeDriver>(
     runtime: &mut RuntimeConfig,
     exit_on_quit: bool,
 ) -> Option<StateFile> {
+    let keeps_identity = keeps_identity(runtime.state_file.is_some(), runtime.owner.is_some());
     let state_file: Option<StateFile> = runtime
         .state_file
         .take()
@@ -383,7 +392,8 @@ fn host_state_file<Driver: NodeDriver>(
             let owner_pid = runtime.owner.map(shutdown::Owner::pid);
             let pubkey = mesh.keys.session.author_key();
             let file = StateFile::new(path, &mesh.mesh, &mesh.author, &mesh.name, &pubkey)
-                .base(runtime.runtime_base.clone());
+                .base(runtime.runtime_base.clone())
+                .keeps_identity(keeps_identity);
             file.topic(mesh.topic_string.as_deref())
                 .owner_pid(owner_pid)
         });
@@ -2162,6 +2172,26 @@ mod tests {
                     .expect("the sink lock")
                     .push(Report { peers, known });
             }
+        }
+    }
+
+    /// A run keeps its member key at a clean end when it has an owner or a state file that the caller
+    /// named, and a run with neither loses it with the run.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_run_keeps_its_member_key_only_with_an_owner_or_a_named_state_file() {
+        let _guard = ::habilis_network_test_tracing::init();
+        for (explicit, owner, kept) in [
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+            (false, false, false),
+        ] {
+            assert_eq!(
+                super::keeps_identity(explicit, owner),
+                kept,
+                "explicit state file: {explicit}, owner: {owner}"
+            );
         }
     }
 

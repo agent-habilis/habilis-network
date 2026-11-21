@@ -15,6 +15,8 @@ use std::{time::Duration, time::Instant};
 use tokio::task;
 #[cfg(all(unix, feature = "host"))]
 use tokio::time;
+#[cfg(all(unix, feature = "host"))]
+mod dead_member;
 mod injected_endpoint;
 mod setup_kind;
 mod setup_params;
@@ -59,6 +61,8 @@ use crate::util::{consts, tuning};
 use iroh::address_lookup::memory;
 use iroh::protocol::{Router, Router as iroh_Router};
 
+#[cfg(all(unix, feature = "host"))]
+pub use dead_member::{DeadMember, take_dead_member};
 pub use injected_endpoint::InjectedEndpoint;
 pub use setup_kind::SetupKind;
 pub use setup_params::{LiveCount, SetupParams};
@@ -3570,6 +3574,173 @@ mod tests {
                 "another owner that names the same state file is a new member"
             );
             assert_eq!(reused_pid.run, 1, "at run 1");
+        });
+    }
+
+    /// A clean leave keeps the member key and the run counter of a state file that the caller named, so
+    /// the same node that joins the same mesh again on that path is the same member, one run later. The
+    /// state file goes.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_clean_leave_keeps_the_member_of_an_explicit_state_file() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = TempDir::new("habilis-leave-keeps-member");
+            let state = dir.path().join("session.json");
+            let stay = |mesh: Option<String>| {
+                let state = state.clone();
+                async move {
+                    let options = membership::JoinOptions::default().mesh(mesh);
+                    let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+                    let params = super::SetupParams::new(author, embed::SilentSink)
+                        .max_connections(8)
+                        .state_file(state.clone());
+                    let config = super::setup_mesh(kind, params)
+                        .await
+                        .expect("a loopback mesh sets up");
+                    let shown = (config.member_key(), config.mesh.keys.run);
+                    let joined = config.mesh_id().to_string();
+                    let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+                    let node = node::Node::spawn(
+                        config,
+                        membership::MembershipApp::new(inbound_tx),
+                        None,
+                        SignalHandling::Leave,
+                    );
+                    let deadline = time::Instant::now() + Duration::from_secs(10);
+                    while !state.exists() && time::Instant::now() < deadline {
+                        time::sleep(Duration::from_millis(20)).await;
+                    }
+                    assert!(state.exists(), "the run writes its state file");
+                    node.leave().await.expect("the node leaves");
+                    (shown, joined)
+                }
+            };
+
+            let ((first_key, first_run), mesh) = stay(None).await;
+            let left_state_file = state.exists();
+            let key_stays = state.with_extension("key").exists();
+            let run_stays = state.with_extension("run").exists();
+            let ((second_key, second_run), _) = stay(Some(mesh)).await;
+
+            assert!(!left_state_file, "the state file goes at a clean leave");
+            assert!(key_stays, "a clean leave keeps the member key");
+            assert!(run_stays, "and the run counter");
+            assert!(first_key.is_some(), "a member key is shown");
+            assert_eq!(first_key, second_key, "the same node is the same member");
+            assert_eq!(
+                (first_run, second_run),
+                (1, 2),
+                "one run later, as a restart goes on"
+            );
+        });
+    }
+
+    /// One state path keeps one seed, and the node shows another member key on each mesh: two meshes
+    /// on one state path are not linked by the key.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn one_state_path_shows_another_member_key_on_another_mesh() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = TempDir::new("habilis-member-per-mesh");
+            let state = dir.path().join("session.json");
+            let start = || {
+                let state = state.clone();
+                async move {
+                    let options = membership::JoinOptions::default();
+                    let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+                    let params = super::SetupParams::new(author, embed::SilentSink)
+                        .max_connections(8)
+                        .state_file(state);
+                    let config = super::setup_mesh(kind, params)
+                        .await
+                        .expect("a loopback mesh sets up");
+                    let shown = config.member_key();
+                    let mesh = config.mesh_id().clone();
+                    config
+                        .endpoints
+                        .router
+                        .shutdown()
+                        .await
+                        .expect("the router stops");
+                    if let Some(handle) = config.transports.multihop.as_ref() {
+                        handle.close().await;
+                    }
+                    drop(ended(config.mesh.keys.clone()));
+                    (shown, mesh)
+                }
+            };
+
+            let (first, first_mesh) = start().await;
+            let (second, second_mesh) = start().await;
+
+            assert_ne!(
+                first_mesh, second_mesh,
+                "the premise: 2 creates are 2 meshes"
+            );
+            assert!(first.is_some(), "a member key is shown");
+            assert_ne!(
+                first, second,
+                "one state path, one seed, and the same member key on 2 meshes"
+            );
+        });
+    }
+
+    /// `bind_keys_to_owner` binds the pair of files to a process, as `set_owner_pid` does, and it
+    /// sets no owner of the lifetime: the daemon lives as it did, and the state file names no owner.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn bind_keys_to_owner_binds_the_pair_and_sets_no_owner_of_the_lifetime() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network::lifecycle",
+                "from another owner",
+            );
+            let dir = TempDir::new("habilis-bind-keys-only");
+            let state = dir.path().join("session.json");
+            let (first_owner, second_owner) = (Sleeper::spawn(), Sleeper::spawn());
+            let start = |owner: u32| {
+                let state = state.clone();
+                async move {
+                    let options = membership::JoinOptions::default();
+                    let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+                    let params = super::SetupParams::new(author, embed::SilentSink)
+                        .max_connections(8)
+                        .state_file(state);
+                    let config = super::setup_mesh(kind, params)
+                        .await
+                        .expect("a loopback mesh sets up");
+                    let config = config.bind_keys_to_owner(owner).expect("a live process");
+                    let watched = config.owner_pid();
+                    let keys = ended(config.mesh.keys.clone());
+                    config
+                        .endpoints
+                        .router
+                        .shutdown()
+                        .await
+                        .expect("the router stops");
+                    if let Some(handle) = config.transports.multihop.as_ref() {
+                        handle.close().await;
+                    }
+                    (keys, watched)
+                }
+            };
+
+            let (first, watched) = start(first_owner.0.id()).await;
+            let (restart, _) = start(first_owner.0.id()).await;
+            let (other, _) = start(second_owner.0.id()).await;
+
+            assert_eq!(watched, None, "the lifetime of the daemon has no owner");
+            assert_eq!(
+                member_key(&first),
+                member_key(&restart),
+                "the same process keeps the member key"
+            );
+            assert_eq!((first.run, restart.run), (1, 2), "and the run goes on");
+            assert_ne!(
+                member_key(&first),
+                member_key(&other),
+                "another process that names the same state file is a new member"
+            );
         });
     }
 

@@ -33,6 +33,11 @@ pub struct RosterEntry {
     pub key: AuthorKey,
     /// The nickname of the member.
     pub nickname: Nickname,
+    /// The member key of the member, in the JSON as `member`: 64 lowercase hex digits, or `null` when
+    /// no proof of it was verified. A proof counts only for the session of this row and only for the
+    /// nickname of this row. A member key is stable across the runs of a node (see the docs of the
+    /// identity), and `key` is the key of one run.
+    pub member: Option<AuthorKey>,
     /// Seconds since the member was last heard from.
     pub last_seen_secs_ago: Option<u64>,
     /// Whether the member has been silent past the alive timeout.
