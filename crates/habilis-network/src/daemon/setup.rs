@@ -4056,6 +4056,50 @@ mod tests {
             endpoint.close().await;
         });
     }
+
+    // A node never starts again under its nickname, so the chunk folder that the run opened under
+    // the runtime base is of no use after a clean leave.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_clean_leave_removes_the_chunk_folder_of_the_node() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use std::os::unix::fs::PermissionsExt as _;
+            let base = TempDir::new("leave-removes-chunks");
+            fs::set_permissions(base.path(), fs::Permissions::from_mode(0o700))
+                .expect("a private runtime base");
+            let options = membership::JoinOptions::default();
+            let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+            let runtime_base = base.path().to_path_buf();
+            let params = super::SetupParams::new(author, embed::SilentSink)
+                .max_connections(8)
+                .runtime_base(runtime_base);
+            let config = super::setup_mesh(kind, params)
+                .await
+                .expect("a loopback mesh sets up");
+            let folder =
+                super::default_chunks_path(base.path(), &config.mesh.mesh, &config.mesh.author);
+            let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+            let node = node::Node::spawn(
+                config,
+                membership::MembershipApp::new(inbound_tx),
+                None,
+                SignalHandling::Leave,
+            );
+            let deadline = time::Instant::now() + Duration::from_secs(10);
+            while !folder.exists() && time::Instant::now() < deadline {
+                time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(folder.exists(), "the run opens its chunk folder");
+
+            node.leave().await.expect("the node leaves");
+
+            assert!(
+                !folder.exists(),
+                "a clean leave left the chunk folder {} behind",
+                folder.display()
+            );
+        });
+    }
 }
 
 // The browser build of `build_member_endpoint` is the one that runs without `host`. A native test

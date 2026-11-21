@@ -70,7 +70,7 @@ use super::heal::{GossipLink, ResubscribeEnv, apply_rung_change, resubscribe_tic
 use super::node::SignalHandling;
 #[cfg(feature = "host")]
 use super::shutdown;
-use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
+use super::shutdown::{OwnedEndpoints, OwnedFiles, QuitParams, announce_departure, never_quit};
 use super::state::{EventLoopState, FrameOverheads, MeshChunks, MeshSecrets};
 use super::timers;
 use crate::daemon::setup::LiveCount;
@@ -145,7 +145,6 @@ async fn run_checked<Driver: NodeDriver>(
     let state_file = runtime.state_file;
     let (external_quit_rx, external_msg_tx, ipc_listener_disabled, handle_signals) =
         driver_channels(runtime.driver);
-    let external_req_rx = session_rx;
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
     let chunks = open_chunks(runtime.runtime_base.as_deref(), &mesh.mesh, &mesh.author)?;
@@ -192,7 +191,7 @@ async fn run_checked<Driver: NodeDriver>(
     .await;
     let (sender, receiver) = join_gossip(&mut state, endpoints.topic);
 
-    let ipc_rx: Option<mpsc::Receiver<IpcMessage<Driver::Ipc>>> = control_socket(
+    let (ipc_rx, owned_files) = control_socket(
         ipc_listener_disabled,
         runtime.runtime_base.as_deref(),
         &mesh.mesh,
@@ -271,7 +270,7 @@ async fn run_checked<Driver: NodeDriver>(
         cohost: rendezvous.cohost,
         started,
         external_quit_rx,
-        external_req_rx,
+        external_req_rx: session_rx,
         external_msg_tx,
         quit_rx,
         exit_on_quit,
@@ -283,6 +282,7 @@ async fn run_checked<Driver: NodeDriver>(
         direct_rx,
         path_rx,
         owned,
+        owned_files,
     }))
     .await
 }
@@ -307,8 +307,9 @@ fn driver_channels(
     }
 }
 
-/// The control socket of the daemon, bound here, before the caller marks the session ready. `None`
-/// when the driver has no socket: in-process drivers take requests on their own channel.
+/// The control socket of the daemon, bound here, before the caller marks the session ready, and the
+/// files that the run owns under the runtime base. No socket (`None`) when the driver has none:
+/// in-process drivers take requests on their own channel.
 #[cfg(feature = "host")]
 fn control_socket<Ipc: de::DeserializeOwned + Send + 'static>(
     disabled: bool,
@@ -317,8 +318,10 @@ fn control_socket<Ipc: de::DeserializeOwned + Send + 'static>(
     author: &Nickname,
     // The IPC task keeps a handle to the sink after this call returns.
     sink: &Arc<dyn NodeSink>,
-) -> Option<mpsc::Receiver<IpcMessage<Ipc>>> {
-    spawn_ipc_rx(disabled, runtime_base, mesh_id, author, sink)
+) -> (Option<mpsc::Receiver<IpcMessage<Ipc>>>, OwnedFiles) {
+    let ipc_rx = spawn_ipc_rx(disabled, runtime_base, mesh_id, author, sink);
+    let owned = owned_files(runtime_base, mesh_id, author, ipc_rx.is_some());
+    (ipc_rx, owned)
 }
 
 /// A browser binds no control socket. The loop keeps its IPC `select!` arm — `IpcMessage` is
@@ -331,8 +334,8 @@ fn control_socket<Ipc>(
     _author: &Nickname,
     // Same shape as the host variant, which shares this sink with the IPC task.
     _sink: &Arc<dyn NodeSink>,
-) -> Option<mpsc::Receiver<IpcMessage<Ipc>>> {
-    None
+) -> (Option<mpsc::Receiver<IpcMessage<Ipc>>>, OwnedFiles) {
+    (None, OwnedFiles::default())
 }
 
 /// The loop's quit channel. A session inside a foreground command that owns its own lifetime
@@ -417,6 +420,24 @@ fn open_chunks(
     #[cfg(not(feature = "host"))]
     let _ = (runtime_base, mesh, author);
     Ok(MeshChunks::open(None)?)
+}
+
+/// The files that this run made under the runtime base: the chunk folder of its store, and the
+/// control socket when it bound one. A browser and a run with no runtime base made none.
+#[cfg(feature = "host")]
+fn owned_files(
+    runtime_base: Option<&path::Path>,
+    mesh: &MeshId,
+    author: &Nickname,
+    bound_socket: bool,
+) -> OwnedFiles {
+    let Some(base) = runtime_base else {
+        return OwnedFiles::default();
+    };
+    OwnedFiles {
+        socket: bound_socket.then(|| path::PathBuf::from(ipc::socket_path(base, mesh, author))),
+        chunks: Some(setup::default_chunks_path(base, mesh, author)),
+    }
 }
 
 /// The state file a daemon seeds its state with: a host daemon has one, and a browser keeps its path.
@@ -885,6 +906,8 @@ struct EventLoop<Driver: NodeDriver> {
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
     /// Closed with the rendezvous as the loop ends.
     owned: OwnedEndpoints,
+    /// Removed when the loop ends clean.
+    owned_files: OwnedFiles,
 }
 
 /// The daemon's `select!` loop. Never returns normally on the CLI
@@ -941,6 +964,7 @@ struct Loop<'node, Driver: NodeDriver> {
     anchors: TickAnchors,
     resubscribe_attempts: u32,
     owned: OwnedEndpoints,
+    owned_files: OwnedFiles,
 }
 impl<Driver: NodeDriver> Loop<'_, Driver> {
     /// The app's startup hook, and the first offer of the rendezvous.
@@ -963,6 +987,11 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         .await;
         super::cohost_arm::wait_for_shed_close(&mut self.state).await;
         super::cohost_arm::wait_for_prober_closes(self.prober_closes).await;
+        // Before the exit below, which skips every destructor. An error end keeps the files: the
+        // operator reads them to find out what went wrong.
+        if outcome.is_ok() {
+            self.owned_files.remove();
+        }
         match outcome {
             Ok(exit_after_release) => {
                 if exit_after_release {
@@ -1596,6 +1625,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         direct_rx,
         path_rx,
         owned,
+        owned_files,
     } = loop_state;
 
     log_daemon_start(&author);
@@ -1680,6 +1710,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         anchors,
         resubscribe_attempts,
         owned,
+        owned_files,
     };
     lp.start().await;
     let outcome = run_loop(
@@ -2094,6 +2125,7 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::time::Duration;
 
     use tokio::sync::oneshot;
@@ -2131,6 +2163,47 @@ mod tests {
                     .push(Report { peers, known });
             }
         }
+    }
+
+    /// A run owns the chunk folder under its runtime base, and the control socket only when it bound
+    /// one. A run with no runtime base owns neither.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_run_owns_the_chunk_folder_and_the_socket_that_it_bound() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mesh, author) = (MeshId::from("test"), nick("swift-cedar"));
+        let base = Path::new("/runtime-base");
+
+        let bound = super::owned_files(Some(base), &mesh, &author, true);
+        let socket = bound.socket.expect("the socket that the run bound");
+        let chunks = bound.chunks.expect("the chunk folder of the run");
+        assert_eq!(
+            socket.file_name().and_then(|name| name.to_str()),
+            Some("swift-cedar.ipc.sock"),
+            "the control socket of the member"
+        );
+        assert_eq!(
+            chunks.file_name().and_then(|name| name.to_str()),
+            Some("swift-cedar.chunks"),
+            "the chunk folder of the member"
+        );
+        assert_eq!(
+            socket.parent(),
+            chunks.parent(),
+            "both are in the runtime folder of the mesh"
+        );
+
+        let unbound = super::owned_files(Some(base), &mesh, &author, false);
+        assert!(
+            unbound.socket.is_none(),
+            "a run that bound no socket owns none"
+        );
+        assert!(unbound.chunks.is_some(), "the chunk folder is the run's");
+        assert_eq!(
+            super::owned_files(None, &mesh, &author, true),
+            super::OwnedFiles::default(),
+            "no runtime base, no files"
+        );
     }
 
     /// A state with one peer that was last heard `alive_timeout() + 10 s` ago: due for eviction.

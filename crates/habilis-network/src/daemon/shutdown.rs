@@ -9,6 +9,7 @@ use std::mem;
 use tokio::signal;
 
 mod owned_endpoints;
+mod owned_files;
 #[cfg(feature = "host")]
 mod owner;
 #[cfg(feature = "host")]
@@ -40,6 +41,7 @@ use std::process as std_process;
 use tokio::signal::unix;
 
 pub(super) use owned_endpoints::OwnedEndpoints;
+pub(super) use owned_files::OwnedFiles;
 #[cfg(feature = "host")]
 pub(crate) use owner::Owner;
 #[cfg(feature = "host")]
