@@ -766,6 +766,11 @@ where
     let mut answers: Vec<Option<bool>> = vec![None; ladder.len()];
     let mut selected = None;
     loop {
+        // The caller can have stopped the walk before it began, or between 2 passes: no probe
+        // starts then, as the select below would pick the start before it read the stop.
+        if stop.is_some_and(|caller| caller.has_changed().is_err()) {
+            stop_probes = None;
+        }
         let may_start = stop_probes.is_some() && unstarted.len() > 0;
         if may_start && (probes.is_empty() || Instant::now() >= next_start) {
             if let Some((index, rung)) = unstarted.next() {
@@ -3252,6 +3257,32 @@ mod tests {
                 walked.stopped,
                 vec!["a", "b"],
                 "the walk stops every probe in flight"
+            );
+        });
+    }
+
+    /// **A walk whose caller stopped it before it began starts no probe.**
+    ///
+    /// The first pass of the loop queued rung 0 before it looked at the stop of the caller, and the
+    /// probe, which checks only the stop of the walk, could start to bind an endpoint during a
+    /// shutdown.
+    #[test]
+    fn a_walk_that_its_caller_stopped_before_it_began_starts_no_probe() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (stop, stopped) = watch::channel(());
+            drop(stop);
+            let fakes = [
+                fake("a", std_Duration::from_millis(5), true),
+                fake("b", std_Duration::from_millis(5), true),
+            ];
+
+            let walked = walk_with(&fakes, Some(&stopped), FAKE_STAGGER).await;
+
+            assert!(walked.selected.is_none(), "a stopped walk selects nothing");
+            assert!(
+                walked.started.is_empty(),
+                "the walk started the probes {:?} after its caller stopped it",
+                walked.started
             );
         });
     }
