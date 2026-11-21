@@ -2813,3 +2813,106 @@ mod chain_tests {
         );
     }
 }
+
+// The `rung_rx` arm of the loop, with a real node on a local relay. The tests of `apply_rung_change`
+// call it with one decision, so they cannot tell a loop that applies each decision from one that
+// reads the last decision of the channel only.
+#[cfg(all(test, feature = "host", feature = "iroh-test-utils"))]
+mod rung_arm_tests {
+    use std::time::Duration;
+
+    use iroh::RelayUrl;
+    use n0_future::time::{self, Instant as TokioInstant};
+    use tokio::sync::mpsc;
+
+    use crate::daemon::node::{Node, SignalHandling};
+    use crate::daemon::setup::{SetupParams, setup_mesh};
+    use crate::lookup::{RungChange, RungDecision, test_relay};
+    use crate::protocol::meshes::Lookup;
+    use crate::{embed, membership};
+
+    fn rung_of(host: &str) -> RelayUrl {
+        format!("https://{host}.example/")
+            .parse()
+            .expect("a test host forms a valid https URL")
+    }
+
+    fn moved_to(rung: &RelayUrl) -> RungDecision {
+        RungDecision {
+            from: None,
+            rung: Some(rung.clone()),
+            change: RungChange::Moved,
+        }
+    }
+
+    /// 2 rung decisions that are in the channel when the loop reads it are both applied. A `Moved`
+    /// decision registers its rung for joiners and sheds nothing, so the book of the node shows
+    /// each rung that the loop applied. A loop that applied only the newest decision of the
+    /// channel registers the second rung and never the first.
+    ///
+    /// The test does not check the order of the 2 decisions: the book merges the rungs, and a
+    /// union does not depend on the order. The order rests on the channel and on the one arm. If a
+    /// later change makes a `Moved` decision replace the entry of the book, the first assertion
+    /// fails with both decisions applied: change the observable, not the loop.
+    ///
+    /// The decisions are synthetic: production sends a `Moved` decision with the generation of a
+    /// monitor, and the arm does not read that field.
+    #[test]
+    fn two_rung_decisions_in_the_channel_are_both_applied_by_the_loop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+            let options = membership::JoinOptions::default()
+                .lookup(vec![Lookup::Relay])
+                .relay_urls(vec![relay.to_string()]);
+            let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+            let config = setup_mesh(
+                kind,
+                SetupParams::new(author, embed::SilentSink).max_connections(8),
+            )
+            .await
+            .expect("a relay mesh sets up");
+            let book = config.transports.address_book.clone();
+            let rendezvous = config.rendezvous.rendezvous_params.id;
+            // The config holds the receiver, and the channel has no bound: both decisions are in
+            // the channel before the loop exists, so its first read finds both, on any runtime.
+            let (first, second) = (rung_of("rung-first"), rung_of("rung-second"));
+            let rung_tx = &config.rendezvous.rendezvous_params.rung_tx;
+            rung_tx
+                .send(moved_to(&first))
+                .expect("the config holds the channel");
+            rung_tx
+                .send(moved_to(&second))
+                .expect("the config holds the channel");
+            let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+            let node = Node::spawn(
+                config,
+                membership::MembershipApp::new(inbound_tx),
+                None,
+                SignalHandling::Leave,
+            );
+
+            let registered = || -> Vec<RelayUrl> {
+                let Some(info) = book.get_endpoint_info(rendezvous) else {
+                    return Vec::new();
+                };
+                let address = info.into_endpoint_addr();
+                address.relay_urls().cloned().collect()
+            };
+            let deadline = TokioInstant::now() + Duration::from_secs(10);
+            while !registered().contains(&second) && TokioInstant::now() < deadline {
+                time::sleep(Duration::from_millis(20)).await;
+            }
+            let rungs = registered();
+            node.leave().await.expect("the node leaves");
+
+            assert!(
+                rungs.contains(&second),
+                "the loop did not apply the last decision: {rungs:?}"
+            );
+            assert!(
+                rungs.contains(&first),
+                "the loop skipped the first of 2 decisions that were in the channel (or a `Moved` decision no longer merges into the book): {rungs:?}"
+            );
+        });
+    }
+}
