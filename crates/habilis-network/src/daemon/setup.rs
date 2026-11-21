@@ -26,7 +26,7 @@ use anyhow::Result;
 use super::setup_error::SetupError;
 use iroh::{Endpoint, RelayUrl};
 use rand::RngCore;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot};
 #[cfg(all(unix, feature = "host"))]
 use zeroize::Zeroizing;
 
@@ -70,7 +70,7 @@ fn rendezvous_params(
     mesh: &Mesh,
     topic_id: proto::TopicId,
     lookups: &LookupOpts,
-    rung_tx: watch::Sender<lookup::RungDecision>,
+    rung_tx: mpsc::UnboundedSender<lookup::RungDecision>,
 ) -> RendezvousParams {
     let bind_ports = if mesh.is_loopback() {
         mesh.rendezvous_ports().to_vec()
@@ -106,7 +106,7 @@ fn rendezvous_params(
 /// relay-disabled) ladder.
 fn spawn_startup_rung_confirmation(
     ladder: Vec<RelayUrl>,
-    rung_tx: watch::Sender<lookup::RungDecision>,
+    rung_tx: mpsc::UnboundedSender<lookup::RungDecision>,
 ) -> Option<StoppableTask> {
     if ladder.is_empty() {
         return None;
@@ -117,14 +117,10 @@ fn spawn_startup_rung_confirmation(
             // A departure ended the walk: its `None` is not a verdict.
             return;
         }
-        rung_tx.send_if_modified(|current| {
-            if current.rung == confirmed {
-                false
-            } else {
-                *current = lookup::RungDecision::at_startup(confirmed);
-                true
-            }
-        });
+        // The setup homes on the first rung of the ladder, so a verdict that is that rung is no news.
+        if confirmed != ladder.first().cloned() {
+            let _ = rung_tx.send(lookup::RungDecision::at_startup(confirmed));
+        }
     }))
 }
 
@@ -556,7 +552,7 @@ struct SetupBuild<'build> {
     /// contended here and nothing holds the guard across an `.await`; the
     /// `Mutex` is bought purely for the `Sync` it carries.
     protocols: sync::Mutex<CallerProtocols>,
-    rung_tx: &'build watch::Sender<lookup::RungDecision>,
+    rung_tx: &'build mpsc::UnboundedSender<lookup::RungDecision>,
     /// The mesh's `transport.relay_transport`, for the accept gates.
     relay_transport: transport::PayloadPath,
 }
@@ -1545,8 +1541,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // a ladder walk on the sole loop. Initialized to the optimistic
     // rung 0 (empty ladder ⇒ `None`).
     let ladder: Vec<_> = relay_ladder(&lookups.relay_lookup).collect();
-    let (rung_tx, rung_rx) =
-        watch::channel(lookup::RungDecision::at_startup(ladder.first().cloned()));
+    let (rung_tx, rung_rx) = mpsc::unbounded_channel();
     let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);
     let (chunk_rx, chunk_acceptor) = chunk_inbox(relay_transport);
 
@@ -3454,8 +3449,6 @@ mod tests {
         );
     }
 
-    use tokio::sync::watch;
-
     use crate::testing::{errors_through_runtime_drop, silent_relay_rung};
 
     // The mesh policy decides multi-hop: the default list has it, a list that
@@ -3989,11 +3982,9 @@ mod tests {
         let (_silent, rung) = silent_relay_rung();
 
         let errors = errors_through_runtime_drop(async {
-            let probe = super::spawn_startup_rung_confirmation(
-                vec![rung],
-                watch::channel(lookup::RungDecision::default()).0,
-            )
-            .expect("a ladder to walk");
+            let probe =
+                super::spawn_startup_rung_confirmation(vec![rung], mpsc::unbounded_channel().0)
+                    .expect("a ladder to walk");
             // Let the probe bind and start waiting for its relay.
             time::sleep(Duration::from_millis(200)).await;
             probe.stop_and_wait().await;

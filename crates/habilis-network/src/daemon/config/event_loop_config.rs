@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use iroh::Endpoint;
 use iroh::protocol::Router;
 use iroh_gossip::api::GossipTopic;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::gossip::event::NodeSink;
 use crate::protocol::meshes::{Mesh, MeshName};
@@ -186,7 +186,7 @@ pub(crate) struct RendezvousConfig {
     /// self-monitor (`rendezvous_params.rung_tx` is the sending half). On
     /// a change the loop re-registers the rendezvous and re-homes the
     /// beacon, so the ladder walk never runs on the sole loop.
-    pub(crate) rung_rx: watch::Receiver<lookup::RungDecision>,
+    pub(crate) rung_rx: mpsc::UnboundedReceiver<lookup::RungDecision>,
     /// The backgrounded startup probe behind `rung_rx`, released on the way
     /// out with the rendezvous. `None` for an empty ladder.
     pub(crate) rung_probe: Option<lookup::StoppableTask>,

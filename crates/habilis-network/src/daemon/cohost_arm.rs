@@ -716,7 +716,7 @@ mod tests {
     use iroh_gossip::proto;
     use n0_future::task;
     use std::{future, net};
-    use tokio::sync::{mpsc, oneshot, watch};
+    use tokio::sync::{mpsc, oneshot};
     use tokio::time;
 
     /// A shed takes out of the book the rung that the beacon was on, and nothing else on evidence
@@ -884,7 +884,7 @@ mod tests {
             lookups: meshes::LookupOpts::loopback(),
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
-            rung_tx: watch::channel(lookup::RungDecision::default()).0,
+            rung_tx: mpsc::unbounded_channel().0,
         }
     }
 
@@ -1185,7 +1185,7 @@ mod tests {
                 lookups: LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(lookup::RungDecision::default()).0,
+                rung_tx: mpsc::unbounded_channel().0,
             };
 
             let endpoint = lookup::build_endpoint(
@@ -1282,7 +1282,7 @@ mod tests {
             lookups: LookupOpts::loopback(),
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
-            rung_tx: watch::channel(lookup::RungDecision::default()).0,
+            rung_tx: mpsc::unbounded_channel().0,
         };
 
         // The holder: another member of the same room, on the only rung.
@@ -1471,7 +1471,7 @@ mod tests {
                     lookups: LookupOpts::loopback(),
                     relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
-                    rung_tx: watch::channel(lookup::RungDecision::default()).0,
+                    rung_tx: mpsc::unbounded_channel().0,
                 }
             };
             let params = params_of(6);
@@ -1596,7 +1596,7 @@ mod tests {
                 lookups: meshes::LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(lookup::RungDecision::default()).0,
+                rung_tx: mpsc::unbounded_channel().0,
             };
             // A beacon of another mesh holds the first rung: this member reads it as foreign and
             // binds the second.
@@ -1609,7 +1609,7 @@ mod tests {
                 lookups: meshes::LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(lookup::RungDecision::default()).0,
+                rung_tx: mpsc::unbounded_channel().0,
             };
             let other_endpoint = loopback_endpoint().await;
             let other_book = lookup::address_book(&other_endpoint);
@@ -2132,7 +2132,7 @@ mod tests {
                 lookups: LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(lookup::RungDecision::default()).0,
+                rung_tx: mpsc::unbounded_channel().0,
             };
 
             let endpoint = lookup::build_endpoint(
@@ -2238,7 +2238,7 @@ mod tests {
                 lookups: LookupOpts::loopback(),
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: watch::channel(lookup::RungDecision::default()).0,
+                rung_tx: mpsc::unbounded_channel().0,
             };
 
             let endpoint = lookup::build_endpoint(
@@ -2572,14 +2572,19 @@ mod tests {
             let mut state = testing::fresh_state();
             let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
             let retired = lookup::Generation::next();
-            let (_tx, rx) = watch::channel(lookup::RungDecision {
+            let decision = lookup::RungDecision {
                 from: Some(retired),
                 rung: Some(rung_of("first")),
                 change: lookup::RungChange::Rehome,
-            });
+            };
             let mut rendezvous = Some(beacon);
 
-            super::super::heal::apply_rung_change(&mut state, &mut params, &mut rendezvous, &rx);
+            super::super::heal::apply_rung_change(
+                &mut state,
+                &mut params,
+                &mut rendezvous,
+                decision,
+            );
 
             assert_eq!(
                 params.bootstrap_relay,
@@ -2609,18 +2614,18 @@ mod tests {
                 let endpoint = loopback_endpoint().await;
                 let beacon = beacon::Rendezvous::for_test(endpoint.clone(), None);
                 let from = from_monitor.then_some(beacon.generation);
-                let (_tx, rx) = watch::channel(lookup::RungDecision {
+                let decision = lookup::RungDecision {
                     from,
                     rung: Some(rung_of("first")),
                     change: lookup::RungChange::Rehome,
-                });
+                };
                 let mut rendezvous = Some(beacon);
 
                 super::super::heal::apply_rung_change(
                     &mut state,
                     &mut params,
                     &mut rendezvous,
-                    &rx,
+                    decision,
                 );
                 endpoint.close().await;
 
@@ -2634,6 +2639,130 @@ mod tests {
                     "the beacon is shed for a re-home (from the monitor: {from_monitor})"
                 );
             }
+        });
+    }
+
+    /// **A failover that follows a move in place is applied, whatever the loop read in between.**
+    ///
+    /// The beacon on rung 1 returns to rung 0 and connects, and its monitor publishes `Moved(0)`.
+    /// Rung 0 fails before the loop reads that, and the monitor publishes `Rehome(1)`. The loop
+    /// must see both, in order: the move sets the rung of the beacon to 0, and the failover to 1
+    /// then differs from it and sheds the beacon. A channel that keeps the last value only lost the
+    /// move, compared `Rehome(1)` with the rung 1 that was registered before, found no change, and
+    /// left the beacon on the failed rung 0 with no monitor to publish again.
+    #[test]
+    fn a_move_in_place_and_a_failover_that_the_loop_reads_together_shed_the_beacon() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rung_of = |host: &str| -> iroh::RelayUrl {
+                format!("https://{host}.example/")
+                    .parse()
+                    .expect("a test host forms a valid https URL")
+            };
+            let mut params = public_params();
+            params.bootstrap_relay = Some(rung_of("second"));
+            let mut state = testing::fresh_state();
+            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
+            let generation = beacon.generation;
+            let (tx, mut rx): (
+                mpsc::UnboundedSender<lookup::RungDecision>,
+                mpsc::UnboundedReceiver<lookup::RungDecision>,
+            ) = mpsc::unbounded_channel();
+            tx.send(lookup::RungDecision {
+                from: Some(generation),
+                rung: Some(rung_of("first")),
+                change: lookup::RungChange::Moved,
+            })
+            .expect("the receiver is alive");
+            tx.send(lookup::RungDecision {
+                from: Some(generation),
+                rung: Some(rung_of("second")),
+                change: lookup::RungChange::Rehome,
+            })
+            .expect("the receiver is alive");
+            let mut rendezvous = Some(beacon);
+
+            while let Ok(decision) = rx.try_recv() {
+                super::super::heal::apply_rung_change(
+                    &mut state,
+                    &mut params,
+                    &mut rendezvous,
+                    decision,
+                );
+            }
+
+            assert_eq!(
+                params.bootstrap_relay,
+                Some(rung_of("second")),
+                "the failover rung is the one of the next claim"
+            );
+            let shed = rendezvous.is_none();
+            if let Some(held) = rendezvous.take() {
+                held.shed_and_wait().await;
+            }
+            assert!(
+                shed,
+                "the beacon stayed on the failed rung 0: the failover was compared with a rung that the move had not set"
+            );
+        });
+    }
+
+    /// **The move in place of a retired monitor does not take the place of the failover that the
+    /// replacement published before it.**
+    ///
+    /// A beacon that is shed drops the stop of its monitor, which may still be in the await of its
+    /// move in place. The replacement beacon fails over and publishes `Rehome`, and the old monitor
+    /// then publishes its `Moved`. A channel that kept the last value only held the `Moved` of the
+    /// retired generation, which the loop ignores, and the `Rehome` was lost, with no monitor left
+    /// to publish it again. The loop reads both: it ignores the old one and applies the failover.
+    #[test]
+    fn a_retired_move_after_a_failover_does_not_hide_the_failover() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let rung_of = |host: &str| -> iroh::RelayUrl {
+                format!("https://{host}.example/")
+                    .parse()
+                    .expect("a test host forms a valid https URL")
+            };
+            let mut params = public_params();
+            params.bootstrap_relay = Some(rung_of("first"));
+            let mut state = testing::fresh_state();
+            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
+            let (tx, mut rx): (
+                mpsc::UnboundedSender<lookup::RungDecision>,
+                mpsc::UnboundedReceiver<lookup::RungDecision>,
+            ) = mpsc::unbounded_channel();
+            tx.send(lookup::RungDecision {
+                from: Some(beacon.generation),
+                rung: Some(rung_of("second")),
+                change: lookup::RungChange::Rehome,
+            })
+            .expect("the receiver is alive");
+            tx.send(lookup::RungDecision {
+                from: Some(lookup::Generation::next()),
+                rung: Some(rung_of("first")),
+                change: lookup::RungChange::Moved,
+            })
+            .expect("the receiver is alive");
+            let mut rendezvous = Some(beacon);
+
+            while let Ok(decision) = rx.try_recv() {
+                super::super::heal::apply_rung_change(
+                    &mut state,
+                    &mut params,
+                    &mut rendezvous,
+                    decision,
+                );
+            }
+
+            assert_eq!(
+                params.bootstrap_relay,
+                Some(rung_of("second")),
+                "the failover of the held beacon was lost behind the move of a retired one"
+            );
+            let shed = rendezvous.is_none();
+            if let Some(held) = rendezvous.take() {
+                held.shed_and_wait().await;
+            }
+            assert!(shed, "the beacon was not re-homed on the failover rung");
         });
     }
 
@@ -2658,14 +2787,19 @@ mod tests {
                 .rendezvous_flags
                 .insert(state::RendezvousFlag::ProbeReadFree);
             let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
-            let (_tx, rx) = watch::channel(lookup::RungDecision {
+            let decision = lookup::RungDecision {
                 from: Some(beacon.generation),
                 rung: Some(rung_of("first")),
                 change: lookup::RungChange::Moved,
-            });
+            };
             let mut rendezvous = Some(beacon);
 
-            super::super::heal::apply_rung_change(&mut state, &mut params, &mut rendezvous, &rx);
+            super::super::heal::apply_rung_change(
+                &mut state,
+                &mut params,
+                &mut rendezvous,
+                decision,
+            );
 
             assert_eq!(
                 params.bootstrap_relay,

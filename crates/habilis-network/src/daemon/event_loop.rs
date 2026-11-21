@@ -35,7 +35,7 @@ use std::time::Duration;
 use anyhow::Result;
 use iroh::{Endpoint, EndpointAddr, Watcher as _};
 use iroh_gossip::api::{ApiError, Event, GossipReceiver, GossipTopic};
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
@@ -845,7 +845,7 @@ struct EventLoop<Driver: NodeDriver> {
     rendezvous_params: beacon::RendezvousParams,
     /// Bootstrap rung chosen off-loop (startup probe + beacon
     /// self-monitor); the loop applies changes via the rung-update arm.
-    rung_rx: watch::Receiver<lookup::RungDecision>,
+    rung_rx: mpsc::UnboundedReceiver<lookup::RungDecision>,
     /// The startup probe behind `rung_rx`, released with the rendezvous.
     rung_probe: Option<lookup::StoppableTask>,
     /// The closes of the endpoints that read the busy rungs at setup.
@@ -919,7 +919,7 @@ struct Loop<'node, Driver: NodeDriver> {
     rendezvous: Option<beacon::Rendezvous>,
     rival_probe: Option<beacon::RivalProbe>,
     rendezvous_params: beacon::RendezvousParams,
-    rung_rx: watch::Receiver<lookup::RungDecision>,
+    rung_rx: mpsc::UnboundedReceiver<lookup::RungDecision>,
     rung_probe: Option<lookup::StoppableTask>,
     prober_closes: Vec<oneshot::Receiver<()>>,
     rung_reports: mpsc::UnboundedReceiver<beacon::RungReport>,
@@ -1309,13 +1309,13 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     /// A bootstrap rung chosen off-loop (startup probe / beacon self-monitor); apply it cheaply.
-    fn rung_change(&mut self) {
+    fn rung_change(&mut self, decision: lookup::RungDecision) {
         self.state.idle.ext.rung_change += 1;
         apply_rung_change(
             &mut self.state,
             &mut self.rendezvous_params,
             &mut self.rendezvous,
-            &self.rung_rx,
+            decision,
         );
     }
 
@@ -1765,7 +1765,7 @@ async fn run_loop<Driver: NodeDriver>(
             },
             _ = lp.intervals.heal.tick() => { lp.heal().await?; },
             _ = lp.intervals.digest_round.tick() => { lp.digest_round().await; },
-            Ok(()) = lp.rung_rx.changed() => { lp.rung_change(); },
+            Some(decision) = lp.rung_rx.recv() => { lp.rung_change(decision); },
             found_rival = beacon::probe_verdict(&mut lp.rival_probe) => { lp.probe_verdict(found_rival).await; },
             Some(report) = lp.rung_reports.recv() => { lp.rung_report(report).await; },
             () = closed_opt(&mut lp.state.beacon_closing) => { lp.beacon_closed().await; },

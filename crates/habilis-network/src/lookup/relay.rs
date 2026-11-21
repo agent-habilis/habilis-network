@@ -32,7 +32,7 @@ use futures_util::stream::FuturesUnordered;
 use iroh::defaults::DEFAULT_RELAY_QUIC_PORT;
 use iroh::endpoint::{RelayStatus, presets};
 use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl, Watcher};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 pub use default_rung::DefaultRung;
 pub(crate) use rung_decision::{Generation, RungChange, RungDecision};
@@ -299,7 +299,7 @@ enum Mover<'tx> {
     /// either rung until the old one is gone. A walk after the rung failed publishes the rung. The
     /// event loop sheds the beacon and claims a new one on it, with a new follower, so this one
     /// ends.
-    Publish(&'tx watch::Sender<RungDecision>, Generation),
+    Publish(&'tx mpsc::UnboundedSender<RungDecision>, Generation),
 }
 
 /// Why a follower moves.
@@ -1002,7 +1002,7 @@ fn next_relay_backoff(current: Duration) -> Duration {
 pub(crate) fn spawn_relay_monitor(
     endpoint: Endpoint,
     ladder: Vec<RelayUrl>,
-    rung_tx: watch::Sender<RungDecision>,
+    rung_tx: mpsc::UnboundedSender<RungDecision>,
     home: Option<RelayUrl>,
     generation: Generation,
 ) -> StoppableTask {
@@ -1033,7 +1033,7 @@ pub(crate) fn spawn_relay_monitor(
 /// nested in its spawned future.
 async fn monitor_relay_less(
     ladder: &[RelayUrl],
-    rung_tx: &watch::Sender<RungDecision>,
+    rung_tx: &mpsc::UnboundedSender<RungDecision>,
     generation: Generation,
     probe: Duration,
     stop: &watch::Receiver<()>,
@@ -1082,7 +1082,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::net::{TcpListener as AsyncListener, TcpStream};
-    use tokio::sync::watch;
+    use tokio::sync::{mpsc, watch};
     use tokio::task::JoinHandle;
 
     use crate::beacon::{Rendezvous, RendezvousParams};
@@ -1691,7 +1691,11 @@ mod tests {
                 }
             }
         });
-        let (rung_tx, mut rung_rx) = watch::channel(RungDecision::at_startup(Some(second.clone())));
+        let (rung_tx, mut rung_rx): (
+            mpsc::UnboundedSender<RungDecision>,
+            mpsc::UnboundedReceiver<RungDecision>,
+        ) = mpsc::unbounded_channel();
+        let mut published: Option<RungDecision> = None;
         let (_stop, stopped) = watch::channel(());
         let hold = std_Duration::from_secs(3);
         let ladder = [first.clone(), second.clone()];
@@ -1709,12 +1713,15 @@ mod tests {
         let moved = time::timeout(std_Duration::from_secs(30), async {
             tokio::select! {
                 () = &mut following => false,
-                changed = rung_rx.changed() => changed.is_ok(),
+                decided = rung_rx.recv() => {
+                    published = decided;
+                    published.is_some()
+                }
             }
         })
         .await;
         let took = started.elapsed();
-        let decision = rung_rx.borrow().clone();
+        let decision: RungDecision = published.unwrap_or_default();
         // The old relay stays the home until iroh moves the home: the connection to it is up all
         // the time.
         let home_moved =
@@ -1798,7 +1805,7 @@ mod tests {
             lookups: LookupOpts::loopback(),
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: Some(home.clone()),
-            rung_tx: watch::channel(RungDecision::default()).0,
+            rung_tx: mpsc::unbounded_channel().0,
         }
     }
 
@@ -1898,16 +1905,18 @@ mod tests {
             let beacon_held = Rendezvous::for_test(beacon.clone(), None);
             let generation = beacon_held.generation;
             let mut rendezvous = Some(beacon_held);
-            let (rung_tx, mut rung_rx) =
-                watch::channel(RungDecision::at_startup(Some(second.clone())));
+            let (rung_tx, mut rung_rx): (
+                mpsc::UnboundedSender<RungDecision>,
+                mpsc::UnboundedReceiver<RungDecision>,
+            ) = mpsc::unbounded_channel();
             let (_stop, stopped) = watch::channel(());
             let ladder = [first.clone(), second.clone()];
             let decided_at: cell::Cell<Option<time::Instant>> = cell::Cell::new(None);
 
             let applying = async {
-                while rung_rx.changed().await.is_ok() {
+                while let Some(decision) = rung_rx.recv().await {
                     decided_at.set(Some(time::Instant::now()));
-                    daemon::apply_rung_change(&mut state, &mut params, &mut rendezvous, &rung_rx);
+                    daemon::apply_rung_change(&mut state, &mut params, &mut rendezvous, decision);
                 }
             };
             let following = async {
@@ -2161,7 +2170,10 @@ mod tests {
                 vec![first.clone()],
                 "the first home relay"
             );
-            let (rung_tx, rung_rx) = watch::channel(RungDecision::at_startup(Some(first.clone())));
+            let (rung_tx, mut rung_rx): (
+                mpsc::UnboundedSender<RungDecision>,
+                mpsc::UnboundedReceiver<RungDecision>,
+            ) = mpsc::unbounded_channel();
             let (_stop, stopped) = watch::channel(());
             let ladder = [first.clone(), second.clone()];
 
@@ -2184,8 +2196,9 @@ mod tests {
                 published.is_ok(),
                 "the beacon stayed on its dead rung for 60 s"
             );
+            let decision: Option<RungDecision> = rung_rx.try_recv().ok();
             assert_eq!(
-                rung_rx.borrow().rung,
+                decision.and_then(|decision| decision.rung),
                 Some(second),
                 "the beacon moves to rung 1"
             );
@@ -2388,8 +2401,10 @@ mod tests {
                 vec![first.clone()],
                 "the first home relay"
             );
-            let (rung_tx, mut rung_rx) =
-                watch::channel(RungDecision::at_startup(Some(first.clone())));
+            let (rung_tx, mut rung_rx): (
+                mpsc::UnboundedSender<RungDecision>,
+                mpsc::UnboundedReceiver<RungDecision>,
+            ) = mpsc::unbounded_channel();
             let (_stop, stopped) = watch::channel(());
             let ladder = [first.clone(), second.clone()];
 
@@ -2414,8 +2429,9 @@ mod tests {
                     false
                 }
             };
-            let published_early = rung_rx.has_changed().unwrap_or(false);
-            let held = rung_rx.borrow_and_update().clone();
+            let early: Option<RungDecision> = rung_rx.try_recv().ok();
+            let published_early = early.is_some();
+            let held: RungDecision = early.unwrap_or_default();
             second_refuses.store(false, Ordering::SeqCst);
             let later = if ended_early {
                 false
@@ -2432,8 +2448,9 @@ mod tests {
                 "the beacon published {held:?} in the outage"
             );
             assert!(later, "the beacon never left its dead rung");
+            let decision: Option<RungDecision> = rung_rx.try_recv().ok();
             assert_eq!(
-                rung_rx.borrow().rung,
+                decision.and_then(|decision| decision.rung),
                 Some(second),
                 "the beacon publishes the rung that came back"
             );

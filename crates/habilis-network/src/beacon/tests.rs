@@ -10,7 +10,7 @@ use super::{
 use crate::util::clock::Instant;
 use iroh::SecretKey;
 use iroh_gossip::proto::TopicId;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::oneshot;
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::beacon;
@@ -961,7 +961,7 @@ fn public_params() -> RendezvousParams {
         lookups: LookupOpts::loopback(),
         relay_transport: PayloadPath::DirectOnly,
         bootstrap_relay: None,
-        rung_tx: watch::channel(lookup::RungDecision::default()).0,
+        rung_tx: mpsc::unbounded_channel().0,
     }
 }
 
@@ -1166,7 +1166,7 @@ fn shed_and_wait_mid_rewalk_closes_the_monitor_probe_endpoint() {
         let monitor = lookup::spawn_relay_monitor(
             endpoint.clone(),
             vec![rung],
-            watch::channel(lookup::RungDecision::default()).0,
+            mpsc::unbounded_channel().0,
             None,
             lookup::Generation::next(),
         );

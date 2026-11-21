@@ -14,8 +14,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use tokio::sync::watch;
-
 use super::event_loop::tick_gap::TickGap;
 use super::handler_ctx::HandlerCtx;
 use super::setup;
@@ -290,9 +288,8 @@ pub(crate) fn apply_rung_change(
     state: &mut EventLoopState,
     params: &mut beacon::RendezvousParams,
     rendezvous: &mut Option<beacon::Rendezvous>,
-    rung_rx: &watch::Receiver<lookup::RungDecision>,
+    decision: lookup::RungDecision,
 ) {
-    let decision = rung_rx.borrow().clone();
     if let Some(from) = decision.from
         && rendezvous.as_ref().map(|held| held.generation) != Some(from)
     {
@@ -373,7 +370,6 @@ mod tests {
     #[cfg(feature = "host")]
     use crate::gossip::split;
     #[cfg(feature = "host")]
-    use crate::lookup;
     #[cfg(feature = "host")]
     use crate::membership;
     #[cfg(feature = "host")]
@@ -393,7 +389,6 @@ mod tests {
     #[cfg(feature = "host")]
     use tokio::sync::mpsc;
     #[cfg(feature = "host")]
-    use tokio::sync::watch;
     /// The test binary runs the test below again, in a process of its own, with this variable set.
     #[cfg(feature = "host")]
     const FATAL_CHILD: &str = "HABILIS_TEST_FATAL_RESUBSCRIBE_CHILD";
@@ -436,7 +431,7 @@ mod tests {
                     lookups: meshes::LookupOpts::loopback(),
                     relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
-                    rung_tx: watch::channel(lookup::RungDecision::default()).0,
+                    rung_tx: mpsc::unbounded_channel().0,
                 };
                 let parts = CtxParts {
                     endpoint: &node.endpoint,
