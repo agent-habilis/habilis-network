@@ -129,6 +129,25 @@ impl InjectedEndpoint {
             mdns,
         })
     }
+
+    /// The bound endpoint, for the caller's own protocol.
+    ///
+    /// An application that shares its identity with a mesh dials and accepts on
+    /// this endpoint before the mesh is set up: agent-share fetches the manifest
+    /// of a share on it while the mesh join runs. The getter does not weaken the
+    /// rule of [`InjectedEndpoint::bind`]: the transports and the connection hook
+    /// are installed before the bind, and a bound `Endpoint` takes neither.
+    #[must_use]
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+
+    /// The `WebRTC` handle that the endpoint was bound with, for the caller's own
+    /// signaling path (the JSEP offer and answer of a data channel).
+    #[must_use]
+    pub fn webrtc(&self) -> &habilis_network_iroh_webrtc_transport::WebRtcHandle {
+        &self.webrtc
+    }
 }
 
 impl InjectedEndpoint {
