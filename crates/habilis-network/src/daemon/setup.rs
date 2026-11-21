@@ -1537,9 +1537,10 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     let transports = member_transports(&lookups, transports, &mesh_config.transport)?;
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the
-    // event loop applies it (re-register + re-home) without ever running
-    // a ladder walk on the sole loop. Initialized to the optimistic
-    // rung 0 (empty ladder ⇒ `None`).
+    // event loop applies each decision, in the order that they were sent (re-register + re-home),
+    // without ever running a ladder walk on the sole loop. The channel has no initial value: the
+    // setup homes on the optimistic rung 0 (empty ladder ⇒ `None`), and the probe sends a decision
+    // only when its verdict is another rung.
     let ladder: Vec<_> = relay_ladder(&lookups.relay_lookup).collect();
     let (rung_tx, rung_rx) = mpsc::unbounded_channel();
     let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);

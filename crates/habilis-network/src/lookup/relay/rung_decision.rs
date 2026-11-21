@@ -43,8 +43,9 @@ pub(crate) struct RungDecision {
 }
 
 impl RungDecision {
-    /// The rung that the probe at startup picked, or the first rung of the ladder before the probe
-    /// has answered.
+    /// The rung that the probe at startup picked. The probe sends it only when it is not the
+    /// first rung of the ladder, the rung that the setup homes on; no decision is sent before the
+    /// probe has answered.
     pub(crate) fn at_startup(rung: Option<RelayUrl>) -> Self {
         Self {
             from: None,

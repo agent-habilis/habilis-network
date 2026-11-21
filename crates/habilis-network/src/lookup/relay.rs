@@ -486,6 +486,8 @@ impl Mover<'_> {
             (Self::Publish(rung_tx, generation), MoveKind::Lower) => {
                 tracing::info!(target: "habilis_network::lookup", from = %rung, to = %next, kind = kind_name, "beacon moves to a lower relay rung in place");
                 move_relay_in_place(endpoint, rung, &next).await;
+                // No stop check after the move: if a shed stopped this monitor during it, the
+                // generation of the decision is retired, and the loop ignores it.
                 let _ = rung_tx.send(RungDecision {
                     from: Some(generation),
                     rung: Some(next.clone()),
