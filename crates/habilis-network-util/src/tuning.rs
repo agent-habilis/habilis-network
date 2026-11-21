@@ -241,7 +241,7 @@ pub fn cohost_grace() -> Duration {
 /// ```
 #[must_use]
 pub fn relay_liveness_interval() -> Duration {
-    current().relay_liveness_interval
+    relay_times(&current()).liveness_interval
 }
 
 /// The live value of how often a member on a later rung probes the rungs below it, after any override in the process tuning.
@@ -258,7 +258,7 @@ pub fn relay_liveness_interval() -> Duration {
 /// ```
 #[must_use]
 pub fn relay_return_probe_interval() -> Duration {
-    current().relay_return_probe_interval
+    relay_times(&current()).return_probe_interval
 }
 
 /// The live value of how long a lower rung must answer before a member returns to it, after any override in the process tuning.
@@ -275,7 +275,7 @@ pub fn relay_return_probe_interval() -> Duration {
 /// ```
 #[must_use]
 pub fn relay_return_hold() -> Duration {
-    current().relay_return_hold
+    relay_times(&current()).return_hold
 }
 
 /// The live value of the longest wait between two probe rounds that found no lower rung, after any override in the process tuning.
@@ -292,7 +292,7 @@ pub fn relay_return_hold() -> Duration {
 /// ```
 #[must_use]
 pub fn relay_reprobe_backoff_max() -> Duration {
-    current().relay_reprobe_backoff_max
+    relay_times(&current()).reprobe_backoff_max
 }
 
 /// The live value of how long a move in place waits for the new relay to become the home, after any override in the process tuning.
@@ -309,7 +309,7 @@ pub fn relay_reprobe_backoff_max() -> Duration {
 /// ```
 #[must_use]
 pub fn relay_home_settle() -> Duration {
-    current().relay_home_settle
+    relay_times(&current()).home_settle
 }
 
 /// How long a ping round collects pongs before the daemon
@@ -611,6 +611,31 @@ pub fn init(tuning: Tuning) {
 
 fn current() -> Tuning {
     TUNING.get().copied().unwrap_or(Tuning::DEFAULTS)
+}
+
+/// The 5 times of the relay rung follower, as the getters read them.
+struct RelayTimes {
+    liveness_interval: Duration,
+    return_probe_interval: Duration,
+    return_hold: Duration,
+    reprobe_backoff_max: Duration,
+    home_settle: Duration,
+}
+
+/// The times as the getters read them. The builders and the public fields take any `Duration`,
+/// so the getters are the boundary: each time has a floor of 1 ms, and the cap of the backoff is at
+/// least the base interval, or an empty round would cut the wait and an outage would probe more
+/// often, not less. A positive override passes through.
+fn relay_times(tuning: &Tuning) -> RelayTimes {
+    let floor = Duration::from_millis(1);
+    let return_probe_interval = tuning.relay_return_probe_interval.max(floor);
+    RelayTimes {
+        liveness_interval: tuning.relay_liveness_interval.max(floor),
+        return_probe_interval,
+        return_hold: tuning.relay_return_hold.max(floor),
+        reprobe_backoff_max: tuning.relay_reprobe_backoff_max.max(return_probe_interval),
+        home_settle: tuning.relay_home_settle.max(floor),
+    }
 }
 
 /// How often the daemon re-asserts `peer_count` +
@@ -1423,3 +1448,81 @@ pub const DIGEST_SETTLE_JITTER: Duration = Duration::from_millis(500);
 
 /// How often the digest round checks its differences and sends its page requests, so a settle that ends is acted on at once.
 pub const DIGEST_ROUND_TICK: Duration = Duration::from_millis(250);
+
+#[cfg(test)]
+mod relay_times_tests {
+    use std::time::Duration;
+
+    use super::{Tuning, relay_times};
+
+    /// The getters say that each time is positive, and the builders and the public fields accept
+    /// `Duration::ZERO`. A zero liveness interval reads with no delay, and a zero return hold lets
+    /// the first successful round qualify, so the getters hold a floor of 1 ms.
+    #[test]
+    fn a_zero_relay_time_reads_as_the_floor() {
+        let mut zero: Tuning = Tuning::default();
+        zero = zero.relay_liveness_interval(Duration::ZERO);
+        zero = zero.relay_return_probe_interval(Duration::ZERO);
+        zero = zero.relay_return_hold(Duration::ZERO);
+        zero = zero.relay_reprobe_backoff_max(Duration::ZERO);
+        zero = zero.relay_home_settle(Duration::ZERO);
+
+        let times = relay_times(&zero);
+
+        let floor = Duration::from_millis(1);
+        assert_eq!(times.liveness_interval, floor, "the liveness interval");
+        assert_eq!(
+            times.return_probe_interval, floor,
+            "the return probe interval"
+        );
+        assert_eq!(times.return_hold, floor, "the return hold");
+        assert_eq!(times.reprobe_backoff_max, floor, "the backoff cap");
+        assert_eq!(times.home_settle, floor, "the home settle");
+    }
+
+    /// A cap below the base interval would make an empty round cut the wait: an outage would
+    /// probe more often, not less. The cap is at least the base interval.
+    #[test]
+    fn the_backoff_cap_is_at_least_the_return_probe_interval() {
+        let mut tuning: Tuning = Tuning::default();
+        tuning = tuning.relay_return_probe_interval(Duration::from_mins(1));
+        tuning = tuning.relay_reprobe_backoff_max(Duration::from_secs(1));
+
+        let times = relay_times(&tuning);
+
+        assert_eq!(
+            times.reprobe_backoff_max,
+            Duration::from_mins(1),
+            "a cap below the base interval is raised to it"
+        );
+    }
+
+    /// The defaults and any positive override pass through: the progression from 1 minute to 5
+    /// minutes stays.
+    #[test]
+    fn a_positive_relay_time_is_kept() {
+        let times = relay_times(&Tuning::default());
+
+        let defaults = Tuning::default();
+        assert_eq!(
+            times.liveness_interval, defaults.relay_liveness_interval,
+            "the liveness interval of the defaults"
+        );
+        assert_eq!(
+            times.return_probe_interval, defaults.relay_return_probe_interval,
+            "the return probe interval of the defaults"
+        );
+        assert_eq!(
+            times.return_hold, defaults.relay_return_hold,
+            "the return hold of the defaults"
+        );
+        assert_eq!(
+            times.reprobe_backoff_max, defaults.relay_reprobe_backoff_max,
+            "the backoff cap of the defaults"
+        );
+        assert_eq!(
+            times.home_settle, defaults.relay_home_settle,
+            "the home settle of the defaults"
+        );
+    }
+}
