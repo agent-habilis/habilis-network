@@ -324,13 +324,22 @@ impl Forwarder {
             return;
         }
         let key = hop.underlay_id;
-        // First attempt on any existing writer.
-        if let Some(sender) = self.writer_for(key)
-            && sender.try_send(cell.clone()).is_ok()
-        {
-            return;
-        }
-        // Stale or absent: (re)spawn a writer, then try once more.
+        // First attempt on any existing writer. A full queue is a live writer, so the cell is
+        // dropped there: a second writer would leave the first as a task and a dial that
+        // `MAX_WRITERS` does not count.
+        let cell = match self.writer_for(key) {
+            None => cell,
+            Some(sender) => match sender.try_send(cell) {
+                Ok(()) => return,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    self.pool.release(cost);
+                    self.note_drop("next-hop queue is full");
+                    return;
+                }
+                Err(mpsc::error::TrySendError::Closed(cell)) => cell,
+            },
+        };
+        // Dead or absent: (re)spawn a writer, then try once more.
         let Some(sender) = self.spawn_writer(hop) else {
             self.pool.release(cost);
             return;

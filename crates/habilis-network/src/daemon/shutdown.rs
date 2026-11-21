@@ -4,8 +4,7 @@
 //! once, on the way out, and it was the largest block of the file that never
 //! touched a tick.
 
-use std::mem;
-#[cfg(feature = "host")]
+#[cfg(all(feature = "host", not(unix)))]
 use tokio::signal;
 
 mod owned_endpoints;
@@ -15,8 +14,11 @@ mod owner;
 mod owner_pid_error;
 mod quit_params;
 
+#[cfg(feature = "host")]
+use std::io;
 use std::time::Duration;
 
+#[cfg(feature = "host")]
 use tokio::sync::mpsc;
 
 use crate::{gossip, lifecycle};
@@ -123,28 +125,37 @@ pub(super) async fn announce_departure<Driver: NodeDriver>(
 /// daemon for a `/gossip-*` session) tends to send; without catching it
 /// the default action terminated the daemon without cleanup, stranding a
 /// ghost pill on the statusline. Only SIGKILL stays uncatchable.
+///
+/// On unix each handler is registered before this returns, so no signal after it has the default
+/// action, and a handler that cannot be registered is an error of the start.
 #[cfg(feature = "host")]
 pub(super) fn spawn_quit_signal_tasks(
     exit_on_quit: bool,
     owner: Option<Owner>,
-) -> mpsc::Receiver<()> {
+) -> io::Result<mpsc::Receiver<()>> {
     let (quit_tx, quit_rx): (mpsc::Sender<()>, mpsc::Receiver<()>) = mpsc::channel(1);
-    let ctrl_c_tx = quit_tx.clone();
-    tokio::spawn(async move {
-        let _ = signal::ctrl_c().await;
-        let _ = ctrl_c_tx.send(()).await;
-    });
     #[cfg(unix)]
     for kind in [
+        unix::SignalKind::interrupt(),
         unix::SignalKind::terminate(),
         unix::SignalKind::hangup(),
         unix::SignalKind::quit(),
     ] {
+        let mut signal = unix::signal(kind)?;
         let signal_tx = quit_tx.clone();
         tokio::spawn(async move {
-            let mut signal = unix::signal(kind).expect("failed to register termination handler");
             signal.recv().await;
             let _ = signal_tx.send(()).await;
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let ctrl_c_tx = quit_tx.clone();
+        tokio::spawn(async move {
+            // A handler that cannot be registered is no ctrl-c: it must not end the daemon.
+            if signal::ctrl_c().await.is_ok() {
+                let _ = ctrl_c_tx.send(()).await;
+            }
         });
     }
     // Only the CLI daemon owns a process to exit; the in-process driver runs
@@ -154,7 +165,7 @@ pub(super) fn spawn_quit_signal_tasks(
     if exit_on_quit {
         spawn_orphan_watch(quit_tx, owner);
     }
-    quit_rx
+    Ok(quit_rx)
 }
 /// Whether `pid` can own a daemon, with the checks and messages of
 /// `EventLoopConfig::owner_pid`. For a launcher that must refuse a bad
@@ -258,13 +269,6 @@ pub(super) fn orphan_watch_warranted(original_ppid: i32) -> bool {
 #[cfg(all(unix, feature = "host"))]
 pub(super) fn parent_lost(original_ppid: i32, current_ppid: i32) -> bool {
     original_ppid != current_ppid
-}
-/// A quit channel whose sender is deliberately leaked, so the receiver parks
-/// forever. The loop's quit arm then only ever fires from `external_quit_rx`.
-pub(super) fn never_quit() -> mpsc::Receiver<()> {
-    let (quit_tx, quit_rx): (mpsc::Sender<()>, mpsc::Receiver<()>) = mpsc::channel(1);
-    mem::forget(quit_tx);
-    quit_rx
 }
 
 #[cfg(all(unix, feature = "host"))]
@@ -460,6 +464,46 @@ mod tests {
             !orphan_watch_warranted(1),
             "a detached daemon under init does not warrant the orphan watch"
         );
+    }
+
+    /// The test binary runs this test again, in a process of its own, with this variable set.
+    const SIGNAL_CHILD: &str = "HABILIS_TEST_SIGNAL_CHILD";
+
+    /// A termination signal that arrives right after the quit channel exists reaches the channel.
+    /// A handler that a task registers later leaves a window in which the signal has its default
+    /// action and ends the daemon with no cleanup. The check runs in a child process, because
+    /// the default action ends the process.
+    #[test]
+    fn a_signal_right_after_the_start_reaches_the_quit_channel() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use rustix::process as os_process;
+
+            if env::var_os(SIGNAL_CHILD).is_some() {
+                let mut quit_rx =
+                    super::spawn_quit_signal_tasks(false, None).expect("the handlers register");
+                // No await before the signal: no spawned task has run yet.
+                os_process::kill_process(os_process::getpid(), os_process::Signal::TERM)
+                    .expect("the process can signal itself");
+                let quit = time::timeout(Duration::from_secs(5), quit_rx.recv()).await;
+                println!("QUIT_SIGNAL received={}", quit.is_ok());
+                return;
+            }
+            let mut command = Command::new(env::current_exe().expect("the test binary"));
+            command
+                .args([
+                    "--exact",
+                    "daemon::shutdown::tests::a_signal_right_after_the_start_reaches_the_quit_channel",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(SIGNAL_CHILD, "1");
+            let output = command.output().expect("run the test binary");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("QUIT_SIGNAL received=true"),
+                "the signal ended the process, or it did not reach the quit channel: {stdout}"
+            );
+        });
     }
 
     /// The test binary runs this test again, in a process of its own, with this variable set.

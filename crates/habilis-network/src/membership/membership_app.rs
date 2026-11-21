@@ -895,7 +895,8 @@ fn reply_text(error: &impl fmt::Display) -> String {
 
 impl MembershipApp {
     /// Send one `msg` frame to `to` (a broadcast for `None`) and answer `reply` with the outcome.
-    /// Returns `true`: a frame that went out is a live frame.
+    /// Returns `true` only for a broadcast that went out: a refused send puts no frame on the mesh,
+    /// and a directed frame tells one peer only that this node is alive.
     async fn send_msg(
         &mut self,
         state: &mut EventLoopState,
@@ -922,9 +923,11 @@ impl MembershipApp {
                 return false;
             }
         };
+        let broadcast = to.is_none();
         match send_app(state, context, frame).await {
             Ok(Delivered::Done) => {
                 let _ = reply.send(Ok(()));
+                broadcast
             }
             Ok(Delivered::Pending(handle)) => {
                 // The dial runs on a task, and so does the wait for its outcome: the loop
@@ -935,12 +938,13 @@ impl MembershipApp {
                     });
                     let _ = reply.send(outcome.map_err(|error| reply_text(&error)));
                 });
+                false
             }
             Err(error) => {
                 let _ = reply.send(Err(reply_text(&error)));
+                false
             }
         }
-        true
     }
 
     async fn handle_messaging(
@@ -1984,6 +1988,39 @@ mod tests {
             assert!(
                 !live,
                 "a state merge is a durable write and does not refresh the keepalive clock"
+            );
+            node.endpoint.close().await;
+        });
+    }
+
+    /// A send that the engine refuses puts no frame on the mesh, and a directed send goes to one
+    /// peer only. Neither tells the other peers that this node is alive, so neither holds back
+    /// the `alive`.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_refused_send_does_not_report_a_live_broadcast() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let node = LaneNode::start().await;
+            let context = node.context();
+            let mut state = node.state();
+            let (inbound, _queue) = mpsc::channel(1);
+            let mut app = MembershipApp::new(inbound);
+            let (reply, answer) = oneshot::channel();
+            let request = Request::Messaging(Messaging::SendToKey {
+                to: test_key("nobody#holds-this-key"),
+                body: MessageBody::from("hi"),
+                reply,
+            });
+
+            let live = app.handle_session(request, &mut state, &context).await;
+
+            assert!(
+                answer.await.expect("the request is answered").is_err(),
+                "a send to a key that nobody holds is refused"
+            );
+            assert!(
+                !live,
+                "a refused send broadcast nothing and does not refresh the keepalive clock"
             );
             node.endpoint.close().await;
         });

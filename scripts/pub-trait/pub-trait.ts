@@ -24,9 +24,12 @@ function listFiles(): string[] {
 // A trait is justified when some crate file uses it as a generic bound, a dyn object, an impl
 // bound or a supertrait. A trait that nothing uses that way is code organization, and is counted.
 function usedAsBound(name: string, texts: string[]): boolean {
+  // Generic arguments nested 3 levels deep at most, such as `<Vec<Option<u8>>>`.
+  const args = "<(?:[^<>\\n]|<(?:[^<>\\n]|<[^<>\\n]*>)*>)*>";
   const uses = [
     new RegExp(`\\bdyn\\s+${name}\\b`),
-    new RegExp(`\\bimpl\\s+(?:[^{;=]*\\+\\s*)?${name}\\b`),
+    // An `impl Name for Type` block is no bound, so it does not count.
+    new RegExp(`\\bimpl\\s+(?:[^{;=]*\\+\\s*)?${name}\\b(?!\\s*(?:${args})?\\s+for\\b)`),
     new RegExp(`<[^>\\n]*\\b\\w+\\s*:\\s*[^>\\n]*\\b${name}\\b`),
     new RegExp(`\\bwhere\\b[^{;]*\\b\\w+\\s*:\\s*[^{;]*\\b${name}\\b`),
     new RegExp(`\\bpub trait\\s+\\w+\\s*:\\s*[^{]*\\b${name}\\b`),

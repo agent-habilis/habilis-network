@@ -16,7 +16,10 @@ use crate::daemon::state::{EventLoopState, PingRound};
 use crate::doc::wire;
 use crate::gossip::app::{AppFrameError, NodeApp};
 use crate::gossip::event::{NodeEvent, NodeSink};
-use crate::protocol::messages::{AppFrameParams, Verified, WireFrame, sole_addressee};
+use crate::gossip::json_body;
+use crate::protocol::messages::{
+    AppFrameParams, MessageError, Verified, WireFrame, sole_addressee,
+};
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 use habilis_network_doc::{ChunkPointer, SliceError};
@@ -87,31 +90,31 @@ pub async fn send_app(
     context: &HandlerCtx<'_>,
     frame: Verified,
 ) -> Result<transport::Delivered, transport::SendError> {
-    if frame.wire_len() > MAX_MESSAGE_SIZE {
-        return Err(transport::SendError::Oversize(format!(
-            "app frame too large: {} bytes exceeds the {MAX_MESSAGE_SIZE}-byte single-frame limit",
-            frame.wire_len()
-        )));
-    }
+    let bytes = frame.serialize().map_err(|error| {
+        if let MessageError::Oversize { bytes } = error {
+            transport::SendError::Oversize(format!(
+                "app frame too large: {bytes} bytes exceeds the {MAX_MESSAGE_SIZE}-byte single-frame limit"
+            ))
+        } else {
+            transport::SendError::Internal(error.into())
+        }
+    })?;
     // A key that nobody holds can never be delivered to, so the caller hears that now, meshed or
     // not: the later "no known endpoint" cause would tell it to wait for a `PeerInfo`.
-    if let Some(key) = sole_addressee(&frame.kind)
+    let addressee = sole_addressee(&frame.kind);
+    if let Some(key) = addressee
         && !state.knows_key(key)
     {
         return Err(transport::SendError::Undeliverable(format!(
             "directed message to {key} undeliverable: no roster, quiet set or known address holds this key"
         )));
     }
-    let bytes = frame
-        .serialize()
-        .map_err(|error| transport::SendError::Internal(error.into()))?;
     messages::log_out(&frame);
     // A directed frame rides the unicast connection, never the gossip overlay, so it needs no
     // link to a real peer: the pool dials the addressee, and the live path of the connection
     // decides whether the payload may go out (`payload_allowed_on`). Only a broadcast waits for
     // the overlay.
-    let directed = sole_addressee(&frame.kind).is_some();
-    if directed || state.standing.contains(&Standing::Meshed) {
+    if addressee.is_some() || state.standing.contains(&Standing::Meshed) {
         // Directed vs. broadcast is decided inside `deliver` from the frame's
         // `to` — the same routing the application's send path rides. A directed
         // frame with no path comes back as an error for the caller to act on.
@@ -812,10 +815,9 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, context: &Ha
             .contains(&RendezvousFlag::HostsRendezvous),
         &seal,
     );
-    let addr_data = serde_json::to_string(&addr_json)
-        .expect("endpoint_addr_to_json produces a Value that always serializes");
-    let addr_body =
-        MessageBody::try_new(&addr_data).expect("endpoint address JSON has no control characters");
+    let Some(addr_body) = json_body(&addr_json) else {
+        return;
+    };
     broadcast_msg(
         context.sender,
         &Message::new_peer_info(context.mesh, context.author, addr_body).sign(context.identity),

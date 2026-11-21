@@ -5,6 +5,7 @@ use iroh::{Endpoint, EndpointId};
 use n0_future::task::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::util::clock;
 use crate::util::clock::Instant;
 use crate::util::tuning::RENDEZVOUS_CLOSE;
 
@@ -142,7 +143,7 @@ impl Rendezvous {
             endpoint.close().await;
             tracing::debug!(
                 target: "habilis_network::beacon",
-                age_ms = u64::try_from(shed_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                age_ms = clock::millis_saturating(shed_at.elapsed()),
                 "beacon closed"
             );
             // The last handle of the endpoint goes before the event does, so that whoever waits sees

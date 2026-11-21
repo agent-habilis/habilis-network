@@ -498,12 +498,7 @@ impl UnicastPool {
     /// The pooled connection to `eid`, if one is open. Taking it counts as
     /// using it: every caller is about to send or probe on it.
     pub(in crate::transport::pool) async fn warm(&self, eid: EndpointId) -> Option<Connection> {
-        let mut conns = self.inner.conns.lock().await;
-        let slot = conns.get_mut(&eid);
-        let pooled = slot.filter(|pooled| pooled.connection.close_reason().is_none())?;
-        pooled.last_used = PoolInstant::now();
-        pooled.hold = Hold::Used;
-        Some(pooled.connection.clone())
+        self.open_pooled(eid, Hold::Used).await
     }
 
     /// Drop the pooled connection of `eid`, but only if it is still `connection`. A write that
@@ -845,14 +840,7 @@ impl UnicastPool {
         if self.inner.endpoint.is_none() {
             bail!("unicast pool has no endpoint");
         }
-        let existing: Option<Connection> = {
-            let conns = self.inner.conns.lock().await;
-            let pooled = conns.get(&eid).map(|pooled| &pooled.connection);
-            pooled
-                .filter(|connection| connection.close_reason().is_none())
-                .cloned()
-        };
-        if let Some(connection) = existing {
+        if let Some(connection) = self.open_pooled(eid, Hold::Probing).await {
             return Ok(connection);
         }
         if self
@@ -934,13 +922,7 @@ impl UnicastPool {
         let Some(endpoint) = self.inner.endpoint.clone() else {
             bail!("unicast pool has no endpoint");
         };
-        if self
-            .inner
-            .dial_failures
-            .lock()
-            .await
-            .on_cooldown(&eid, Instant::now())
-        {
+        if self.is_cooling(eid).await {
             bail!("{COOLDOWN_REFUSED}");
         }
         let pinned = planned.as_ref().is_some_and(|planned| planned.alone);

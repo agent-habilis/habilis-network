@@ -128,6 +128,24 @@ fn spawn_startup_rung_confirmation(
     }))
 }
 
+/// The rungs a member leaves out of the rendezvous address it registers at setup, from what each
+/// busy rung answered to a probe. A member that walks the ladder (every policy but `Never`) keeps
+/// only a rung read as ours: its walk reads the rest and admits one that turns out to be ours, and
+/// a foreign listener never fails its dial. A member that never walks (`CoHostPolicy::Never`, the
+/// `discover` session) leaves out only a rung read as foreign: it reads no rung later, and a rung
+/// that refused or said nothing may be the beacon it came for, starting or loaded.
+fn rungs_withheld_at_setup(policy: CoHostPolicy, read: &[(u16, ProbeAnswer)]) -> Vec<u16> {
+    read.iter()
+        .filter(|(_, answer)| match policy {
+            CoHostPolicy::Never => matches!(answer, ProbeAnswer::Foreign),
+            CoHostPolicy::Eager | CoHostPolicy::EagerProbed | CoHostPolicy::Deferred => {
+                !matches!(answer, ProbeAnswer::Ours)
+            }
+        })
+        .map(|(port, _)| *port)
+        .collect()
+}
+
 /// Pre-register `rendezvous_id`'s address so a cold joiner reaches it
 /// with **zero address-lookup wait** — a creator-independent bootstrap
 /// that needs no discovery query to make the first dial:
@@ -151,24 +169,6 @@ fn spawn_startup_rung_confirmation(
 /// with the rival probe's dial target: the probe asks whether anyone serves
 /// the identity *a joiner would reach*, so the two must name the same place or
 /// it is answering a different question.
-/// The rungs a member leaves out of the rendezvous address it registers at setup, from what each
-/// busy rung answered to a probe. A member that walks the ladder (every policy but `Never`) keeps
-/// only a rung read as ours: its walk reads the rest and admits one that turns out to be ours, and
-/// a foreign listener never fails its dial. A member that never walks (`CoHostPolicy::Never`, the
-/// `discover` session) leaves out only a rung read as foreign: it reads no rung later, and a rung
-/// that refused or said nothing may be the beacon it came for, starting or loaded.
-fn rungs_withheld_at_setup(policy: CoHostPolicy, read: &[(u16, ProbeAnswer)]) -> Vec<u16> {
-    read.iter()
-        .filter(|(_, answer)| match policy {
-            CoHostPolicy::Never => matches!(answer, ProbeAnswer::Foreign),
-            CoHostPolicy::Eager | CoHostPolicy::EagerProbed | CoHostPolicy::Deferred => {
-                !matches!(answer, ProbeAnswer::Ours)
-            }
-        })
-        .map(|(port, _)| *port)
-        .collect()
-}
-
 pub(crate) fn register_rendezvous(
     book: &memory::MemoryLookup,
     params: &RendezvousParams,
@@ -199,12 +199,6 @@ pub(crate) fn register_rendezvous(
     add_peer_addr(book, address);
 }
 
-/// Build the endpoint, subscribe to the topic, and produce a ready
-/// `EventLoopConfig`. Shared by the `create` / `join` CLI paths and
-/// the in-process sessions.
-///
-/// Output ordering differs by design: `Create` prints the mesh ID to
-/// stderr, then `info`, then `ready`; `Join` emits `ready` then `info`.
 /// The unicast inbound channel + its Router acceptor. The acceptor forwards
 /// received `UNICAST_ALPN` frames to the returned receiver, which the event
 /// loop drains into `gossip::ingest`. Bounded so a flooding peer can't
@@ -618,6 +612,13 @@ fn resolve_max_connections(max_connections: usize) -> usize {
     }
 }
 
+/// Build the endpoint, subscribe to the topic, and produce a ready
+/// `EventLoopConfig`. Shared by the `create` / `join` CLI paths and
+/// the in-process sessions.
+///
+/// Output ordering differs by design: `Create` prints the mesh ID to
+/// stderr, then `info`, then `ready`; `Join` emits `ready` then `info`.
+///
 /// # Errors
 /// The join target fails to resolve, the password fails to verify, or the
 /// endpoint cannot bind.
@@ -857,15 +858,21 @@ fn last_recorded_run(state: &Path) -> Option<u64> {
 /// The last run that the key file at `key_path` names, if it names one.
 #[cfg(all(unix, feature = "host"))]
 fn last_recorded_run_in(key_path: &Path) -> Option<u64> {
+    key_file_u64_at(key_path, 40)
+}
+
+/// The 8 bytes at `offset` of the trusted key file at `key_path`, as a number. Only those bytes are
+/// read: the seed in the first 32 bytes never enters this process's heap through a buffer that is not
+/// wiped.
+#[cfg(all(unix, feature = "host"))]
+fn key_file_u64_at(key_path: &Path, offset: u64) -> Option<u64> {
     use std::os::unix::fs::FileExt as _;
     let mut reading = OpenOptions::new();
     reading.read(true);
     let file = open_trusted_key_file(key_path, &mut reading).ok()?;
-    // Only the 8 bytes of the counter are read: the seed in the first 32 bytes never enters this process's
-    // heap through a buffer that is not wiped.
-    let mut counter = [0u8; 8];
-    file.read_exact_at(&mut counter, 40).ok()?;
-    Some(u64::from_le_bytes(counter))
+    let mut number = [0u8; 8];
+    file.read_exact_at(&mut number, offset).ok()?;
+    Some(u64::from_le_bytes(number))
 }
 
 /// Take the exclusive lock on `<state>.key.lock` and keep it as long as the returned file lives, so two
@@ -1244,17 +1251,11 @@ pub(crate) fn bind_to_owner(
     state: Option<&Path>,
     owner_start: Option<u64>,
 ) -> RunKeys {
-    use std::fs;
     let (Some(state), Some(member)) = (state, keys.member.as_ref()) else {
         return keys;
     };
     let key_path = state.with_extension("key");
-    // The read takes the seed as well as the owner start, so the buffer wipes itself.
-    let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(fs::read(&key_path).unwrap_or_default());
-    let tail = bytes
-        .get(32..40)
-        .and_then(|tail| <[u8; 8]>::try_from(tail).ok());
-    let held = tail.map(u64::from_le_bytes);
+    let held = key_file_u64_at(&key_path, 32);
     match (owner_start, held) {
         (Some(start), Some(held)) if held == start => keys,
         (Some(start), _) if keys.member_new => {
@@ -3940,6 +3941,48 @@ mod tests {
                 underlay.expect("the default list has multihop").is_closed(),
                 "the underlay is closed after leave"
             );
+        });
+    }
+
+    // A start that fails before the loop runs closes what setup bound, as a leave does.
+    #[test]
+    fn a_start_that_fails_before_the_loop_closes_the_endpoint_that_setup_bound() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use std::{env, fs, process};
+
+            use crate::daemon::event_loop;
+
+            let base = env::temp_dir().join(format!("habilis-failed-start-{}", process::id()));
+            let options = membership::JoinOptions::default();
+            let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+            let params = super::SetupParams::new(author.clone(), embed::SilentSink);
+            let params = params.max_connections(8).runtime_base(base.clone());
+            let config: super::EventLoopConfig = super::setup_mesh(kind, params)
+                .await
+                .expect("a loopback mesh sets up");
+            // A file where the chunk store wants its folder makes the start fail.
+            let chunks = super::default_chunks_path(&base, config.mesh_id(), &author);
+            fs::create_dir_all(chunks.parent().expect("the chunk folder has a parent"))
+                .expect("the runtime folder can be made");
+            fs::write(&chunks, b"").expect("the blocking file can be written");
+            let endpoint = config.endpoints.endpoint.clone();
+            let underlay = config.transports.multihop.clone();
+            let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+            let app = membership::MembershipApp::new(inbound_tx);
+            let started = Box::pin(event_loop::run(config, app, None, None)).await;
+            assert!(
+                started.is_err(),
+                "the start fails on the blocked chunk store"
+            );
+            assert!(
+                endpoint.is_closed(),
+                "the endpoint is closed after a failed start"
+            );
+            assert!(
+                underlay.expect("the default list has multihop").is_closed(),
+                "the underlay is closed after a failed start"
+            );
+            let _ = fs::remove_dir_all(&base);
         });
     }
 

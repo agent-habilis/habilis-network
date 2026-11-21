@@ -68,6 +68,12 @@ test("ctor: attribute", () => {
 test("ctor: path attribute", () => {
   expectExit("src/a.rs", "#[ctor::ctor]\nfn init() {}", 1);
 });
+test("log_target: a crate:: target", () => {
+  expectExit("src/a.rs", 'fn f() { tracing::warn!(target: "crate::messages", "lost"); }', 1);
+});
+test("log_target: a crate name is clean", () => {
+  expectExit("src/a.rs", 'fn f() { tracing::warn!(target: "habilis_network::messages", "lost"); }', 0);
+});
 test("block doc: outer", () => {
   expectExit("src/a.rs", "/** old style */\nfn f() {}", 1);
 });

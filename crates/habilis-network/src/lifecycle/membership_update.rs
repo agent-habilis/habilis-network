@@ -31,6 +31,15 @@ pub(crate) struct MembershipUpdate {
     pub stale: bool,
 }
 
+impl MembershipUpdate {
+    /// The update of a frame that proves no presence.
+    pub(crate) const STALE: Self = Self {
+        returned: false,
+        joined_new: false,
+        stale: true,
+    };
+}
+
 /// Whether `timestamp` is ahead of our clock by more than the quiet TTL. That is no clock skew of an
 /// honest peer: a signed frame like that would pass the lower bound of [`proves_presence`] for as
 /// long as its stamp stays above it, and it would freeze any watermark that it moves.
@@ -48,30 +57,21 @@ pub(crate) fn is_far_ahead(timestamp: UnixSecs) -> bool {
 /// that the timeout asks.
 pub(crate) fn proves_presence(kind: &MessageKind, timestamp: UnixSecs) -> bool {
     let now = UnixSecs::now();
-    if is_far_ahead(timestamp) {
-        return false;
-    }
-    match kind {
+    let left = matches!(
+        kind,
         MessageKind::Presence {
             subtype: PresenceSubtype::Left,
-        } => false,
-        MessageKind::App { .. }
-        | MessageKind::Presence {
-            subtype: PresenceSubtype::Alive | PresenceSubtype::Joined,
         }
-        | MessageKind::Ping
-        | MessageKind::Pong { .. } => timestamp > now - heartbeat::QUIET_TTL,
-        MessageKind::PeerInfo
-        | MessageKind::ProofRequest { .. }
-        | MessageKind::State
-        | MessageKind::Meta
-        | MessageKind::LinkState
-        | MessageKind::SliceRoot { .. }
-        | MessageKind::SlicePull { .. }
-        | MessageKind::SlicePageRequest { .. }
-        | MessageKind::SlicePage { .. }
-        | _ => timestamp > now - tuning::alive_timeout(),
+    );
+    if left || is_far_ahead(timestamp) {
+        return false;
     }
+    let bound = if is_live_kind(kind) {
+        heartbeat::QUIET_TTL
+    } else {
+        tuning::alive_timeout()
+    };
+    timestamp > now - bound
 }
 
 /// Whether a frame is of a kind that a peer sends only while it runs: an app message, an
@@ -187,11 +187,7 @@ fn compute_proving(
     let quiet = state.quiet.contains(&key);
     let proves_return = proves && stamped_after_last_heard(key, timestamp, state);
     if quiet && !proves_return {
-        return MembershipUpdate {
-            returned: false,
-            joined_new: false,
-            stale: true,
-        };
+        return MembershipUpdate::STALE;
     }
     let known = state.peers.contains(&key);
     let unseen = match kind {
@@ -247,11 +243,7 @@ fn compute_for_proving(
     state: &EventLoopState,
 ) -> MembershipUpdate {
     if state.key_said_goodbye(message.key()) {
-        return MembershipUpdate {
-            returned: false,
-            joined_new: false,
-            stale: true,
-        };
+        return MembershipUpdate::STALE;
     }
     compute_proving(
         proves,

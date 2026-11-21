@@ -1721,15 +1721,15 @@ impl EventLoopState {
         self.unicast_pool.forget_addr(endpoint);
     }
 
-    /// Drop everything the roster keeps about `key`, which left: its place in the roster, its
-    /// stamps and runs, its claim to the rendezvous, its name, and every dial hint that its
-    /// `PeerInfo` made, under each nickname it used. Returns the address of each hint that went.
     /// Tests only: the gap of zero links began at `since`, so a test need not wait for a heal.
     #[cfg(test)]
     pub(crate) fn start_zero_links_gap_at(&mut self, since: Instant) {
         self.zero_links_since = Some(since);
     }
 
+    /// Drop everything the roster keeps about `key`, which left: its place in the roster, its
+    /// stamps and runs, its claim to the rendezvous, its name, and every dial hint that its
+    /// `PeerInfo` made, under each nickname it used. Returns the address of each hint that went.
     pub(crate) fn forget_key(&mut self, key: AuthorKey) -> Vec<EndpointAddr> {
         self.peers.remove(&key);
         self.proofs.forget(&key);
@@ -1783,12 +1783,6 @@ impl EventLoopState {
         !self.peers.contains(&key) && users.any(|name| name == nickname)
     }
 
-    /// The address a directed send to `key` dials, from the first source that has one:
-    /// - the dial hint under the nickname of `key`, when `key` made it;
-    /// - the endpoint that `key` proved in its `PeerInfo`;
-    /// - the endpoint of a `PeerInfo` of `key` that bound no hint, because another live key holds
-    ///   the nickname.
-    ///
     /// Sets the author whose State and Meta frames this node drops after the dedup gate, or none. A test of
     /// the repair of a lost frame sets it, so that the frame is seen by the dedup gate and then lost.
     #[cfg(feature = "iroh-test-utils")]
@@ -1802,6 +1796,12 @@ impl EventLoopState {
         self.drop_left_from = author;
     }
 
+    /// The address a directed send to `key` dials, from the first source that has one:
+    /// - the dial hint under the nickname of `key`, when `key` made it;
+    /// - the endpoint that `key` proved in its `PeerInfo`;
+    /// - the endpoint of a `PeerInfo` of `key` that bound no hint, because another live key holds
+    ///   the nickname.
+    ///
     /// A quiet key keeps its address, so a peer that returns keeps its route. A key that left the
     /// roster has none. An endpoint that another key proved is not an address of `key`: a process
     /// that restarts keeps its endpoint and makes a new key, and until the old key times out, its
@@ -2814,10 +2814,10 @@ impl EventLoopState {
         endpoint: EndpointId,
         stamp: UnixSecs,
     ) {
-        let linked = self.linked_endpoints.clone();
+        let linked = &self.linked_endpoints;
         let roster = &self.peers;
         self.proven_endpoints
-            .insert(signer, endpoint, stamp, &linked, |holder| {
+            .insert(signer, endpoint, stamp, linked, |holder| {
                 roster.contains(holder)
             });
         // The table can refuse a replay of an older stamp, so the trust follows what it holds.

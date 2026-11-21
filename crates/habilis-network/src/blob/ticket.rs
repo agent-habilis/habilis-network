@@ -29,8 +29,6 @@ const PASSWORD_BIT: u8 = 0b0000_0001;
 /// and both ends refuse a relayed one.
 const RELAY_TRANSPORT_BIT: u8 = 0b0000_0010;
 
-/// Read `N` bytes at `*pos` into a fixed array, advancing `*pos`. `None` if the
-/// slice is too short.
 #[cfg(test)]
 mod tests {
     use super::BlobTicket;

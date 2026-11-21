@@ -492,7 +492,7 @@ async fn dial_with_retry(underlay: &Endpoint, dst: &EndpointAddr) -> Option<Conn
 mod tests {
     use super::{
         Arc, AtomicUsize, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering, TransportAddr,
-        UNRESOLVED_SEEN_CAP,
+        UNRESOLVED_SEEN_CAP, WRITER_QUEUE,
     };
     use crate::app_id::{AppId, UnderlayId};
     use crate::cell::Cell;
@@ -1671,6 +1671,46 @@ mod tests {
             assert!(
                 live_writers(&forwarder) <= MAX_WRITERS,
                 "the writers stop at the ceiling"
+            );
+        });
+    }
+
+    /// A full queue is not a dead writer. A second writer for the hop would leave the first as
+    /// a task and a dial that the ceiling does not count.
+    #[test]
+    fn a_full_queue_keeps_the_writer_of_the_hop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop forwarder: hop without a vector that no delivered cell named",
+            );
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "reason=\"next-hop queue is full\"",
+            );
+            let (forwarder, _app, _received) = forwarder().await;
+            let source = stranger(1);
+            let next = stranger(100);
+            let writer_of_hop = || {
+                let writers = forwarder
+                    .pool
+                    .writers
+                    .lock()
+                    .expect("writers mutex poisoned");
+                writers.get(&next.underlay_id).cloned()
+            };
+            forwarder.enqueue(&next, cell(vec![next], 0, source));
+            let first = writer_of_hop().expect("the first cell starts a writer");
+
+            // No await: the writer cannot drain, so the queue fills.
+            for _ in 0..WRITER_QUEUE + 8 {
+                forwarder.enqueue(&next, cell(vec![next], 0, source));
+            }
+
+            let last = writer_of_hop().expect("the hop keeps a writer");
+            assert!(
+                first.same_channel(&last),
+                "a full queue replaced the live writer of the hop"
             );
         });
     }

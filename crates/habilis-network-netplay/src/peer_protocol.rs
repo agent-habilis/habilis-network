@@ -194,6 +194,10 @@ impl<T: Config> PeerProtocol<T> {
 
     /// Queue one of our own inputs for delivery.
     pub(crate) fn send_input(&mut self, frame: Frame, input: T::Input) {
+        // Only a running peer sends the queue, and a disconnected peer never runs again.
+        if self.state == PeerState::Disconnected {
+            return;
+        }
         self.pending.push((frame, input));
     }
 
@@ -228,6 +232,7 @@ impl<T: Config> PeerProtocol<T> {
                 "peer went silent past the disconnect timeout"
             );
             self.state = PeerState::Disconnected;
+            self.pending.clear();
             events.push(PeerEvent::Disconnected);
             return (out, events);
         }
@@ -713,6 +718,28 @@ mod tests {
         );
 
         assert!(replies.is_empty(), "answered a request after giving up");
+    }
+
+    /// Only a running peer sends its queue, and a disconnected peer never runs again. The
+    /// session queues an input for each peer on each frame, so a queue that is kept for a
+    /// disconnected peer grows until the match ends.
+    #[test]
+    fn a_disconnected_peer_keeps_no_input_queue() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut peer = syncing_peer();
+        peer.send_input(Frame::new(0), test_game::TestInput(1));
+        for _ in 0..=super::DISCONNECT_TIMEOUT_TICKS {
+            peer.tick(Frame::NULL);
+        }
+        assert_eq!(peer.state(), PeerState::Disconnected, "the peer timed out");
+
+        peer.send_input(Frame::new(1), test_game::TestInput(2));
+
+        assert!(
+            peer.pending.is_empty(),
+            "a disconnected peer holds {} inputs that it never sends",
+            peer.pending.len()
+        );
     }
 
     /// Before the latch, a reply that echoes a spent token is the same sign

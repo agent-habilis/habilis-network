@@ -50,3 +50,35 @@ test("a proc macro in crates is refused", () => {
   expectExit({ "crates/x/src/a.rs": "#[proc_macro_attribute]\npub fn test(a: TokenStream, b: TokenStream) -> TokenStream { b }" }, 1);
 });
 
+
+test("a derive proc macro, which always has arguments, is refused", () => {
+  expectExit({ "crates/x/src/a.rs": "#[proc_macro_derive(Twice)]\npub fn twice(input: TokenStream) -> TokenStream { input }" }, 1);
+});
+
+test("a derive proc macro behind cfg_attr is refused", () => {
+  const file = '#[cfg_attr(feature = "derive", proc_macro_derive(Twice))]\npub fn twice(input: TokenStream) -> TokenStream { input }';
+  expectExit({ "crates/x/src/a.rs": file }, 1);
+});
+
+test("a proc macro attribute with spaces between its tokens is refused", () => {
+  expectExit({ "crates/x/src/a.rs": "# [ proc_macro ]\npub fn twice(input: TokenStream) -> TokenStream { input }" }, 1);
+});
+
+test("a macro_rules with a space before the bang is refused", () => {
+  expectExit({ "crates/x/src/a.rs": "macro_rules ! twice { ($e:expr) => { $e * 2 }; }" }, 1);
+});
+
+test("a macro named in a comment or a string is no macro", () => {
+  const file = [
+    "/// Write a fn, not `#[proc_macro_derive(Twice)]` or `macro_rules!`.",
+    "/* #[proc_macro] */",
+    'const NOTE: &str = "macro_rules! and #[proc_macro_attribute]";',
+    'const RAW: &str = r#"#[proc_macro_derive(Twice)]"#;',
+    "fn f<'a>(x: &'a str) -> char { let _ = x; '#' }",
+  ].join("\n");
+  expectExit({ "crates/x/src/a.rs": file }, 0);
+});
+
+test("a path into the proc_macro crate is no macro", () => {
+  expectExit({ "crates/x/src/a.rs": "#[doc = \"x\"]\nfn f(t: proc_macro::TokenStream) {}" }, 0);
+});

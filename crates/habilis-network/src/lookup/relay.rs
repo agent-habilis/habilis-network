@@ -12,7 +12,7 @@
 //! over together. The public analog of the private loopback-port ladder
 //! (`beacon::RendezvousParams::bind_ports`).
 
-use std::future;
+use futures_util::future;
 mod rung_refresh;
 mod stoppable_task;
 
@@ -414,12 +414,13 @@ pub async fn probe_ladder(
     ladder: &[RelayUrl],
     per_rung: Duration,
 ) -> impl Iterator<Item = (RelayUrl, bool)> {
-    let mut statuses = Vec::with_capacity(ladder.len());
-    for rung in ladder {
-        let reachable = relay_rung_reachable(rung, per_rung, None).await;
-        statuses.push((rung.clone(), reachable));
-    }
-    statuses.into_iter()
+    // The probes are independent, and each one binds its own endpoint.
+    let probes = ladder
+        .iter()
+        .map(|rung| relay_rung_reachable(rung, per_rung, None));
+    let reachable: Vec<bool> = future::join_all(probes).await;
+    let rungs: Vec<RelayUrl> = ladder.to_vec();
+    rungs.into_iter().zip(reachable)
 }
 
 /// The relay mode of a probe endpoint: this one rung, without QUIC address discovery. The probe
