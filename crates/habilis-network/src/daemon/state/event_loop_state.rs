@@ -1520,7 +1520,7 @@ impl EventLoopState {
 
     /// Whether a graft at `now` falls back to a `Join` for a starved node: it has held fewer
     /// than G peers for `STARVED`, and the last fallback is `STARVED` old. A node that is 1 peer
-    /// short asks only if a peer refused it (`GraftBackoff::has_refusal`): without a refusal
+    /// short asks only if a peer refused it within `STARVED` (`GraftBackoff::has_refusal`): without a refusal
     /// its `Neighbor` requests can still bring the link, and a `Join` would make a full peer drop
     /// a neighbor for nothing. A node that is 2 or more peers short asks with or without one.
     /// A `true` stamps the fallback.
@@ -1541,7 +1541,7 @@ impl EventLoopState {
         let waited = self
             .join_fallback_at
             .is_none_or(|at| now.duration_since(at) >= window);
-        let stuck = self.links_short >= 2 || self.graft_backoff.has_refusal();
+        let stuck = self.links_short >= 2 || self.graft_backoff.has_refusal(now);
         starved && waited && stuck
     }
 

@@ -37,18 +37,22 @@ pub(crate) struct GraftTarget {
 /// full gets no link from it. A `paced` graft (the fill tick, a proven direct path) asks
 /// with a `Join` instead when the node is starved, at most once per `STARVED`: it held fewer
 /// than G peers for `STARVED`, and it is 2 or more peers short, or 1 short and a peer refused
-/// it (`GraftBackoff::has_refusal`). A `PeerInfo` graft is not paced.
+/// it within the last `STARVED` (`GraftBackoff::has_refusal`). A `PeerInfo` graft is not paced.
 ///
-/// The `Join` ignores the backoff, whose wait can reach `GRAFT_BACKOFF_MAX` (15 minutes) and
-/// so outlasts the clock of 5 minutes. When 2 nodes that are 1 peer short each hold a backoff on
-/// the other, neither `Neighbor` request goes out during the wait, but each `Join` goes out
-/// when its clock runs out. A `Join` to a peer with a free slot evicts nobody and links the 2.
+/// The `Join` ignores the backoff of the peer, but the guard of a node that is 1 peer short does
+/// not: it needs a refusal read within the last `STARVED`, and the wait of the backoff can reach
+/// `GRAFT_BACKOFF_MAX` (15 minutes). A node whose refusals are all older asks `Neighbor` again
+/// when the wait of a peer ends, and the next refusal makes the `Join` due. When 2 nodes that
+/// are 1 peer short hold a backoff on each other, the `Neighbor` request goes out after the wait,
+/// and a peer with a free slot accepts it.
 ///
 /// A `Join` to a full peer evicts one neighbor of it, and the `ForwardJoin` walk that it
 /// starts ends in a `Neighbor` request of high priority at up to G - 1 more peers, so a `Join`
 /// can make up to 1 + 2(G - 1) peers drop a link. Each peer that dropped one is 1 peer short.
 /// A node that is 1 peer short by structure (the sum of the caps is odd, or the 2 nodes that
-/// are short are linked to each other) asks 1 `Join` per `STARVED` for ever.
+/// are short are linked to each other) asks at most 1 `Join` per `STARVED` for ever, while a
+/// peer keeps refusing it. The wait of a refusing peer grows to 15 minutes, so such a node asks
+/// about once per 15 minutes in the long run.
 pub(crate) fn graft_request(
     state: &mut EventLoopState,
     target: GraftTarget,
@@ -157,10 +161,10 @@ mod tests {
             GraftRequest::Join,
             "the Join restarted the clock: no second Join at once"
         );
-        assert_eq!(
+        assert_ne!(
             ask(&mut state, candidates[2], start + STARVED * 2),
             GraftRequest::Join,
-            "STARVED after the Join, the node is still short and refused: the next Join"
+            "STARVED after the Join, the refusal that was read is older than STARVED: no Join"
         );
     }
 
@@ -218,9 +222,41 @@ mod tests {
         );
     }
 
-    /// Pins the accepted cost of the rule: a node that stays 1 peer short and refused, as the
-    /// sum of the caps is odd or the 2 short nodes are linked to each other, asks 1 `Join` per
-    /// `STARVED` for ever, and none in between. Nothing in the loop changes its links. A later
+    /// A refusal counts for `STARVED` after it was read. A node at G - 1 whose last refusal is
+    /// older than that asks no `Join`: the refusal is not a reason any more (the peer may have a
+    /// free slot now), and a record that never ended made the guard true for almost every node.
+    #[test]
+    fn a_refusal_older_than_five_minutes_does_not_make_a_node_at_g_minus_one_ask_a_join() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        // The refusal is read GRAFT_REFUSED_AFTER after the request.
+        let read_at = start + GRAFT_REFUSED_AFTER;
+
+        let mut fresh = state_with_links(3, false);
+        let candidates = all_candidates_refuse(&mut fresh, start);
+        assert_eq!(
+            ask(
+                &mut fresh,
+                candidates[1],
+                read_at + STARVED.saturating_sub(SECOND)
+            ),
+            GraftRequest::Join,
+            "a refusal read just under STARVED ago counts"
+        );
+
+        let mut stale = state_with_links(3, false);
+        let stale_candidates = all_candidates_refuse(&mut stale, start);
+        assert_ne!(
+            ask(&mut stale, stale_candidates[1], read_at + STARVED + SECOND),
+            GraftRequest::Join,
+            "a refusal read more than STARVED ago does not count"
+        );
+    }
+
+    /// Pins the accepted cost of the rule: a node that stays 1 peer short, as the sum of the caps
+    /// is odd or the 2 short nodes are linked to each other, asks at most 1 `Join` per `STARVED`
+    /// for ever, and none in between, while a peer keeps refusing it. Each round, a peer that
+    /// waited its backoff out refuses a new `Neighbor` request. Nothing changes its links. A later
     /// fix that ends the chain changes this test on purpose.
     #[test]
     fn a_node_that_stays_at_g_minus_one_asks_one_join_every_five_minutes_for_ever() {
@@ -231,6 +267,14 @@ mod tests {
 
         for round in 1..=6_u32 {
             let due = start + STARVED * round;
+            if round > 1 {
+                // The backoff of each candidate ended, and the new request is refused again.
+                for candidate in candidates {
+                    state.graft_backoff.reset(candidate);
+                }
+                let halfway = start + (STARVED * round).saturating_sub(STARVED / 2);
+                all_candidates_refuse(&mut state, halfway);
+            }
             assert_eq!(
                 ask(&mut state, candidates[0], due),
                 GraftRequest::Join,

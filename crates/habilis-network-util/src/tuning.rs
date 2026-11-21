@@ -867,15 +867,17 @@ pub const MESH_TOPIC_EVENTS_CAP: usize = 2048;
 
 /// How long a node may hold fewer than G peers, and how long it waits between two fallbacks,
 /// before a graft asks with a `Join` instead of a low priority request. A node that is 1 peer
-/// short asks only if a peer refused it. A low priority request evicts nobody, so a member that
-/// arrives when every other member is full gets no link from it. A `Join` to a full peer
+/// short asks only if a peer refused it within the last `STARVED`. A low priority request
+/// evicts nobody, so a member that arrives when every other member is full gets no link from it. A `Join` to a full peer
 /// evicts a random neighbor of it, and the `ForwardJoin` walk ends in high priority requests
 /// that evict more: up to 1 + 2(G - 1) peers drop a link. Each of them is 1 peer short and
 /// asks its own `Join` after `STARVED`, so a fallback starts a chain. The chain ends when 2
 /// short nodes that are not linked to each other graft one another. A node that is 1 peer short
 /// by structure (the sum of the caps is odd, or the 2 short nodes are linked to each other)
-/// asks 1 `Join` per `STARVED` for ever. One fallback per 300 s per short node bounds the
-/// churn to the asks of the short nodes and the evictions that they cause.
+/// asks at most 1 `Join` per `STARVED` for ever, while a peer keeps refusing it: the wait of a
+/// refusing peer grows to 15 minutes, so about once per 15 minutes in the long run. One fallback
+/// per 300 s per short node bounds the churn to the asks of the short nodes and the evictions
+/// that they cause.
 pub const STARVED: Duration = Duration::from_mins(5);
 
 /// How often an advertising `create` re-broadcasts its mesh id into
