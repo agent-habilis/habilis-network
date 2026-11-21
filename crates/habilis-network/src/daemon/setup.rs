@@ -3944,6 +3944,43 @@ mod tests {
         });
     }
 
+    // A start that fails before the loop runs closes what setup bound, as a leave does.
+    #[test]
+    fn a_start_that_fails_before_the_loop_closes_the_endpoint_that_setup_bound() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use std::{env, fs, process};
+
+            let base = env::temp_dir().join(format!("habilis-failed-start-{}", process::id()));
+            let options = membership::JoinOptions::default();
+            let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+            let config = super::setup_mesh(
+                kind,
+                super::SetupParams::new(author.clone(), embed::SilentSink)
+                    .max_connections(8)
+                    .runtime_base(base.clone()),
+            )
+            .await
+            .expect("a loopback mesh sets up");
+            // A file where the chunk store wants its folder makes the start fail.
+            let chunks = super::default_chunks_path(&base, config.mesh_id(), &author);
+            fs::create_dir_all(chunks.parent().expect("the chunk folder has a parent"))
+                .expect("the runtime folder can be made");
+            fs::write(&chunks, b"").expect("the blocking file can be written");
+            let endpoint = config.endpoints.endpoint.clone();
+            let underlay = config.transports.multihop.clone();
+            let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+            let app = membership::MembershipApp::new(inbound_tx);
+            let started = crate::daemon::event_loop::run(config, app, None, None).await;
+            assert!(started.is_err(), "the start fails on the blocked chunk store");
+            assert!(endpoint.is_closed(), "the endpoint is closed after a failed start");
+            assert!(
+                underlay.expect("the default list has multihop").is_closed(),
+                "the underlay is closed after a failed start"
+            );
+            let _ = fs::remove_dir_all(&base);
+        });
+    }
+
     // An injected endpoint is the caller's, and it may carry protocols of the caller.
     #[test]
     fn leave_keeps_an_injected_endpoint_and_its_underlay_open() {

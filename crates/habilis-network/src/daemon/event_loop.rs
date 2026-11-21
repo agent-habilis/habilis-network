@@ -150,7 +150,31 @@ async fn run_checked<Driver: NodeDriver>(
     let external_req_rx = session_rx;
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
-    let chunks = open_chunks(runtime.runtime_base.as_deref(), &mesh.mesh, &mesh.author)?;
+    let owned = OwnedEndpoints {
+        router: endpoints.router,
+        owner: endpoints.endpoint_owner,
+        // A handle that the caller injected is the caller's; `close` skips it with the endpoint.
+        #[cfg(feature = "multihop")]
+        multihop: transports.multihop.clone(),
+    };
+    // A start step that fails closes the endpoints that the loop owns, as a leave does.
+    let chunks = match open_chunks(runtime.runtime_base.as_deref(), &mesh.mesh, &mesh.author) {
+        Ok(chunks) => chunks,
+        Err(error) => {
+            owned.close().await;
+            return Err(error);
+        }
+    };
+    #[cfg(feature = "host")]
+    let quit_rx = match quit_channel(handle_signals, exit_on_quit, runtime.owner) {
+        Ok(quit_rx) => quit_rx,
+        Err(error) => {
+            owned.close().await;
+            return Err(error.into());
+        }
+    };
+    #[cfg(not(feature = "host"))]
+    let quit_rx = quit_channel(handle_signals, exit_on_quit);
     let mut state: EventLoopState = initial_state(
         mesh.keys,
         MeshSecrets {
@@ -168,13 +192,6 @@ async fn run_checked<Driver: NodeDriver>(
         chunks,
     );
     state.mint_mesh = mesh.mint_mesh.take(); // creator-only: backs the `invite` command
-    let owned = OwnedEndpoints {
-        router: endpoints.router,
-        owner: endpoints.endpoint_owner,
-        // A handle that the caller injected is the caller's; `close` skips it with the endpoint.
-        #[cfg(feature = "multihop")]
-        multihop: transports.multihop.clone(),
-    };
     let (fetch_tx, fetch_rx) = mpsc::unbounded_channel();
     state.fetches = chunk_fetch::Fetches::new(fetch_tx);
     let (direct_rx, path_rx) = wire_transports(
@@ -206,10 +223,6 @@ async fn run_checked<Driver: NodeDriver>(
     // `gossip::handle_gossip_event`.
 
     let intervals = build_maintenance_intervals().await;
-    #[cfg(feature = "host")]
-    let quit_rx = quit_channel(handle_signals, exit_on_quit, runtime.owner)?;
-    #[cfg(not(feature = "host"))]
-    let quit_rx = quit_channel(handle_signals, exit_on_quit);
 
     // Flip `ready` to `true` only once the daemon can actually serve, then
     // re-write the state file (the earlier write reported `ready: false`) and
