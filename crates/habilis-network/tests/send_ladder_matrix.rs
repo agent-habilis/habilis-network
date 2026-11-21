@@ -892,6 +892,9 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_g
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         const NAME: &str = "udp_webrtc_ip_direct_carries_a_frame_sent_while_ip_goes";
         const AFTER_THE_RUNG: Duration = Duration::from_secs(3);
+        // Measured: 3, 3 and 0 refused sends in 3 runs at load1 3.6 to 4.7. A send that the engine
+        // refuses waited for the path (`PATH_SELECT_TIMEOUT`, 5 s) first. The cap leaves a margin of 2.
+        const MAX_REFUSED_SENDS: usize = 6;
         let (_, cell) = CELLS
             .iter()
             .find(|(cell, _)| *cell == "udp_webrtc_ip_direct")
@@ -912,6 +915,8 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_g
         let mut sent: Vec<(String, bool, bool)> = Vec::new();
         let started = Instant::now();
         let mut on_the_rung_since: Option<Instant> = None;
+        // A frame goes and the rung is read every 20 ms, so that a frame lost at one moment of the
+        // attach is caught: a probe of every second left whole attaches between two frames.
         while started.elapsed() < STEP_DEADLINE {
             let text = format!("while ip goes {NAME} {}", sent.len());
             let accepted = alice.send("bob", &text).await.is_ok();
@@ -924,7 +929,7 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_g
             } else {
                 on_the_rung_since = None;
             }
-            time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_millis(20)).await;
         }
         let on_the_rung = on_the_rung_since.unwrap_or_else(|| {
             panic!(
@@ -933,6 +938,22 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_g
             )
         });
 
+        // A send is refused only while the pair has no path: once the rung read webrtc, each
+        // send is accepted, and the refused ones are a bounded part of the run.
+        let refused: Vec<&(String, bool, bool)> = sent.iter().filter(|probe| !probe.1).collect();
+        let refused_on_the_rung: Vec<&&(String, bool, bool)> =
+            refused.iter().filter(|probe| !probe.2).collect();
+        assert!(
+            refused_on_the_rung.is_empty(),
+            "{NAME}: {} sends were refused after the rung read webrtc",
+            refused_on_the_rung.len()
+        );
+        assert!(
+            refused.len() <= MAX_REFUSED_SENDS,
+            "{NAME}: {} of {} sends were refused, at most {MAX_REFUSED_SENDS} allowed",
+            refused.len(),
+            sent.len()
+        );
         let owed: Vec<&(String, bool, bool)> =
             sent.iter().filter(|probe| probe.1 && probe.2).collect();
         assert!(
@@ -952,9 +973,10 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_g
             late = late.max(on_the_rung.elapsed());
         }
         eprintln!(
-            "DIAG {NAME}: {} probes, {} owed (accepted before the rung read webrtc), \
+            "DIAG {NAME}: {} probes, {} refused, {} owed (accepted before the rung read webrtc), \
              the last one reached bob {:?} after the rung was first read",
             sent.len(),
+            refused.len(),
             owed.len(),
             late,
         );
