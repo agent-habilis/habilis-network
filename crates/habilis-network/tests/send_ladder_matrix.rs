@@ -890,11 +890,19 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
 fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_goes() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        // One send: its text, whether the engine accepted it, and whether the rung read `webrtc`
+        // before the send and after it returned. The reading after the send is the one that is
+        // not stale: a send waits up to the path budget, and the rung can change meanwhile.
+        struct Probe {
+            text: String,
+            accepted: bool,
+            on_the_rung_before: bool,
+            on_the_rung_after: bool,
+        }
         const NAME: &str = "udp_webrtc_ip_direct_carries_a_frame_sent_while_ip_goes";
         const AFTER_THE_RUNG: Duration = Duration::from_secs(3);
-        // Measured: 3, 3 and 0 refused sends in 3 runs at load1 3.6 to 4.7. A send that the engine
-        // refuses waited for the path (`PATH_SELECT_TIMEOUT`, 5 s) first. The cap leaves a margin of 2.
-        const MAX_REFUSED_SENDS: usize = 6;
+        // The wait of a send for the path, `PATH_SELECT_TIMEOUT` of the engine (5 s).
+        const PATH_WAIT: Duration = Duration::from_secs(5);
         let (_, cell) = CELLS
             .iter()
             .find(|(cell, _)| *cell == "udp_webrtc_ip_direct")
@@ -911,19 +919,29 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_g
             apply(cut, &alice, &bob, &carol).await;
         }
 
-        // (text, the send was accepted, the rung was not webrtc yet when it went)
-        let mut sent: Vec<(String, bool, bool)> = Vec::new();
+        let mut sent: Vec<Probe> = Vec::new();
         let started = Instant::now();
+        let mut first_on_the_rung: Option<Instant> = None;
         let mut on_the_rung_since: Option<Instant> = None;
+        let mut settled = false;
         // A frame goes and the rung is read every 20 ms, so that a frame lost at one moment of the
         // attach is caught: a probe of every second left whole attaches between two frames.
         while started.elapsed() < STEP_DEADLINE {
             let text = format!("while ip goes {NAME} {}", sent.len());
+            let on_the_rung_before = on_the_rung_since.is_some();
             let accepted = alice.send("bob", &text).await.is_ok();
-            sent.push((text, accepted, on_the_rung_since.is_none()));
-            if alice.rung_to("bob").await == Some("webrtc") {
+            let on_the_rung_after = alice.rung_to("bob").await == Some("webrtc");
+            sent.push(Probe {
+                text,
+                accepted,
+                on_the_rung_before,
+                on_the_rung_after,
+            });
+            if on_the_rung_after {
+                first_on_the_rung.get_or_insert_with(Instant::now);
                 let since = *on_the_rung_since.get_or_insert_with(Instant::now);
                 if since.elapsed() >= AFTER_THE_RUNG {
+                    settled = true;
                     break;
                 }
             } else {
@@ -931,50 +949,69 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_g
             }
             time::sleep(Duration::from_millis(20)).await;
         }
-        let on_the_rung = on_the_rung_since.unwrap_or_else(|| {
+        let first_on_the_rung = first_on_the_rung.unwrap_or_else(|| {
             panic!(
                 "{NAME}: the rung never became webrtc after {} probes",
                 sent.len()
             )
         });
+        // The deadline can end the loop with the rung read for less than the settling time.
+        assert!(
+            settled,
+            "{NAME}: the rung did not stay webrtc for {AFTER_THE_RUNG:?} before the deadline"
+        );
+        let on_the_rung = on_the_rung_since.unwrap_or(first_on_the_rung);
 
-        // A send is refused only while the pair has no path: once the rung read webrtc, each
-        // send is accepted, and the refused ones are a bounded part of the run.
-        let refused: Vec<&(String, bool, bool)> = sent.iter().filter(|probe| !probe.1).collect();
-        let refused_on_the_rung: Vec<&&(String, bool, bool)> =
-            refused.iter().filter(|probe| !probe.2).collect();
+        // A send is refused only while the pair has no path. A send that started on the rung and
+        // returned on it is never refused. The other refused sends wait for the path first
+        // (`PATH_SELECT_TIMEOUT`), so the transition, which lasts from the start to the first
+        // reading of `webrtc`, holds at most 1 of them for each wait, and 1 more for the send that
+        // was out when it ended. An immediate refusal (a held frame) would break the bound, and
+        // the test says so.
+        let refused: Vec<&Probe> = sent.iter().filter(|probe| !probe.accepted).collect();
+        let refused_on_the_rung: Vec<&&Probe> = refused
+            .iter()
+            .filter(|probe| probe.on_the_rung_before && probe.on_the_rung_after)
+            .collect();
         assert!(
             refused_on_the_rung.is_empty(),
-            "{NAME}: {} sends were refused after the rung read webrtc",
+            "{NAME}: {} sends were refused that started and returned on the rung webrtc",
             refused_on_the_rung.len()
         );
+        let transition = first_on_the_rung.duration_since(started);
+        let max_refused = transition.as_millis() / PATH_WAIT.as_millis() + 1;
         assert!(
-            refused.len() <= MAX_REFUSED_SENDS,
-            "{NAME}: {} of {} sends were refused, at most {MAX_REFUSED_SENDS} allowed",
+            refused.len() as u128 <= max_refused,
+            "{NAME}: {} of {} sends were refused in a transition of {transition:?}, at most \
+             {max_refused} allowed (1 for each {PATH_WAIT:?} and 1 more)",
             refused.len(),
             sent.len()
         );
-        let owed: Vec<&(String, bool, bool)> =
-            sent.iter().filter(|probe| probe.1 && probe.2).collect();
+        let owed: Vec<&Probe> = sent
+            .iter()
+            .filter(|probe| probe.accepted && !probe.on_the_rung_before)
+            .collect();
         assert!(
             !owed.is_empty(),
             "{NAME}: the send accepted no probe before the rung read webrtc, so the test proved nothing"
         );
         let waiting = Instant::now();
         let mut late = Duration::ZERO;
-        for (text, _, _) in &owed {
-            while !bob.saw_msg(text) {
+        for probe in &owed {
+            while !bob.saw_msg(&probe.text) {
                 assert!(
                     waiting.elapsed() < PAYLOAD_DEADLINE,
-                    "{NAME}: the frame {text:?} was accepted before the session and never reached bob"
+                    "{NAME}: the frame {:?} was accepted before the session and never reached bob",
+                    probe.text
                 );
                 time::sleep(Duration::from_millis(250)).await;
             }
             late = late.max(on_the_rung.elapsed());
         }
         eprintln!(
-            "DIAG {NAME}: {} probes, {} refused, {} owed (accepted before the rung read webrtc), \
-             the last one reached bob {:?} after the rung was first read",
+            "DIAG {NAME}: {} probes, {} refused of at most {max_refused} (transition {transition:?}), \
+             {} owed (accepted before the rung read webrtc), the last one reached bob {:?} after \
+             the rung was first read",
             sent.len(),
             refused.len(),
             owed.len(),
