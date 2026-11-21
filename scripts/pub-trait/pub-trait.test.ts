@@ -85,3 +85,13 @@ test("a pub trait that only has an impl block is refused", () => {
 test("a pub trait with a generic impl block and no bound is refused", () => {
   expectExit({ "crates/x/src/a.rs": trait, "crates/x/src/b.rs": "struct Bar<T>(T);\nimpl<T> Sink for Bar<T> {}" }, 1);
 });
+
+const generic = "pub trait Sink<T> { fn put(&self, t: T); }";
+
+test("a generic pub trait that only has an impl block with nested arguments is refused", () => {
+  expectExit({ "crates/x/src/a.rs": generic, "crates/x/src/b.rs": "struct Bar;\nimpl Sink<Vec<u8>> for Bar { fn put(&self, t: Vec<u8>) {} }" }, 1);
+});
+
+test("a generic pub trait used as an impl bound is clean", () => {
+  expectExit({ "crates/x/src/a.rs": generic, "crates/x/src/b.rs": "fn f(s: impl Sink<u8>) { let _ = s; }" }, 0);
+});
