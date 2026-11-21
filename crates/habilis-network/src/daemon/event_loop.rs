@@ -1774,7 +1774,7 @@ async fn run_loop<Driver: NodeDriver>(
                 None => { lp.external_req_rx = None; },
                 Some(request) => { lp.session_request(request).await; },
             },
-            _ = recv_opt(&mut lp.quit_rx) => {
+            () = next_quit(&mut lp.quit_rx) => {
                 exit_after_release = lp.quit().await;
                 break;
             }
@@ -2054,6 +2054,16 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
     }
 }
 
+/// The next quit signal. A closed channel is no signal: a signal source that could not register
+/// drops its sender, and that must not end the daemon. The arm then pends for good.
+async fn next_quit(quit_rx: &mut Option<mpsc::Receiver<()>>) {
+    if recv_opt(quit_rx).await.is_none() {
+        *quit_rx = None;
+        let forever: future::Pending<()> = future::pending();
+        forever.await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -2072,6 +2082,25 @@ mod tests {
     use crate::testing::{fresh_state, nick, test_key};
     use crate::util::clock::Instant;
     use crate::util::tuning;
+
+    /// A signal source that could not register drops its sender. The closed channel must not
+    /// start the shutdown, and a real signal still must.
+    #[test]
+    fn a_closed_quit_channel_is_no_quit() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (quit_tx, quit_rx) = tokio::sync::mpsc::channel(1);
+            drop(quit_tx);
+            let mut quit_rx = Some(quit_rx);
+            let quit = time::timeout(Duration::from_millis(200), super::next_quit(&mut quit_rx));
+            assert!(quit.await.is_err(), "a closed quit channel started the shutdown");
+
+            let (quit_tx, quit_rx) = tokio::sync::mpsc::channel(1);
+            quit_tx.try_send(()).expect("the channel has room");
+            let mut quit_rx = Some(quit_rx);
+            let quit = time::timeout(Duration::from_millis(200), super::next_quit(&mut quit_rx));
+            assert!(quit.await.is_ok(), "a quit signal starts the shutdown");
+        });
+    }
 
     /// One `PingReport` that the engine emitted: the rows and the `known` count.
     #[derive(Debug, PartialEq, Eq)]
