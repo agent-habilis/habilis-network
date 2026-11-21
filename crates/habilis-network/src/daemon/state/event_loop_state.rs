@@ -1400,7 +1400,7 @@ impl EventLoopState {
     /// How many peers this node holds links to. The link to the rendezvous is not one of them:
     /// the engine gives it no slot of the active view (`subscribe_mesh`), so G peers and the
     /// rendezvous is a full view.
-    fn peer_links(&self) -> usize {
+    pub(crate) fn peer_links(&self) -> usize {
         let to_rendezvous = self
             .rendezvous_id
             .is_some_and(|rendezvous| self.linked_endpoints.contains(&rendezvous));
