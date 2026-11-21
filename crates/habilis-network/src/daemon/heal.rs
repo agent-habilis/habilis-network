@@ -71,6 +71,15 @@ pub(super) async fn run_heal(
 ) {
     // A periodic return that fell due is owed from this tick, for a bounded time.
     state.pay_periodic_return(Instant::now(), context.endpoint.id());
+    // The endpoint forgets the rungs that this member shed its beacon on (the sheds clean the book
+    // at once, and only this tick can tell the endpoint).
+    let retired = state.rungs.take_retired();
+    if !retired.is_empty() {
+        beacon::forget_rungs(params, context.endpoint, &state.address_book, |port| {
+            retired.contains(&port)
+        })
+        .await;
+    }
     // A browser-shaped peer's rendezvous link can only ever be admitted on
     // a data channel; keep offering one while the link is down.
     webrtc::rendezvous::negotiate_rendezvous_session(state, context);
@@ -107,8 +116,8 @@ pub(super) async fn run_heal(
         // is re-validated off-loop by the beacon's liveness self-monitor,
         // so a rung that died during the freeze self-corrects — no inline
         // ladder walk on the event loop here.
-        let offered = state.rungs.offered_rungs();
-        setup::reregister_rendezvous(&state.address_book, context.endpoint, params, &offered).await;
+        setup::reregister_rendezvous(&state.address_book, context.endpoint, params, &state.rungs)
+            .await;
         if webrtc::rendezvous::rendezvous_graftable(state) {
             gossip::heal::tick_heal_hard(context.endpoint, params.id, context.sender).await;
         }

@@ -1830,85 +1830,168 @@ fn the_check_of_our_own_rung_keeps_it_offered() {
     });
 }
 
-/// A rung that was read as ours long ago is not only no longer offered: the heal registration
-/// takes it out of the book, or a dial of the id still tries it and meets whatever listener took
-/// the port. The registration merged the offered address into the entry, so it kept every rung
-/// that an earlier registration had put there.
-#[test]
-fn a_heal_registration_takes_a_rung_that_is_no_longer_offered_out_of_the_book() {
-    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-        let (squat, ports) = ladder_of_two();
-        drop(squat);
-        let mut params = public_params();
-        params.bind_ports = ports.clone();
-        let peer = loopback_endpoint().await;
-        let book = lookup::address_book(&peer);
-        let booked = || -> Vec<u16> {
-            let info = book.get_endpoint_info(params.id);
-            let entry: Option<iroh::EndpointAddr> = info.map(EndpointInfo::into_endpoint_addr);
-            let Some(entry) = entry else {
-                return Vec::new();
-            };
-            entry.ip_addrs().map(net::SocketAddr::port).collect()
-        };
-        let mut rungs = super::RungWatch::detached();
-        rungs.clear_foreign(ports[0]);
-        setup::register_rendezvous(&book, &params, &rungs.offered_rungs());
-        assert_eq!(
-            booked(),
-            vec![ports[0]],
-            "a rung read as ours is registered"
-        );
-
-        rungs.expire_ours();
-        setup::register_rendezvous(&book, &params, &rungs.offered_rungs());
-
-        let after = booked();
-        peer.close().await;
-        let none: Vec<u16> = Vec::new();
-        assert_eq!(
-            after, none,
-            "the book still names a rung that is not offered any more"
-        );
-    });
+/// A ladder of 2 loopback rungs, a peer endpoint that settled on the first one (the book and the
+/// endpoint both name it), and the watch that read it as ours.
+async fn member_settled_on_the_first_rung() -> (
+    RendezvousParams,
+    Vec<u16>,
+    Endpoint,
+    memory::MemoryLookup,
+    super::RungWatch,
+) {
+    let (squat, ports) = ladder_of_two();
+    drop(squat);
+    let mut params = public_params();
+    params.bind_ports = ports.clone();
+    let peer = loopback_endpoint().await;
+    let book = lookup::address_book(&peer);
+    let mut rungs = super::RungWatch::detached();
+    rungs.clear_foreign(ports[0]);
+    rung_ladder::settle_on_rung(&params, &peer, &book, ports[0]).await;
+    assert_eq!(
+        rungs_known_to(&peer, params.id).await,
+        vec![ports[0]],
+        "the endpoint settled on the rung"
+    );
+    (params, ports, peer, book, rungs)
 }
 
-/// The endpoint keeps the address that it was told for the id, and it does not read the book again
-/// for an id that it knows. A rung that the endpoint settled on, and that is no longer offered,
-/// must leave the endpoint at the heal registration as well as the book, or a dial of the id still
-/// tries it.
+/// The registration at a hard re-bootstrap edge forgets a rung only on evidence that it is not
+/// ours. After a stall the stamp of the rung that the holder bound is old, and nothing has read
+/// the rung since, so the absence of a reading says nothing: the holder keeps its rung in the book
+/// and on the endpoint. `run_heal` runs before the co-host arm, and nothing registers the rung
+/// again while the beacon lives.
 #[test]
-fn a_heal_registration_takes_a_rung_that_is_no_longer_offered_out_of_the_endpoint() {
+fn a_hard_edge_keeps_the_rung_that_the_holder_bound() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-        let (squat, ports) = ladder_of_two();
-        drop(squat);
-        let mut params = public_params();
-        params.bind_ports = ports.clone();
-        let peer = loopback_endpoint().await;
-        let book = lookup::address_book(&peer);
-        let mut rungs = super::RungWatch::detached();
-        rungs.clear_foreign(ports[0]);
-        rung_ladder::settle_on_rung(&params, &peer, &book, ports[0]).await;
-        assert_eq!(
-            rungs_known_to(&peer, params.id).await,
-            vec![ports[0]],
-            "the endpoint settled on the rung"
-        );
-
+        let (params, ports, peer, book, mut rungs) = member_settled_on_the_first_rung().await;
+        let node = SecretKey::generate().public();
         rungs.expire_ours();
-        setup::reregister_rendezvous(&book, &peer, &params, &rungs.offered_rungs()).await;
+
+        setup::reregister_rendezvous(&book, &peer, &params, &rungs).await;
+        let failed = rungs.own_rung_failed(&params, node, ports[0]);
 
         let known = rungs_known_to(&peer, params.id).await;
+        let booked = booked_rungs(&book, params.id);
+        rungs.finish().await;
         peer.close().await;
-        let none: Vec<u16> = Vec::new();
+        assert!(!failed, "a check that is out has not failed");
         assert_eq!(
-            known, none,
-            "the endpoint still knows a rung that is not offered any more"
+            known,
+            vec![ports[0]],
+            "the endpoint lost the rung of the holder"
+        );
+        assert_eq!(
+            booked,
+            vec![ports[0]],
+            "the book lost the rung of the holder"
         );
     });
 }
 
-/// The loopback rungs that `endpoint` knows for `id`.
+/// A member that is not the holder keeps the hint too: the rung that it read as ours long ago
+/// stays in the book and on the endpoint, so the dial of `tick_heal_hard` has an address. A rung
+/// that nobody read since is no evidence against it.
+#[test]
+fn a_hard_edge_keeps_the_hint_of_a_member_that_is_not_the_holder() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let (params, ports, peer, book, mut rungs) = member_settled_on_the_first_rung().await;
+        rungs.expire_ours();
+
+        setup::reregister_rendezvous(&book, &peer, &params, &rungs).await;
+
+        let known = rungs_known_to(&peer, params.id).await;
+        let booked = booked_rungs(&book, params.id);
+        peer.close().await;
+        assert_eq!(known, vec![ports[0]], "the endpoint lost the hint");
+        assert_eq!(booked, vec![ports[0]], "the book lost the hint");
+    });
+}
+
+/// Evidence that a rung is not ours is a reading of foreign (another mesh holds the port, the
+/// case of UnknownIssuer): the registration takes the rung out of the book and off the endpoint.
+#[test]
+fn a_hard_edge_takes_a_rung_that_was_read_as_foreign_out_of_the_book_and_the_endpoint() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let (params, ports, peer, book, mut rungs) = member_settled_on_the_first_rung().await;
+        rungs.mark_foreign(ports[0]);
+
+        setup::reregister_rendezvous(&book, &peer, &params, &rungs).await;
+
+        let known = rungs_known_to(&peer, params.id).await;
+        let booked = booked_rungs(&book, params.id);
+        peer.close().await;
+        let none: Vec<u16> = Vec::new();
+        assert_eq!(known, none, "the endpoint still knows a foreign rung");
+        assert_eq!(booked, none, "the book still names a foreign rung");
+    });
+}
+
+/// A member that knows a holder reads the ladder again when it lost the link, and a rung that
+/// reads as foreign leaves the book and the endpoint at once: it is no longer the rung of the
+/// holder, and a dial of the id would end on the identity of another mesh.
+#[test]
+fn a_rung_that_reads_as_foreign_while_a_holder_is_followed_leaves_the_book_and_the_endpoint() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        use super::RungReport;
+        use crate::lookup::ProbeAnswer;
+
+        let (params, ports, peer, book, mut rungs) = member_settled_on_the_first_rung().await;
+        rungs.note(
+            RungReport {
+                port: ports[0],
+                answer: ProbeAnswer::Foreign,
+                generation: 0,
+            },
+            Instant::now(),
+        );
+
+        super::refresh_holder_rung(&params, &peer, &book, &mut rungs).await;
+
+        let known = rungs_known_to(&peer, params.id).await;
+        let booked = booked_rungs(&book, params.id);
+        rungs.finish().await;
+        peer.close().await;
+        let none: Vec<u16> = Vec::new();
+        assert_eq!(known, none, "the endpoint still knows the foreign rung");
+        assert_eq!(booked, none, "the book still names the foreign rung");
+    });
+}
+
+/// A rung is a loopback address and a port. An address of another host that has the same port is
+/// not that rung, and forgetting the rung leaves it in the entry.
+#[test]
+fn forgetting_a_rung_leaves_the_address_of_another_host_with_the_same_port() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let (squat, ports) = ladder_of_two();
+        drop(squat);
+        let mut params = public_params();
+        params.bind_ports = ports.clone();
+        let peer = loopback_endpoint().await;
+        let book = lookup::address_book(&peer);
+        let elsewhere = net::SocketAddr::from(([192, 0, 2, 7], ports[0]));
+        lookup::add_peer_addr(
+            &book,
+            rung_ladder::rendezvous_holder_addr(&params, ports[0]).with_ip_addr(elsewhere),
+        );
+
+        rung_ladder::forget_rungs(&params, &peer, &book, |rung| rung == ports[0]).await;
+
+        let info: Option<EndpointInfo> = book.get_endpoint_info(params.id);
+        let mut kept: Vec<net::SocketAddr> = Vec::new();
+        if let Some(info) = info {
+            kept = info.ip_addrs().copied().collect();
+        }
+        peer.close().await;
+        assert_eq!(
+            kept,
+            vec![elsewhere],
+            "the entry keeps the address of the other host, and only that one"
+        );
+    });
+}
+
+/// The rungs that `endpoint` knows for `id`.
 async fn rungs_known_to(endpoint: &Endpoint, id: iroh::EndpointId) -> Vec<u16> {
     let Some(info) = endpoint.remote_info(id).await else {
         return Vec::new();
@@ -1920,6 +2003,47 @@ async fn rungs_known_to(endpoint: &Endpoint, id: iroh::EndpointId) -> Vec<u16> {
         }
     }
     known
+}
+
+/// The check of the rung of the holder asks for a reading, and the answer comes after the tick.
+/// While no check has failed, the rung that the holder bound stays offered. After a check read
+/// as not ours (1 miss), a check that is out is no news, so the stamp stays old and the rung
+/// leaves the offered set when a heal tick has passed.
+#[test]
+fn a_holder_that_missed_a_check_does_not_stamp_its_rung_while_the_next_check_is_out() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        use super::RungReport;
+        use crate::lookup::ProbeAnswer;
+
+        let params = public_params();
+        let node = SecretKey::generate().public();
+        let rung = 40_004;
+        let mut rungs = super::RungWatch::detached();
+        rungs.clear_foreign(rung);
+        rungs.note(
+            RungReport {
+                port: rung,
+                answer: ProbeAnswer::Foreign,
+                generation: 0,
+            },
+            Instant::now(),
+        );
+        let first = rungs.own_rung_failed(&params, node, rung);
+        rungs.expire_readings();
+        rungs.expire_ours();
+
+        let second = rungs.own_rung_failed(&params, node, rung);
+
+        let offered = rungs.offered_rungs();
+        rungs.finish().await;
+        assert!(!first, "1 miss is not a failure");
+        assert!(!second, "a check that is out has not failed");
+        let nothing: Vec<u16> = Vec::new();
+        assert_eq!(
+            offered, nothing,
+            "a holder that missed a check stamped its rung while the next check was out"
+        );
+    });
 }
 
 /// The holder of the beacon asks for a reading of its own rung every heal tick, and the answer

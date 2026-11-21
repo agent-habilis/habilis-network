@@ -376,17 +376,42 @@ fn shed_beacon(
         target: "habilis_network::gossip",
         "beacon shed: a lower rung of the ladder answers as our mesh"
     );
-    if let Some(index) = held.rung_in(&params.bind_ports) {
-        state.rungs.release_rung(params.bind_ports[index]);
-    }
+    let released = held
+        .rung_in(&params.bind_ports)
+        .map(|index| params.bind_ports[index]);
     state.beacon_closing = Some(held.shed_then());
     state.next_rival_recheck = None;
     state.cancel_rendezvous_round();
-    state.address_book.remove_endpoint_info(params.id);
-    super::setup::register_rendezvous(&state.address_book, params, &state.rungs.offered_rungs());
+    forget_the_shed_rung(state, params, released);
     state.rendezvous_flags.remove(&RendezvousFlag::Linked);
     state.forget_rendezvous_verdict();
     state.arm_reclaim(Instant::now());
+}
+
+/// The book after the beacon was shed on the rung `released`. A shed is evidence about one rung:
+/// the rung that the beacon was on is not ours any more, and so is a rung that a reading took back
+/// (`RungWatch::not_ours_rungs`). Every other rung of the ladder stays, as at the heal registration:
+/// a rung that was read as ours and that nobody read since is no evidence against it. The endpoint
+/// forgets the released rung at the next heal tick (`RungWatch::take_retired`). A public mesh has
+/// no ladder: the entry holds the addresses of the beacon that was shed and what the mesh
+/// registered by itself (a relay rung), which is written back.
+fn forget_the_shed_rung(
+    state: &mut EventLoopState,
+    params: &beacon::RendezvousParams,
+    released: Option<u16>,
+) {
+    if let Some(port) = released {
+        state.rungs.release_rung(port);
+    }
+    if params.bind_ports.is_empty() {
+        state.address_book.remove_endpoint_info(params.id);
+    } else {
+        let not_ours = state.rungs.not_ours_rungs();
+        beacon::forget_rungs_in_book(params, &state.address_book, |port| {
+            released == Some(port) || not_ours.contains(&port)
+        });
+    }
+    super::setup::register_rendezvous(&state.address_book, params, &state.rungs.offered_rungs());
 }
 
 /// Tests only: make the beacon stop answering, if a test asked for it (`Beacons::StallBeacon`).
@@ -644,24 +669,19 @@ pub(super) fn shed_rival_beacon_if_due(
     // `NeighborDown` instead of a zombie that only dies at the QUIC idle
     // timeout — the zombie both stalls the post-shed re-graft and leaves
     // a poisoned pool entry under the shared id.
+    let mut released: Option<u16> = None;
     if let Some(held) = rendezvous.take() {
-        if let Some(index) = held.rung_in(&arm.params.bind_ports) {
-            state.rungs.release_rung(arm.params.bind_ports[index]);
-        }
+        released = held
+            .rung_in(&arm.params.bind_ports)
+            .map(|index| arm.params.bind_ports[index]);
         state.beacon_closing = Some(held.shed_then());
     }
     state.next_rival_recheck = None;
     state.rival_recheck_rounds = state.rival_recheck_rounds.saturating_add(1);
     // A round that was running against our own beacon now has nothing to find.
     state.cancel_rendezvous_round();
-    // The book still names the beacon just shed; the next holder writes its own address. What the
-    // mesh registered for the id by itself (a relay rung) is written back.
-    state.address_book.remove_endpoint_info(arm.params.id);
-    super::setup::register_rendezvous(
-        &state.address_book,
-        arm.params,
-        &state.rungs.offered_rungs(),
-    );
+    // The book still names the beacon just shed; the next holder writes its own address.
+    forget_the_shed_rung(state, arm.params, released);
     // Don't wait for that `NeighborDown` either — clear the link flag now
     // (mirroring the hard resume edge), or a yielding node's heal ticks
     // idle on "rendezvous linked" instead of grafting the rival's beacon.
@@ -698,6 +718,45 @@ mod tests {
     use std::{future, net};
     use tokio::sync::{mpsc, oneshot, watch};
     use tokio::time;
+
+    /// A shed takes out of the book the rung that the beacon was on, and nothing else on evidence
+    /// that it is not ours: a rung that was read as ours before, and that nobody read since, stays,
+    /// as the heal registration keeps it. The rung that was released is queued for the endpoint.
+    #[test]
+    fn a_shed_forgets_the_rung_it_released_and_keeps_the_rung_that_was_read_as_ours() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut params = public_params();
+        params.bind_ports = vec![41_001, 41_002];
+        let at = |port: u16| {
+            iroh::EndpointAddr::new(params.id)
+                .with_ip_addr(net::SocketAddr::from((net::Ipv4Addr::LOCALHOST, port)))
+        };
+        let mut state = testing::fresh_state();
+        state.rungs.clear_foreign(41_001);
+        state.rungs.clear_foreign(41_002);
+        lookup::add_peer_addr(&state.address_book, at(41_001));
+        lookup::add_peer_addr(&state.address_book, at(41_002));
+        state.rungs.expire_ours();
+
+        cohost_arm::forget_the_shed_rung(&mut state, &params, Some(41_001));
+
+        let info = state.address_book.get_endpoint_info(params.id);
+        let mut booked: Vec<u16> = Vec::new();
+        if let Some(info) = info {
+            booked = info.ip_addrs().map(net::SocketAddr::port).collect();
+        }
+        assert_eq!(
+            booked,
+            vec![41_002],
+            "the book keeps the rung that was read as ours, and only that one"
+        );
+        assert_eq!(
+            state.rungs.take_retired(),
+            vec![41_001],
+            "the endpoint is told to forget the rung that was released"
+        );
+    }
+
     /// A `discover` session never co-hosts and dials the beacon, and its book offers only the
     /// rungs that were read as ours, so it reads the ladder while it is not meshed, as a joiner.
     #[test]

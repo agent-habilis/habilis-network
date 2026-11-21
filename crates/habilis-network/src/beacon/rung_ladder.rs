@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
-use iroh::address_lookup::{EndpointInfo, memory};
+use iroh::address_lookup::memory;
 use iroh::{Endpoint, EndpointAddr, RelayUrl};
 
 use crate::lookup::{add_peer_addr, relay_ladder, replace_peer_addr};
@@ -65,45 +65,21 @@ pub(crate) fn rendezvous_addr_offering(
     rendezvous_addr(params).map(|address| keeping_rungs(address, |port| offered.contains(&port)))
 }
 
-/// Register `address` for the rendezvous id in `book`: the entry is replaced, and it keeps the
-/// rungs of the ladder that are `offered` and every address that is not a rung of the ladder.
-/// A merge kept every rung that an earlier registration had put in the entry, so a rung that
-/// is no longer offered (read as ours longer ago than a heal tick) stayed in the book, and a dial
-/// of the id still tried it and met whatever listener had taken the port.
-pub(crate) fn register_offered(
-    book: &memory::MemoryLookup,
-    params: &RendezvousParams,
-    offered: &[u16],
-    address: EndpointAddr,
-) {
-    let booked: Option<EndpointAddr> = book
-        .get_endpoint_info(params.id)
-        .map(EndpointInfo::into_endpoint_addr);
-    let kept: Option<EndpointAddr> = booked.map(|entry| {
-        keeping_rungs(entry, |port| {
-            offered.contains(&port) || !params.bind_ports.contains(&port)
-        })
-    });
-    let entry = match kept {
-        Some(kept) => {
-            EndpointAddr::from_parts(address.id, kept.addrs.into_iter().chain(address.addrs))
-        }
-        None => address,
-    };
-    replace_peer_addr(book, entry);
-}
-
 /// The rendezvous id at one rung of the loopback ladder.
 pub(crate) fn rendezvous_holder_addr(params: &RendezvousParams, port: u16) -> EndpointAddr {
     EndpointAddr::new(params.id).with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
 }
 
-/// `addr` without the IP addresses whose port `keep` refuses. An address of another kind stays.
+/// `addr` without the rungs that `keep` refuses. A rung is the loopback address and a port of the
+/// ladder, so an address of another host with the same port stays, and so does an address of
+/// another kind.
 pub(crate) fn keeping_rungs(address: EndpointAddr, keep: impl Fn(u16) -> bool) -> EndpointAddr {
     EndpointAddr::from_parts(
         address.id,
         address.addrs.into_iter().filter(|transport| {
-            if let iroh::TransportAddr::Ip(socket) = transport {
+            if let iroh::TransportAddr::Ip(socket) = transport
+                && socket.ip() == Ipv4Addr::LOCALHOST
+            {
                 keep(socket.port())
             } else {
                 true
@@ -154,13 +130,23 @@ pub(crate) async fn forget_rungs(
     if forgotten.addrs.is_empty() {
         return;
     }
+    forget_rungs_in_book(params, peer_book, &forget);
+    peer.remove_endpoint_addr(forgotten).await;
+}
+
+/// [`forget_rungs`] on the book alone: for a caller that cannot wait, which leaves the endpoint to
+/// a later tick.
+pub(crate) fn forget_rungs_in_book(
+    params: &RendezvousParams,
+    peer_book: &memory::MemoryLookup,
+    forget: impl Fn(u16) -> bool,
+) {
     if let Some(info) = peer_book.get_endpoint_info(params.id) {
         replace_peer_addr(
             peer_book,
             keeping_rungs(info.into_endpoint_addr(), |port| !forget(port)),
         );
     }
-    peer.remove_endpoint_addr(forgotten).await;
 }
 
 /// The rung `port` serves our beacon: the endpoint reaches the rendezvous id there and nowhere else
@@ -198,13 +184,14 @@ pub(crate) async fn refresh_holder_rung(
                 settle_on_rung(params, peer, peer_book, port).await;
                 return;
             }
+            RungRead::Foreign => {
+                rungs.mark_foreign(port);
+                forget_rungs(params, peer, peer_book, |rung| rung == port).await;
+            }
             RungRead::Unknown if rung_is_busy(port) => {
                 rungs.ask(params, peer.id(), port, false);
             }
-            RungRead::Unknown
-            | RungRead::Foreign
-            | RungRead::Silent
-            | RungRead::SilentLongEnough => {}
+            RungRead::Unknown | RungRead::Silent | RungRead::SilentLongEnough => {}
         }
     }
 }

@@ -36,7 +36,9 @@ use crate::protocol::crypto::Password;
 use crate::protocol::meshes::{LookupOpts, Mesh, MeshConfig, MeshName, Transport};
 use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::{RELAY_RUNG_PROBE, SETUP_RUNG_READ};
-use lookup::{ProbeAnswer, StoppableTask, build_mesh, relay_ladder, select_bootstrap_rung};
+use lookup::{
+    ProbeAnswer, StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
+};
 
 use crate::beacon::RendezvousParams;
 use crate::lifecycle;
@@ -197,21 +199,25 @@ pub(crate) fn register_rendezvous(
             "pre-registered rendezvous on the loopback port ladder"
         );
     }
-    beacon::register_offered(book, params, offered, address);
+    add_peer_addr(book, address);
 }
 
-/// [`register_rendezvous`] again, for a member that registered it before: a rung of the ladder
-/// that is not `offered` any more leaves the endpoint too, not only the book. The endpoint keeps
-/// the address that it was told for the id (`settle_on_rung`) and does not read the book again for
-/// an id that it knows, so a dial of the id would still try a rung that expired.
+/// [`register_rendezvous`] again, for a member that registered it before: the hint of the rendezvous
+/// is asserted again, and a rung leaves the book and the endpoint only on evidence that it is not
+/// ours (`RungWatch::not_ours_rungs`: read as foreign, or refused). The endpoint keeps the address
+/// that it was told for the id (`settle_on_rung`) and does not read the book again for an id that
+/// it knows, so a rung that a dial would meet another identity on must leave it too. A rung that
+/// nobody read lately stays: the absence of a reading says nothing, and a member that is meshed does
+/// not read the ladder. The rung of the holder, in particular, stays after a stall.
 pub(crate) async fn reregister_rendezvous(
     book: &memory::MemoryLookup,
     peer: &Endpoint,
     params: &RendezvousParams,
-    offered: &[u16],
+    rungs: &beacon::RungWatch,
 ) {
-    beacon::forget_rungs(params, peer, book, |port| !offered.contains(&port)).await;
-    register_rendezvous(book, params, offered);
+    let not_ours = rungs.not_ours_rungs();
+    beacon::forget_rungs(params, peer, book, |port| not_ours.contains(&port)).await;
+    register_rendezvous(book, params, &rungs.offered_rungs());
 }
 
 /// Build the endpoint, subscribe to the topic, and produce a ready
