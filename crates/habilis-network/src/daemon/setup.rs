@@ -3950,17 +3950,16 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use std::{env, fs, process};
 
+            use crate::daemon::event_loop;
+
             let base = env::temp_dir().join(format!("habilis-failed-start-{}", process::id()));
             let options = membership::JoinOptions::default();
             let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
-            let config = super::setup_mesh(
-                kind,
-                super::SetupParams::new(author.clone(), embed::SilentSink)
-                    .max_connections(8)
-                    .runtime_base(base.clone()),
-            )
-            .await
-            .expect("a loopback mesh sets up");
+            let params = super::SetupParams::new(author.clone(), embed::SilentSink);
+            let params = params.max_connections(8).runtime_base(base.clone());
+            let config: super::EventLoopConfig = super::setup_mesh(kind, params)
+                .await
+                .expect("a loopback mesh sets up");
             // A file where the chunk store wants its folder makes the start fail.
             let chunks = super::default_chunks_path(&base, config.mesh_id(), &author);
             fs::create_dir_all(chunks.parent().expect("the chunk folder has a parent"))
@@ -3970,9 +3969,15 @@ mod tests {
             let underlay = config.transports.multihop.clone();
             let (inbound_tx, _inbound_rx) = mpsc::channel(1);
             let app = membership::MembershipApp::new(inbound_tx);
-            let started = crate::daemon::event_loop::run(config, app, None, None).await;
-            assert!(started.is_err(), "the start fails on the blocked chunk store");
-            assert!(endpoint.is_closed(), "the endpoint is closed after a failed start");
+            let started = Box::pin(event_loop::run(config, app, None, None)).await;
+            assert!(
+                started.is_err(),
+                "the start fails on the blocked chunk store"
+            );
+            assert!(
+                endpoint.is_closed(),
+                "the endpoint is closed after a failed start"
+            );
             assert!(
                 underlay.expect("the default list has multihop").is_closed(),
                 "the underlay is closed after a failed start"

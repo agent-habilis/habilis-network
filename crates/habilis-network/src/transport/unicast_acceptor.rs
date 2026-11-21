@@ -342,7 +342,8 @@ mod tests {
     #[test]
     fn a_frame_that_keeps_arriving_is_read_to_its_end() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let (connection, router, client, mut frames) = connected(Duration::from_secs(600)).await;
+            let (connection, router, client, mut frames) =
+                connected(Duration::from_secs(600)).await;
             let mut stream = connection.open_uni().await.expect("open a stream");
             for part in [b"a", b"b"] {
                 stream.write_all(part).await.expect("write a part");

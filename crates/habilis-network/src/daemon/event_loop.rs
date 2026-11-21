@@ -150,29 +150,13 @@ async fn run_checked<Driver: NodeDriver>(
     let external_req_rx = session_rx;
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
-    let owned = OwnedEndpoints {
-        router: endpoints.router,
-        owner: endpoints.endpoint_owner,
-        // A handle that the caller injected is the caller's; `close` skips it with the endpoint.
-        #[cfg(feature = "multihop")]
-        multihop: transports.multihop.clone(),
-    };
-    // A start step that fails closes the endpoints that the loop owns, as a leave does.
-    let chunks = match open_chunks(runtime.runtime_base.as_deref(), &mesh.mesh, &mesh.author) {
-        Ok(chunks) => chunks,
-        Err(error) => {
-            owned.close().await;
-            return Err(error);
-        }
-    };
+    let owned = OwnedEndpoints::new(endpoints.router, endpoints.endpoint_owner, &transports);
+    let opened = open_chunks(runtime.runtime_base.as_deref(), &mesh.mesh, &mesh.author);
+    let chunks = or_close(opened, &owned).await?;
     #[cfg(feature = "host")]
-    let quit_rx = match quit_channel(handle_signals, exit_on_quit, runtime.owner) {
-        Ok(quit_rx) => quit_rx,
-        Err(error) => {
-            owned.close().await;
-            return Err(error.into());
-        }
-    };
+    let quit = quit_channel(handle_signals, exit_on_quit, runtime.owner);
+    #[cfg(feature = "host")]
+    let quit_rx = or_close(quit, &owned).await?;
     #[cfg(not(feature = "host"))]
     let quit_rx = quit_channel(handle_signals, exit_on_quit);
     let mut state: EventLoopState = initial_state(
@@ -2054,6 +2038,21 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
     }
 }
 
+/// The value of a start step. If the step fails, the endpoints that the loop owns close first,
+/// as a leave closes them.
+async fn or_close<T, StepError: Into<anyhow::Error>>(
+    step: Result<T, StepError>,
+    owned: &OwnedEndpoints,
+) -> Result<T> {
+    match step {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            owned.clone().close().await;
+            Err(error.into())
+        }
+    }
+}
+
 /// The next quit signal. A closed channel is no signal: a signal source that could not register
 /// drops its sender, and that must not end the daemon. The arm then pends for good.
 async fn next_quit(quit_rx: &mut Option<mpsc::Receiver<()>>) {
@@ -2068,7 +2067,7 @@ async fn next_quit(quit_rx: &mut Option<mpsc::Receiver<()>>) {
 mod tests {
     use std::time::Duration;
 
-    use tokio::sync::oneshot;
+    use tokio::sync::{mpsc, oneshot};
 
     use n0_future::time;
     use n0_future::time::Instant as TokioInstant;
@@ -2088,17 +2087,21 @@ mod tests {
     #[test]
     fn a_closed_quit_channel_is_no_quit() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let (quit_tx, quit_rx) = tokio::sync::mpsc::channel(1);
-            drop(quit_tx);
-            let mut quit_rx = Some(quit_rx);
-            let quit = time::timeout(Duration::from_millis(200), super::next_quit(&mut quit_rx));
-            assert!(quit.await.is_err(), "a closed quit channel started the shutdown");
+            let (closed_tx, closed_rx) = mpsc::channel(1);
+            drop(closed_tx);
+            let mut closed = Some(closed_rx);
+            let on_close = time::timeout(Duration::from_millis(200), super::next_quit(&mut closed));
+            assert!(
+                on_close.await.is_err(),
+                "a closed quit channel started the shutdown"
+            );
 
-            let (quit_tx, quit_rx) = tokio::sync::mpsc::channel(1);
-            quit_tx.try_send(()).expect("the channel has room");
-            let mut quit_rx = Some(quit_rx);
-            let quit = time::timeout(Duration::from_millis(200), super::next_quit(&mut quit_rx));
-            assert!(quit.await.is_ok(), "a quit signal starts the shutdown");
+            let (signal_tx, signal_rx) = mpsc::channel(1);
+            signal_tx.try_send(()).expect("the channel has room");
+            let mut signalled = Some(signal_rx);
+            let on_signal =
+                time::timeout(Duration::from_millis(200), super::next_quit(&mut signalled));
+            assert!(on_signal.await.is_ok(), "a quit signal starts the shutdown");
         });
     }
 
