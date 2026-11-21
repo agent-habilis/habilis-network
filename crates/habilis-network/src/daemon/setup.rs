@@ -2667,6 +2667,7 @@ mod tests {
     /// A restart of `state`, the way the setup takes it: [`super::hold_member_key`] tries the lock again for
     /// `KEY_LOCK_RETRY`. A start that tries it once fails while a child that another test spawns still holds a
     /// copy of the lock file, between its fork and its exec.
+    #[cfg(all(unix, feature = "host"))]
     async fn start_again(state: &Path) -> anyhow::Result<RunKeys> {
         let key_lock = super::hold_member_key(Some(state)).await?;
         super::run_keys_holding(Some(state), key_lock, &super::NEVER_CANCELLED)
