@@ -119,6 +119,7 @@ async fn wait_for_logs(needle: &str, count: usize, deadline: Duration) -> bool {
 
 /// A relay URL in front of `real`: while the gate is shut it drops every connection, and once it
 /// is open it forwards them.
+// The test opens the gate and the proxy task reads it, so both own the flag.
 async fn spawn_gated_relay(real: &RelayUrl) -> (RelayUrl, Arc<AtomicBool>) {
     let host = real.host_str().expect("the relay URL has a host");
     let upstream = format!("{host}:{}", real.port().expect("the relay URL has a port"));
