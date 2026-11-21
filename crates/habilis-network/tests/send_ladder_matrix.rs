@@ -890,12 +890,14 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
 fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_goes() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        // One send: its text, whether the engine accepted it, and whether the rung read `webrtc`
-        // before the send and after it returned. The reading after the send is the one that is
-        // not stale: a send waits up to the path budget, and the rung can change meanwhile.
+        // One send: its text, whether the engine accepted it, how long it took, and whether the rung
+        // read `webrtc` before the send and after it returned. The reading after the send is the
+        // one that is not stale: a send waits up to the path budget, and the rung can change
+        // meanwhile.
         struct Probe {
             text: String,
             accepted: bool,
+            took: Duration,
             on_the_rung_before: bool,
             on_the_rung_after: bool,
         }
@@ -929,11 +931,14 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_g
         while started.elapsed() < STEP_DEADLINE {
             let text = format!("while ip goes {NAME} {}", sent.len());
             let on_the_rung_before = on_the_rung_since.is_some();
+            let sending = Instant::now();
             let accepted = alice.send("bob", &text).await.is_ok();
+            let took = sending.elapsed();
             let on_the_rung_after = alice.rung_to("bob").await == Some("webrtc");
             sent.push(Probe {
                 text,
                 accepted,
+                took,
                 on_the_rung_before,
                 on_the_rung_after,
             });
@@ -963,11 +968,13 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_g
         let on_the_rung = on_the_rung_since.unwrap_or(first_on_the_rung);
 
         // A send is refused only while the pair has no path. A send that started on the rung and
-        // returned on it is never refused. The other refused sends wait for the path first
-        // (`PATH_SELECT_TIMEOUT`), so the transition, which lasts from the start to the first
-        // reading of `webrtc`, holds at most 1 of them for each wait, and 1 more for the send that
-        // was out when it ended. An immediate refusal (a held frame) would break the bound, and
-        // the test says so.
+        // returned on it is never refused. A refused send that waited for the path
+        // (`PATH_SELECT_TIMEOUT`) is bounded: the transition, which lasts from the start to the
+        // first reading of `webrtc`, holds at most 1 of them for each wait, and 1 more for the send
+        // that was out when it ended. A refusal that returns before the wait (a held frame, an
+        // undeliverable one, a dial that failed) is allowed: the contract says that a refused send
+        // is not owed and that the caller retries it. Those are not counted in the bound, and the
+        // check above keeps them out of the time after the rung.
         let refused: Vec<&Probe> = sent.iter().filter(|probe| !probe.accepted).collect();
         let refused_on_the_rung: Vec<&&Probe> = refused
             .iter()
@@ -980,10 +987,16 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_g
         );
         let transition = first_on_the_rung.duration_since(started);
         let max_refused = transition.as_millis() / PATH_WAIT.as_millis() + 1;
+        let waited_for_the_path: Vec<&&Probe> = refused
+            .iter()
+            .filter(|probe| probe.took >= PATH_WAIT.saturating_sub(Duration::from_secs(1)))
+            .collect();
         assert!(
-            refused.len() as u128 <= max_refused,
-            "{NAME}: {} of {} sends were refused in a transition of {transition:?}, at most \
-             {max_refused} allowed (1 for each {PATH_WAIT:?} and 1 more)",
+            waited_for_the_path.len() as u128 <= max_refused,
+            "{NAME}: {} refused sends waited for the path in a transition of {transition:?}, at most \
+             {max_refused} allowed (1 for each {PATH_WAIT:?} and 1 more); {} of {} sends were \
+             refused in all",
+            waited_for_the_path.len(),
             refused.len(),
             sent.len()
         );
@@ -995,25 +1008,16 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_g
             !owed.is_empty(),
             "{NAME}: the send accepted no probe before the rung read webrtc, so the test proved nothing"
         );
-        let waiting = Instant::now();
-        let mut late = Duration::ZERO;
-        for probe in &owed {
-            while !bob.saw_msg(&probe.text) {
-                assert!(
-                    waiting.elapsed() < PAYLOAD_DEADLINE,
-                    "{NAME}: the frame {:?} was accepted before the session and never reached bob",
-                    probe.text
-                );
-                time::sleep(Duration::from_millis(250)).await;
-            }
-            late = late.max(on_the_rung.elapsed());
-        }
+        let owed_texts: Vec<&str> = owed.iter().map(|probe| probe.text.as_str()).collect();
+        wait_for_frames(&mut bob, &owed_texts, NAME).await;
+        let late = on_the_rung.elapsed();
         eprintln!(
-            "DIAG {NAME}: {} probes, {} refused of at most {max_refused} (transition {transition:?}), \
-             {} owed (accepted before the rung read webrtc), the last one reached bob {:?} after \
+            "DIAG {NAME}: {} probes, {} refused ({} after the path wait, at most {max_refused}; transition \
+             {transition:?}), {} owed (accepted before the rung read webrtc), the last one reached bob {:?} after \
              the rung was first read",
             sent.len(),
             refused.len(),
+            waited_for_the_path.len(),
             owed.len(),
             late,
         );
@@ -1021,6 +1025,21 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_g
             member.leave().await;
         }
     });
+}
+
+/// Wait until `bob` has read each of `texts`: they were accepted before the session, and the session
+/// carries them when it attaches.
+async fn wait_for_frames(bob: &mut Member, texts: &[&str], name: &str) {
+    let waiting = Instant::now();
+    for text in texts {
+        while !bob.saw_msg(text) {
+            assert!(
+                waiting.elapsed() < PAYLOAD_DEADLINE,
+                "{name}: the frame {text:?} was accepted before the session and never reached bob"
+            );
+            time::sleep(Duration::from_millis(250)).await;
+        }
+    }
 }
 
 /// `udp_webrtc_ip_direct` with the order of the ids fixed: only the lower id offers a session,
