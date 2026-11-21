@@ -107,7 +107,8 @@ pub(super) async fn run_heal(
         // is re-validated off-loop by the beacon's liveness self-monitor,
         // so a rung that died during the freeze self-corrects — no inline
         // ladder walk on the event loop here.
-        setup::register_rendezvous(&state.address_book, params, &state.rungs.offered_rungs());
+        let offered = state.rungs.offered_rungs();
+        setup::reregister_rendezvous(&state.address_book, context.endpoint, params, &offered).await;
         if webrtc::rendezvous::rendezvous_graftable(state) {
             gossip::heal::tick_heal_hard(context.endpoint, params.id, context.sender).await;
         }

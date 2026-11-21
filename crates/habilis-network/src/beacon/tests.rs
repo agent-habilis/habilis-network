@@ -1873,6 +1873,55 @@ fn a_heal_registration_takes_a_rung_that_is_no_longer_offered_out_of_the_book() 
     });
 }
 
+/// The endpoint keeps the address that it was told for the id, and it does not read the book again
+/// for an id that it knows. A rung that the endpoint settled on, and that is no longer offered,
+/// must leave the endpoint at the heal registration as well as the book, or a dial of the id still
+/// tries it.
+#[test]
+fn a_heal_registration_takes_a_rung_that_is_no_longer_offered_out_of_the_endpoint() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let (squat, ports) = ladder_of_two();
+        drop(squat);
+        let mut params = public_params();
+        params.bind_ports = ports.clone();
+        let peer = loopback_endpoint().await;
+        let book = lookup::address_book(&peer);
+        let mut rungs = super::RungWatch::detached();
+        rungs.clear_foreign(ports[0]);
+        rung_ladder::settle_on_rung(&params, &peer, &book, ports[0]).await;
+        assert_eq!(
+            rungs_known_to(&peer, params.id).await,
+            vec![ports[0]],
+            "the endpoint settled on the rung"
+        );
+
+        rungs.expire_ours();
+        setup::reregister_rendezvous(&book, &peer, &params, &rungs.offered_rungs()).await;
+
+        let known = rungs_known_to(&peer, params.id).await;
+        peer.close().await;
+        let none: Vec<u16> = Vec::new();
+        assert_eq!(
+            known, none,
+            "the endpoint still knows a rung that is not offered any more"
+        );
+    });
+}
+
+/// The loopback rungs that `endpoint` knows for `id`.
+async fn rungs_known_to(endpoint: &Endpoint, id: iroh::EndpointId) -> Vec<u16> {
+    let Some(info) = endpoint.remote_info(id).await else {
+        return Vec::new();
+    };
+    let mut known: Vec<u16> = Vec::new();
+    for entry in info.addrs() {
+        if let iroh::TransportAddr::Ip(socket) = entry.addr() {
+            known.push(socket.port());
+        }
+    }
+    known
+}
+
 /// The holder of the beacon asks for a reading of its own rung every heal tick, and the answer
 /// comes after the tick that asked. While the check is out, the rung is still the one that the
 /// holder bound, so it stays offered: without a reading to stamp it, the rung left the offered

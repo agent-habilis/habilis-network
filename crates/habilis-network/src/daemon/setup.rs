@@ -200,6 +200,20 @@ pub(crate) fn register_rendezvous(
     beacon::register_offered(book, params, offered, address);
 }
 
+/// [`register_rendezvous`] again, for a member that registered it before: a rung of the ladder
+/// that is not `offered` any more leaves the endpoint too, not only the book. The endpoint keeps
+/// the address that it was told for the id (`settle_on_rung`) and does not read the book again for
+/// an id that it knows, so a dial of the id would still try a rung that expired.
+pub(crate) async fn reregister_rendezvous(
+    book: &memory::MemoryLookup,
+    peer: &Endpoint,
+    params: &RendezvousParams,
+    offered: &[u16],
+) {
+    beacon::forget_rungs(params, peer, book, |port| !offered.contains(&port)).await;
+    register_rendezvous(book, params, offered);
+}
+
 /// Build the endpoint, subscribe to the topic, and produce a ready
 /// `EventLoopConfig`. Shared by the `create` / `join` CLI paths and
 /// the in-process sessions.
