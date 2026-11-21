@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, ReadToEndError, RecvStream};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use tokio::sync::mpsc;
 
@@ -117,11 +117,32 @@ impl UnicastAcceptor {
     }
 }
 
-/// How long the read of one frame may take. The idle timer does not run during the read, so a
-/// peer that opens a stream and never finishes it would hold the accept task, and the busy mark
-/// that keeps its connection from eviction. A sender gives up on a send after 3 s (the send
-/// timeout of the pool), so a frame that takes longer than this is no frame of a sender that runs.
-const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the read of a frame may wait for its next bytes. The idle timer does not run during
+/// the read, so a peer that opens a stream and never finishes it would hold the accept task, and
+/// the busy mark that keeps its connection from eviction. The bound is on each wait, not on the
+/// whole read: `finish` returns to the sender while the frame is in flight, so the sender gives no
+/// bound on delivery, and a slow link that keeps sending must deliver its frame.
+const FRAME_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Read one frame to its end, at most [`MAX_UNICAST_FRAME`] bytes. `None` when the stream stalls:
+/// no bytes for [`FRAME_STALL_TIMEOUT`].
+async fn read_frame(recv: &mut RecvStream) -> Option<Result<Vec<u8>, ReadToEndError>> {
+    let mut frame: Vec<u8> = Vec::new();
+    loop {
+        let chunk = recv.read_chunk(MAX_UNICAST_FRAME);
+        let Ok(read) = n0future_time::timeout(FRAME_STALL_TIMEOUT, chunk).await else {
+            return None;
+        };
+        match read {
+            Ok(Some(bytes)) if frame.len() + bytes.len() > MAX_UNICAST_FRAME => {
+                return Some(Err(ReadToEndError::TooLong));
+            }
+            Ok(Some(bytes)) => frame.extend_from_slice(&bytes),
+            Ok(None) => return Some(Ok(frame)),
+            Err(error) => return Some(Err(error.into())),
+        }
+    }
+}
 
 impl ProtocolHandler for UnicastAcceptor {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
@@ -146,8 +167,7 @@ impl ProtocolHandler for UnicastAcceptor {
                 Ok(Ok(mut recv)) => {
                     let admission = self.admission.as_ref();
                     let _busy = admission.map(|table| table.busy(connection.remote_id()));
-                    let read = recv.read_to_end(MAX_UNICAST_FRAME);
-                    let Ok(frame) = n0future_time::timeout(FRAME_READ_TIMEOUT, read).await else {
+                    let Some(frame) = read_frame(&mut recv).await else {
                         tracing::debug!(target: LOG_TARGET, "closing an accepted unicast connection: a stream stalled");
                         connection.close(IDLE.into(), b"stalled stream");
                         break;
@@ -311,6 +331,35 @@ mod tests {
             );
             drop(stalled);
             tokio_time::resume();
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// A slow link that keeps sending delivers its frame. The sender gives no bound on delivery:
+    /// `finish` returns while the frame is in flight. So the read bounds each wait for a byte, not
+    /// the whole read. The frame here takes 6 s in parts that come 3 s apart.
+    #[test]
+    fn a_frame_that_keeps_arriving_is_read_to_its_end() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (connection, router, client, mut frames) = connected(Duration::from_secs(600)).await;
+            let mut stream = connection.open_uni().await.expect("open a stream");
+            for part in [b"a", b"b"] {
+                stream.write_all(part).await.expect("write a part");
+                tokio_time::sleep(Duration::from_secs(3)).await;
+            }
+            stream.write_all(b"c").await.expect("write the last part");
+            stream.finish().expect("finish the stream");
+            let frame = tokio_time::timeout(Duration::from_secs(5), frames.recv())
+                .await
+                .expect("the frame arrives")
+                .expect("the inbox is open");
+            assert_eq!(&frame.bytes[..], b"abc", "the whole frame arrives");
+            assert!(
+                connection.close_reason().is_none(),
+                "the connection stays open: {:?}",
+                connection.close_reason()
+            );
             router.shutdown().await.expect("shutdown");
             client.close().await;
         });
