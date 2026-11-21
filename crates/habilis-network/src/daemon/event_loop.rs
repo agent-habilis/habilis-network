@@ -33,9 +33,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use iroh::{Endpoint, EndpointAddr, RelayUrl, Watcher as _};
+use iroh::{Endpoint, EndpointAddr, Watcher as _};
 use iroh_gossip::api::{ApiError, Event, GossipReceiver, GossipTopic};
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
@@ -58,9 +58,9 @@ use crate::{beacon, gossip, lifecycle};
 
 use super::app::NodeDriver;
 use super::cohost_arm::{
-    CohostArm, claims_at_startup, may_cohost, maybe_cohost, maybe_reclaim, note_rival_holds,
-    offer_to_the_new_holder, probes_before_claim, release_rendezvous, schedule_rival_recheck,
-    shed_rival_beacon_if_due, verdict_after_known_holders,
+    CohostArm, claims_at_startup, maybe_cohost, maybe_reclaim, note_rival_holds,
+    offer_to_the_new_holder, probes_before_claim, reads_ladder_while_unmeshed, release_rendezvous,
+    schedule_rival_recheck, shed_rival_beacon_if_due, verdict_after_known_holders,
 };
 #[cfg(feature = "host")]
 use super::config::RuntimeConfig;
@@ -266,6 +266,7 @@ async fn run_checked<Driver: NodeDriver>(
         rendezvous_params: rendezvous.rendezvous_params,
         rung_rx: rendezvous.rung_rx,
         rung_probe: rendezvous.rung_probe,
+        prober_closes: rendezvous.prober_closes,
         rung_reports,
         cohost: rendezvous.cohost,
         started,
@@ -844,9 +845,11 @@ struct EventLoop<Driver: NodeDriver> {
     rendezvous_params: beacon::RendezvousParams,
     /// Bootstrap rung chosen off-loop (startup probe + beacon
     /// self-monitor); the loop applies changes via the rung-update arm.
-    rung_rx: watch::Receiver<Option<RelayUrl>>,
+    rung_rx: mpsc::UnboundedReceiver<lookup::RungDecision>,
     /// The startup probe behind `rung_rx`, released with the rendezvous.
     rung_probe: Option<lookup::StoppableTask>,
+    /// The closes of the endpoints that read the busy rungs at setup.
+    prober_closes: Vec<oneshot::Receiver<()>>,
     /// What the probe tasks of the private ladder found, and the walk that asked for it.
     rung_reports: mpsc::UnboundedReceiver<beacon::RungReport>,
     /// When this member may serve the rendezvous (see [`CoHostPolicy`]).
@@ -916,8 +919,9 @@ struct Loop<'node, Driver: NodeDriver> {
     rendezvous: Option<beacon::Rendezvous>,
     rival_probe: Option<beacon::RivalProbe>,
     rendezvous_params: beacon::RendezvousParams,
-    rung_rx: watch::Receiver<Option<RelayUrl>>,
+    rung_rx: mpsc::UnboundedReceiver<lookup::RungDecision>,
     rung_probe: Option<lookup::StoppableTask>,
+    prober_closes: Vec<oneshot::Receiver<()>>,
     rung_reports: mpsc::UnboundedReceiver<beacon::RungReport>,
     cohost: CoHostPolicy,
     started: Instant,
@@ -958,6 +962,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         )
         .await;
         super::cohost_arm::wait_for_shed_close(&mut self.state).await;
+        super::cohost_arm::wait_for_prober_closes(self.prober_closes).await;
         match outcome {
             Ok(exit_after_release) => {
                 if exit_after_release {
@@ -1304,13 +1309,13 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     /// A bootstrap rung chosen off-loop (startup probe / beacon self-monitor); apply it cheaply.
-    fn rung_change(&mut self) {
+    fn rung_change(&mut self, decision: lookup::RungDecision) {
         self.state.idle.ext.rung_change += 1;
         apply_rung_change(
             &mut self.state,
             &mut self.rendezvous_params,
             &mut self.rendezvous,
-            &self.rung_rx,
+            decision,
         );
     }
 
@@ -1406,24 +1411,15 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             &mut self.rival_probe,
         )
         .await;
-        // Outside the reclaim window and before the grace, no walk acts on the reading:
-        // a joiner that is not meshed yet applies it itself.
-        if !self.state.standing.contains(&Standing::Meshed)
-            && !may_cohost(
-                self.cohost,
-                self.state.standing.contains(&Standing::Meshed),
-                self.started,
-            )
-            && !self.rendezvous_params.bind_ports.is_empty()
-        {
-            beacon::read_ladder(
-                &self.rendezvous_params,
-                context.endpoint,
-                &self.state.address_book,
-                &mut self.state.rungs,
-            )
-            .await;
-        }
+        read_ladder_while_unmeshed(
+            &mut self.state,
+            &self.rendezvous_params,
+            self.cohost,
+            self.started,
+            self.rendezvous.is_some(),
+            context.endpoint,
+        )
+        .await;
     }
 
     async fn beacon_closed(&mut self) {
@@ -1479,6 +1475,15 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             )
             .await;
         }
+        read_ladder_while_unmeshed(
+            &mut self.state,
+            &self.rendezvous_params,
+            self.cohost,
+            self.started,
+            self.rendezvous.is_some(),
+            context.endpoint,
+        )
+        .await;
         probe::regraft_due(&mut self.state, &context).await;
         probe::refill_isolated(&mut self.state, &context).await;
         webrtc::session_policy::detach_sessions_under_udp(&mut self.state, &context);
@@ -1574,6 +1579,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         rendezvous_params,
         rung_rx,
         rung_probe,
+        prober_closes,
         rung_reports,
         cohost,
         started,
@@ -1656,6 +1662,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         rendezvous_params,
         rung_rx,
         rung_probe,
+        prober_closes,
         rung_reports,
         cohost,
         started,
@@ -1758,7 +1765,7 @@ async fn run_loop<Driver: NodeDriver>(
             },
             _ = lp.intervals.heal.tick() => { lp.heal().await?; },
             _ = lp.intervals.digest_round.tick() => { lp.digest_round().await; },
-            Ok(()) = lp.rung_rx.changed() => { lp.rung_change(); },
+            Some(decision) = lp.rung_rx.recv() => { lp.rung_change(decision); },
             found_rival = beacon::probe_verdict(&mut lp.rival_probe) => { lp.probe_verdict(found_rival).await; },
             Some(report) = lp.rung_reports.recv() => { lp.rung_report(report).await; },
             () = closed_opt(&mut lp.state.beacon_closing) => { lp.beacon_closed().await; },
@@ -1977,6 +1984,37 @@ struct MaintenanceIntervals {
     /// Periodic relay link-state re-broadcast (our own measured links), so peers
     /// keep a fresh routing graph.
     linkstate: time::Interval,
+}
+
+/// Outside the reclaim window and before the grace, no walk acts on the reading: a joiner that is
+/// not meshed yet applies it itself. The book offers no rung that was not read as ours, so this is
+/// how the joiner learns the rung that the beacon binds: the bind check says which rungs are busy
+/// at once, a probe reads each new one, and the rung that answers as ours is admitted. A rung that
+/// says nothing is asked again, not admitted. It runs on each report of a probe and on each
+/// reclaim tick, so the beacon of the mesh is found within a tick of its bind, not after a heal
+/// tick.
+async fn read_ladder_while_unmeshed(
+    state: &mut EventLoopState,
+    params: &beacon::RendezvousParams,
+    cohost: CoHostPolicy,
+    started: Instant,
+    holds_beacon: bool,
+    endpoint: &Endpoint,
+) {
+    let meshed = state.standing.contains(&Standing::Meshed);
+    let reclaim_open = state
+        .reclaim_until
+        .is_some_and(|deadline| Instant::now() < deadline);
+    if reads_ladder_while_unmeshed(
+        cohost,
+        meshed,
+        started,
+        params.bind_ports.len(),
+        holds_beacon,
+        reclaim_open,
+    ) {
+        beacon::read_ladder(params, endpoint, &state.address_book, &mut state.rungs).await;
+    }
 }
 
 /// Build the maintenance tickers, eating the first immediate tick on
@@ -2773,5 +2811,108 @@ mod chain_tests {
             text.contains("Address already in use"),
             "the io cause of EventLoopError is lost: {text}"
         );
+    }
+}
+
+// The `rung_rx` arm of the loop, with a real node on a local relay. The tests of `apply_rung_change`
+// call it with one decision, so they cannot tell a loop that applies each decision from one that
+// reads the last decision of the channel only.
+#[cfg(all(test, feature = "host", feature = "iroh-test-utils"))]
+mod rung_arm_tests {
+    use std::time::Duration;
+
+    use iroh::RelayUrl;
+    use n0_future::time::{self, Instant as TokioInstant};
+    use tokio::sync::mpsc;
+
+    use crate::daemon::node::{Node, SignalHandling};
+    use crate::daemon::setup::{SetupParams, setup_mesh};
+    use crate::lookup::{RungChange, RungDecision, test_relay};
+    use crate::protocol::meshes::Lookup;
+    use crate::{embed, membership};
+
+    fn rung_of(host: &str) -> RelayUrl {
+        format!("https://{host}.example/")
+            .parse()
+            .expect("a test host forms a valid https URL")
+    }
+
+    fn moved_to(rung: &RelayUrl) -> RungDecision {
+        RungDecision {
+            from: None,
+            rung: Some(rung.clone()),
+            change: RungChange::Moved,
+        }
+    }
+
+    /// 2 rung decisions that are in the channel when the loop reads it are both applied. A `Moved`
+    /// decision registers its rung for joiners and sheds nothing, so the book of the node shows
+    /// each rung that the loop applied. A loop that applied only the newest decision of the
+    /// channel registers the second rung and never the first.
+    ///
+    /// The test does not check the order of the 2 decisions: the book merges the rungs, and a
+    /// union does not depend on the order. The order rests on the channel and on the one arm. If a
+    /// later change makes a `Moved` decision replace the entry of the book, the first assertion
+    /// fails with both decisions applied: change the observable, not the loop.
+    ///
+    /// The decisions are synthetic: production sends a `Moved` decision with the generation of a
+    /// monitor, and the arm does not read that field.
+    #[test]
+    fn two_rung_decisions_in_the_channel_are_both_applied_by_the_loop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+            let options = membership::JoinOptions::default()
+                .lookup(vec![Lookup::Relay])
+                .relay_urls(vec![relay.to_string()]);
+            let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+            let config = setup_mesh(
+                kind,
+                SetupParams::new(author, embed::SilentSink).max_connections(8),
+            )
+            .await
+            .expect("a relay mesh sets up");
+            let book = config.transports.address_book.clone();
+            let rendezvous = config.rendezvous.rendezvous_params.id;
+            // The config holds the receiver, and the channel has no bound: both decisions are in
+            // the channel before the loop exists, so its first read finds both, on any runtime.
+            let (first, second) = (rung_of("rung-first"), rung_of("rung-second"));
+            let rung_tx = &config.rendezvous.rendezvous_params.rung_tx;
+            rung_tx
+                .send(moved_to(&first))
+                .expect("the config holds the channel");
+            rung_tx
+                .send(moved_to(&second))
+                .expect("the config holds the channel");
+            let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+            let node = Node::spawn(
+                config,
+                membership::MembershipApp::new(inbound_tx),
+                None,
+                SignalHandling::Leave,
+            );
+
+            let registered = || -> Vec<RelayUrl> {
+                let Some(info) = book.get_endpoint_info(rendezvous) else {
+                    return Vec::new();
+                };
+                let address = info.into_endpoint_addr();
+                address.relay_urls().cloned().collect()
+            };
+            let deadline = TokioInstant::now() + Duration::from_secs(10);
+            while !registered().contains(&second) && TokioInstant::now() < deadline {
+                time::sleep(Duration::from_millis(20)).await;
+            }
+            let rungs = registered();
+            node.leave().await.expect("the node leaves");
+
+            assert!(
+                rungs.contains(&second),
+                "the loop did not apply the last decision: {rungs:?}"
+            );
+            assert!(
+                rungs.contains(&first),
+                "the loop skipped the first of 2 decisions that were in the channel (or a `Moved` decision no longer merges into the book): {rungs:?}"
+            );
+        });
     }
 }

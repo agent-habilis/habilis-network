@@ -6,8 +6,9 @@ use crate::util::tuning;
 
 use crate::lookup::{TransportHandles, build_endpoint};
 
-use super::rung_ladder::{admit_rung, forget_rungs};
-use super::{RendezvousParams, RungRead, RungWatch, Walk, beacon_lookups, rung_is_busy};
+use super::{
+    RendezvousParams, RungRead, RungWatch, Walk, beacon_lookups, rung_is_busy, rung_ladder,
+};
 
 use crate::{lookup, transport};
 /// Build the rendezvous endpoint (see module docs for the one-beacon /
@@ -98,14 +99,16 @@ pub(crate) async fn build_rendezvous_endpoint(
             RungRead::Foreign | RungRead::SilentLongEnough => {
                 tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung held by a foreign mesh, or silent for the whole window; trying next rung");
                 rungs.mark_foreign(port);
-                forget_rungs(params, peer, peer_book, |rung| rung == port).await;
+                rung_ladder::forget_rungs(params, peer, peer_book, |rung| rung == port).await;
             }
             RungRead::Silent => {
                 if rungs.refused(port) {
-                    forget_rungs(params, peer, peer_book, |rung| rung == port).await;
-                } else {
-                    admit_rung(params, peer, peer_book, port).await;
+                    rung_ladder::forget_rungs(params, peer, peer_book, |rung| rung == port).await;
                 }
+                // A silent rung is not put in the book: nobody proved it to be ours, and a foreign
+                // beacon on a loaded host reads silent before it reads foreign. The walk waits for
+                // the reading to go stale and asks again, so that a rung that stays silent is bound
+                // only once it has been silent for the whole window.
                 tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung says nothing; staying peer for now");
                 return Walk::Nothing;
             }

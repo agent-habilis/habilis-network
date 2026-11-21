@@ -418,6 +418,14 @@ pub enum InspectTest {
         /// Gets the reason, or `None` when there is none.
         reply: oneshot::Sender<Option<&'static str>>,
     },
+    /// Tests only: whether a send to the member `peer` has a dial or a path wait in flight. A
+    /// cold send now would wait for that dial and take its outcome, not dial on its own.
+    DialInFlight {
+        /// The peer, by nickname.
+        peer: String,
+        /// Gets the answer, or `UnknownPeer` when no member has that nickname.
+        reply: oneshot::Sender<Result<bool, UnknownPeer>>,
+    },
     /// Tests only: how many dials this node made to the member `peer` since it started, direct or
     /// through a route. A send over a warm connection is not a dial. A peer that the node does not
     /// know reads 0.
@@ -455,6 +463,11 @@ pub enum InspectHost {
         reply: oneshot::Sender<String>,
     },
 }
+
+/// The 2 ends of a held dial outcome (`Linking::HoldDialOutcome`): a receiver that resolves once
+/// the dialer holds, and a sender that lets it go on.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub type DialHold = (oneshot::Receiver<()>, oneshot::Sender<()>);
 
 /// Test-only link control: offer, close, drop and sever links.
 #[derive(Debug)]
@@ -497,6 +510,15 @@ pub enum Linking {
         peer: String,
         /// Gets the answer, or `UnknownPeer` when no member has that nickname.
         reply: oneshot::Sender<Result<bool, UnknownPeer>>,
+    },
+    /// Tests only: hold the outcome of the next dial to the member `peer`, after its dial and its
+    /// path wait and before it is published. The reply gives a receiver that resolves once the
+    /// dialer holds, and a sender that lets it go on (a send, or a drop).
+    HoldDialOutcome {
+        /// The peer, by nickname.
+        peer: String,
+        /// Gets the 2 ends of the hold, or `UnknownPeer` when no member has that nickname.
+        reply: oneshot::Sender<Result<DialHold, UnknownPeer>>,
     },
     /// Tests only: forget the pooled unicast connection of the member `peer`, then put it on the
     /// dial-failure cooldown, as a failed dial does. It waits for the dial that runs for the peer,
@@ -1118,6 +1140,12 @@ impl MembershipApp {
                 });
                 false
             }
+            InspectTest::DialInFlight { peer, reply } => {
+                let answer = known_peer(state, &peer)
+                    .map(|address| state.unicast_pool.dial_in_flight(address.id));
+                let _ = reply.send(answer);
+                false
+            }
         }
     }
 
@@ -1189,6 +1217,12 @@ impl MembershipApp {
                     Err(unknown) => Err(unknown),
                 };
                 let _ = reply.send(outcome);
+                false
+            }
+            Linking::HoldDialOutcome { peer, reply } => {
+                let hold = known_peer(state, &peer)
+                    .map(|address| state.unicast_pool.hold_next_outcome(address.id));
+                let _ = reply.send(hold);
                 false
             }
             Linking::NoteDialFailure { peer, reply } => {

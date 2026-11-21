@@ -14,9 +14,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use iroh::RelayUrl;
-use tokio::sync::watch;
-
 use super::event_loop::tick_gap::TickGap;
 use super::handler_ctx::HandlerCtx;
 use super::setup;
@@ -72,6 +69,15 @@ pub(super) async fn run_heal(
 ) {
     // A periodic return that fell due is owed from this tick, for a bounded time.
     state.pay_periodic_return(Instant::now(), context.endpoint.id());
+    // The endpoint forgets the rungs that this member shed its beacon on (the sheds clean the book
+    // at once, and only this tick can tell the endpoint).
+    let retired = state.rungs.take_retired();
+    if !retired.is_empty() {
+        beacon::forget_rungs(params, context.endpoint, &state.address_book, |port| {
+            retired.contains(&port)
+        })
+        .await;
+    }
     // A browser-shaped peer's rendezvous link can only ever be admitted on
     // a data channel; keep offering one while the link is down.
     webrtc::rendezvous::negotiate_rendezvous_session(state, context);
@@ -108,7 +114,8 @@ pub(super) async fn run_heal(
         // is re-validated off-loop by the beacon's liveness self-monitor,
         // so a rung that died during the freeze self-corrects — no inline
         // ladder walk on the event loop here.
-        setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
+        setup::reregister_rendezvous(&state.address_book, context.endpoint, params, &state.rungs)
+            .await;
         if webrtc::rendezvous::rendezvous_graftable(state) {
             gossip::heal::tick_heal_hard(context.endpoint, params.id, context.sender).await;
         }
@@ -268,17 +275,51 @@ pub(super) async fn try_resubscribe(
 /// Apply a bootstrap rung chosen **off the event loop** (the startup
 /// confirmation probe or the beacon's liveness self-monitor publishing
 /// through `rendezvous_params.rung_tx`). Cheap and non-blocking — the
-/// ladder walk already ran in the background task. If the new rung
+/// ladder walk already ran in the background task. A rung that the monitor
+/// of a beacon decided is applied only while that beacon is the one held:
+/// a beacon that was shed ends its monitor, but a decision that the monitor
+/// published at the same time can still arrive. A beacon that moved its own
+/// relay to a lower rung in place ([`lookup::RungChange::Moved`]) serves on:
+/// the loop registers the rung and does nothing else. If the new rung
 /// differs from the one we're homed on, re-pre-register `rendezvous_id`
 /// at it and drop the beacon so `maybe_cohost` rebuilds it homed on the
 /// new rung.
-pub(super) fn apply_rung_change(
+pub(crate) fn apply_rung_change(
     state: &mut EventLoopState,
     params: &mut beacon::RendezvousParams,
     rendezvous: &mut Option<beacon::Rendezvous>,
-    rung_rx: &watch::Receiver<Option<RelayUrl>>,
+    decision: lookup::RungDecision,
 ) {
-    let selected = rung_rx.borrow().clone();
+    if let Some(from) = decision.from
+        && rendezvous.as_ref().map(|held| held.generation) != Some(from)
+    {
+        tracing::debug!(
+            target: "habilis_network::beacon",
+            rung = ?decision.rung,
+            "a rung that the monitor of a retired beacon decided; ignored"
+        );
+        return;
+    }
+    let selected = decision.rung;
+    // The beacon moved its own relay in place, and serves on. It is no new claim, so nothing of
+    // a re-home applies: the beacon is not shed, the arbitration epoch goes on, and the reading of
+    // the rendezvous stays. The loop only follows the rung: joiners are told where it is, and the
+    // next claim homes on it.
+    if decision.change == lookup::RungChange::Moved {
+        if let lookup::RungRefresh::Rehome(new) =
+            lookup::plan_rung_refresh(params.bootstrap_relay.as_ref(), selected)
+        {
+            tracing::info!(
+                target: "habilis_network::beacon",
+                old = ?params.bootstrap_relay,
+                new = ?new,
+                "the beacon moved to another relay rung in place; registering the rung"
+            );
+            params.bootstrap_relay = new;
+            register_the_rung(state, params);
+        }
+        return;
+    }
     if let lookup::RungRefresh::Rehome(new) =
         lookup::plan_rung_refresh(params.bootstrap_relay.as_ref(), selected)
     {
@@ -289,7 +330,7 @@ pub(super) fn apply_rung_change(
             "bootstrap relay rung changed; re-registering rendezvous and re-homing the beacon"
         );
         params.bootstrap_relay = new;
-        setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
+        register_the_rung(state, params);
         // Release the beacon so `maybe_cohost` → `beacon::ensure` rebuilds it
         // homed on the new rung at the next heal/reclaim tick — `shed`, not a
         // plain drop. The old endpoint is still open and still homed on the
@@ -313,6 +354,12 @@ pub(super) fn apply_rung_change(
     }
 }
 
+/// Register the rendezvous at the rung of `params` for joiners. The one place that reads which
+/// rungs of the ladder are offered, for both ways of applying a rung.
+fn register_the_rung(state: &EventLoopState, params: &beacon::RendezvousParams) {
+    setup::register_rendezvous(&state.address_book, params, &state.rungs.offered_rungs());
+}
+
 #[cfg(test)]
 mod tests {
     use super::{is_resume, is_wall_resume};
@@ -322,6 +369,7 @@ mod tests {
     use crate::beacon;
     #[cfg(feature = "host")]
     use crate::gossip::split;
+    #[cfg(feature = "host")]
     #[cfg(feature = "host")]
     use crate::membership;
     #[cfg(feature = "host")]
@@ -341,7 +389,6 @@ mod tests {
     #[cfg(feature = "host")]
     use tokio::sync::mpsc;
     #[cfg(feature = "host")]
-    use tokio::sync::watch;
     /// The test binary runs the test below again, in a process of its own, with this variable set.
     #[cfg(feature = "host")]
     const FATAL_CHILD: &str = "HABILIS_TEST_FATAL_RESUBSCRIBE_CHILD";
@@ -384,7 +431,7 @@ mod tests {
                     lookups: meshes::LookupOpts::loopback(),
                     relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
-                    rung_tx: watch::channel(None).0,
+                    rung_tx: mpsc::unbounded_channel().0,
                 };
                 let parts = CtxParts {
                     endpoint: &node.endpoint,

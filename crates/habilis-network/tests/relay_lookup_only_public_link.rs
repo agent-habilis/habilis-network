@@ -11,7 +11,7 @@
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
 use habilis_network::protocol::messages::Authored;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use habilis_network::embed::{
@@ -23,10 +23,18 @@ use habilis_network::protocol::{LookupOpts, MeshConfig, Nickname, RelayChoice, T
 use habilis_network::runtime::{
     Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
 };
-use tokio::sync::Notify;
+use tokio::sync::{self, Notify};
 
 use habilis_network::net::test_relay;
 use tokio::time;
+
+/// The tests of this binary share one capture buffer, and each claims a beacon that logs
+/// "beacon role active". A test that waits for that line runs alone and reads only its own log.
+fn serial() -> &'static sync::Mutex<()> {
+    static SERIAL: OnceLock<sync::Mutex<()>> = OnceLock::new();
+    SERIAL.get_or_init(|| sync::Mutex::new(()))
+}
+
 struct Probe;
 
 #[habilis_network::async_trait]
@@ -144,6 +152,9 @@ async fn spawn_with(
 fn two_ip_peers_link_through_the_gated_rendezvous() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network=info");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _serial = serial().lock().await;
+        habilis_network_test_tracing::clear_captured_logs();
+
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let nonce: u64 = rand::random();
         let topic = format!("scratch-link-{nonce}");
@@ -187,6 +198,8 @@ fn two_ip_peers_link_through_the_gated_rendezvous() {
 fn a_webrtc_only_peer_links_through_the_beacon_lane() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network=info");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _serial = serial().lock().await;
+
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let nonce: u64 = rand::random();
         let topic = format!("scratch-lane-{nonce}");

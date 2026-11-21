@@ -27,7 +27,7 @@ use std::time::Duration;
 use iroh::EndpointId;
 
 use crate::util::clock::Instant;
-use crate::util::tuning::{GRAFT_BACKOFF_FIRST, GRAFT_BACKOFF_MAX, GRAFT_REFUSED_AFTER};
+use crate::util::tuning::{GRAFT_BACKOFF_FIRST, GRAFT_BACKOFF_MAX, GRAFT_REFUSED_AFTER, STARVED};
 
 /// The jitter on a wait, as a fraction either way, so that the nodes that were refused together
 /// do not ask again together.
@@ -39,6 +39,8 @@ struct Entry {
     asked_at: Option<Instant>,
     /// Until when the peer is left alone.
     until: Option<Instant>,
+    /// When the last refusal was read. It counts as a refusal for `STARVED` ([`GraftBackoff::has_refusal`]).
+    refused_at: Option<Instant>,
     /// The wait that the next refusal earns, before the jitter.
     step: Duration,
 }
@@ -60,6 +62,7 @@ impl GraftBackoff {
         let entry = self.by_peer.entry(peer).or_insert(Entry {
             asked_at: None,
             until: None,
+            refused_at: None,
             step: first,
         });
         if entry.until.is_some_and(|until| now < until) {
@@ -71,6 +74,7 @@ impl GraftBackoff {
         {
             entry.step = first;
             entry.until = None;
+            entry.refused_at = None;
         }
         entry.asked_at = Some(now);
     }
@@ -96,6 +100,7 @@ impl GraftBackoff {
             } else if now.saturating_duration_since(asked_at) >= refused_after {
                 let wait = entry.step.mul_f64(1.0 + JITTER * spread.clamp(-1.0, 1.0));
                 entry.until = Some(now + wait);
+                entry.refused_at = Some(now);
                 entry.step = (entry.step * 2).min(longest);
                 entry.asked_at = None;
                 refused.push((*peer, wait));
@@ -109,6 +114,18 @@ impl GraftBackoff {
     /// the node.
     pub(crate) fn len(&self) -> usize {
         self.by_peer.len()
+    }
+
+    /// Whether a peer refused a `Neighbor` request within the last `STARVED` before `now`. An
+    /// older refusal does not count: the peer may have a free slot now, and its wait can be longer
+    /// than `STARVED`, so the record that outlives it would hold the answer true for ever. A link
+    /// to the peer, or a new address of it, drops the record ([`Self::reset`]).
+    pub(crate) fn has_refusal(&self, now: Instant) -> bool {
+        self.by_peer.values().any(|entry| {
+            entry
+                .refused_at
+                .is_some_and(|at| now.saturating_duration_since(at) < STARVED)
+        })
     }
 
     /// Whether `peer` is left alone at `now`.

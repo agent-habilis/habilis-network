@@ -341,20 +341,6 @@ impl Member {
             .unwrap_or(false)
     }
 
-    /// The lane that a directed frame to `peer` takes now, as the roster names it:
-    /// `relay-only` is the one where the frame is parked until a direct path is proven.
-    async fn lane_to(&self, peer: &str) -> Option<String> {
-        let json = self
-            .membership
-            .request(|reply| Request::Inspect(Inspect::Peers { reply }))
-            .await
-            .expect("the loop answers");
-        let roster: serde_json::Value = serde_json::from_str(&json).ok()?;
-        let mut entries = roster["peers"].as_array()?.iter();
-        let found = entries.find(|entry| entry["nickname"] == peer);
-        found.and_then(|entry| entry["transport"].as_str().map(str::to_owned))
-    }
-
     fn ports(&self) -> Vec<u16> {
         self.membership.node.bound_ports().to_vec()
     }
@@ -892,18 +878,33 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
     }
 }
 
-/// A frame that is parked for the session arrives once the session is up. The sender has the
-/// higher id, so nobody but its own engine can see IP go: the proof of a direct path is taken
-/// back, the frames are parked (the roster reads `relay-only`), and the session carries them
-/// when it attaches. Every probe that was sent while the lane read `relay-only` must reach bob,
-/// and the run prints how long after the rung changed the last one arrived.
+/// A frame that is accepted while IP goes arrives once the session is up. The sender has the
+/// higher id, so nobody but its own engine can see IP go. The lane reads `relay-only` only after
+/// a probe proved that the pair has no direct path, so a frame that goes before that proof dials
+/// and waits for the session, and the session carries it when it attaches. Every probe that was
+/// sent before the rung read `webrtc`, and that the send accepted, must reach bob. A send that
+/// the engine refuses is not owed: the caller retries it. The run prints how long after the
+/// rung changed the last one arrived.
 #[test]
 #[ignore = "run by cargo task matrix"]
-fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
+fn udp_webrtc_ip_direct_sender_has_the_higher_id_carries_a_frame_sent_while_ip_goes() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        const NAME: &str = "udp_webrtc_ip_direct_parks_a_frame";
+        // One send: its text, whether the engine accepted it, how long it took, and whether the rung
+        // read `webrtc` before the send and after it returned. The reading after the send is the
+        // one that is not stale: a send waits up to the path budget, and the rung can change
+        // meanwhile.
+        struct Probe {
+            text: String,
+            accepted: bool,
+            took: Duration,
+            on_the_rung_before: bool,
+            on_the_rung_after: bool,
+        }
+        const NAME: &str = "udp_webrtc_ip_direct_carries_a_frame_sent_while_ip_goes";
         const AFTER_THE_RUNG: Duration = Duration::from_secs(3);
+        // The wait of a send for the path, `PATH_SELECT_TIMEOUT` of the engine (5 s).
+        const PATH_WAIT: Duration = Duration::from_secs(5);
         let (_, cell) = CELLS
             .iter()
             .find(|(cell, _)| *cell == "udp_webrtc_ip_direct")
@@ -920,79 +921,125 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
             apply(cut, &alice, &bob, &carol).await;
         }
 
-        // (text, the lane read before the send, when it went)
-        let mut sent: Vec<(String, bool, Instant)> = Vec::new();
+        let mut sent: Vec<Probe> = Vec::new();
         let started = Instant::now();
+        let mut first_on_the_rung: Option<Instant> = None;
         let mut on_the_rung_since: Option<Instant> = None;
-        let mut next_probe = Instant::now();
-        let mut last_parked_send: Option<Instant> = None;
-        // The lane reads `relay-only` only between the moment the proof is taken back and the
-        // attach, well under a second: so the lane is read every 20 ms, and a frame goes at once
-        // while it reads so (at most one every 100 ms), besides the probe of every second.
+        let mut settled = false;
+        // A frame goes and the rung is read every 20 ms, so that a frame lost at one moment of the
+        // attach is caught: a probe of every second left whole attaches between two frames.
         while started.elapsed() < STEP_DEADLINE {
-            let parked = alice.lane_to("bob").await.as_deref() == Some("relay-only");
-            let due = Instant::now() >= next_probe;
-            let extra = parked
-                && last_parked_send
-                    .is_none_or(|sent_at| sent_at.elapsed() >= Duration::from_millis(100));
-            if due || extra {
-                let text = format!("parked {NAME} {}", sent.len());
-                let _ = alice.send("bob", &text).await;
-                sent.push((text, parked, Instant::now()));
-                if parked {
-                    last_parked_send = Some(Instant::now());
+            let text = format!("while ip goes {NAME} {}", sent.len());
+            let on_the_rung_before = on_the_rung_since.is_some();
+            let sending = Instant::now();
+            let accepted = alice.send("bob", &text).await.is_ok();
+            let took = sending.elapsed();
+            let on_the_rung_after = alice.rung_to("bob").await == Some("webrtc");
+            sent.push(Probe {
+                text,
+                accepted,
+                took,
+                on_the_rung_before,
+                on_the_rung_after,
+            });
+            if on_the_rung_after {
+                first_on_the_rung.get_or_insert_with(Instant::now);
+                let since = *on_the_rung_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= AFTER_THE_RUNG {
+                    settled = true;
+                    break;
                 }
-            }
-            if due {
-                next_probe = Instant::now() + Duration::from_secs(1);
-                if alice.rung_to("bob").await == Some("webrtc") {
-                    let since = *on_the_rung_since.get_or_insert_with(Instant::now);
-                    if since.elapsed() >= AFTER_THE_RUNG {
-                        break;
-                    }
-                } else {
-                    on_the_rung_since = None;
-                }
+            } else {
+                on_the_rung_since = None;
             }
             time::sleep(Duration::from_millis(20)).await;
         }
-        let on_the_rung = on_the_rung_since.unwrap_or_else(|| {
+        let first_on_the_rung = first_on_the_rung.unwrap_or_else(|| {
             panic!(
                 "{NAME}: the rung never became webrtc after {} probes",
                 sent.len()
             )
         });
-
-        let parked: Vec<&(String, bool, Instant)> = sent.iter().filter(|probe| probe.1).collect();
+        // The deadline can end the loop with the rung read for less than the settling time.
         assert!(
-            !parked.is_empty(),
-            "{NAME}: no probe went while the lane read relay-only, so the test proved nothing"
+            settled,
+            "{NAME}: the rung did not stay webrtc for {AFTER_THE_RUNG:?} before the deadline"
         );
-        let waiting = Instant::now();
-        let mut late = Duration::ZERO;
-        for (text, _, _) in &parked {
-            while !bob.saw_msg(text) {
-                assert!(
-                    waiting.elapsed() < PAYLOAD_DEADLINE,
-                    "{NAME}: the frame {text:?} was parked and never reached bob"
-                );
-                time::sleep(Duration::from_millis(250)).await;
-            }
-            late = late.max(on_the_rung.elapsed());
-        }
-        let first_parked = parked.first().map(|probe| probe.2.duration_since(started));
+        let on_the_rung = on_the_rung_since.unwrap_or(first_on_the_rung);
+
+        // A send is refused only while the pair has no path. A send that started on the rung and
+        // returned on it is never refused. A refused send that waited for the path
+        // (`PATH_SELECT_TIMEOUT`) is bounded: the transition, which lasts from the start to the
+        // first reading of `webrtc`, holds at most 1 of them for each wait, and 1 more for the send
+        // that was out when it ended. A refusal that returns before the wait (a held frame, an
+        // undeliverable one, a dial that failed) is allowed: the contract says that a refused send
+        // is not owed and that the caller retries it. Those are not counted in the bound, and the
+        // check above keeps them out of the time after the rung.
+        let refused: Vec<&Probe> = sent.iter().filter(|probe| !probe.accepted).collect();
+        let refused_on_the_rung: Vec<&&Probe> = refused
+            .iter()
+            .filter(|probe| probe.on_the_rung_before && probe.on_the_rung_after)
+            .collect();
+        assert!(
+            refused_on_the_rung.is_empty(),
+            "{NAME}: {} sends were refused that started and returned on the rung webrtc",
+            refused_on_the_rung.len()
+        );
+        let transition = first_on_the_rung.duration_since(started);
+        let max_refused = transition.as_millis() / PATH_WAIT.as_millis() + 1;
+        let waited_for_the_path: Vec<&&Probe> = refused
+            .iter()
+            .filter(|probe| probe.took >= PATH_WAIT.saturating_sub(Duration::from_secs(1)))
+            .collect();
+        assert!(
+            waited_for_the_path.len() as u128 <= max_refused,
+            "{NAME}: {} refused sends waited for the path in a transition of {transition:?}, at most \
+             {max_refused} allowed (1 for each {PATH_WAIT:?} and 1 more); {} of {} sends were \
+             refused in all",
+            waited_for_the_path.len(),
+            refused.len(),
+            sent.len()
+        );
+        let owed: Vec<&Probe> = sent
+            .iter()
+            .filter(|probe| probe.accepted && !probe.on_the_rung_before)
+            .collect();
+        assert!(
+            !owed.is_empty(),
+            "{NAME}: the send accepted no probe before the rung read webrtc, so the test proved nothing"
+        );
+        let owed_texts: Vec<&str> = owed.iter().map(|probe| probe.text.as_str()).collect();
+        wait_for_frames(&mut bob, &owed_texts, NAME).await;
+        let late = on_the_rung.elapsed();
         eprintln!(
-            "DIAG {NAME}: {} probes, {} sent while the lane read relay-only (first after {:?}), \
-         the last one reached bob {:?} after the rung was first read",
+            "DIAG {NAME}: {} probes, {} refused ({} after the path wait, at most {max_refused}; transition \
+             {transition:?}), {} owed (accepted before the rung read webrtc), the last one reached bob {:?} after \
+             the rung was first read",
             sent.len(),
-            parked.len(),
-            first_parked,
+            refused.len(),
+            waited_for_the_path.len(),
+            owed.len(),
             late,
         );
         for member in [alice, bob, carol] {
             member.leave().await;
         }
     });
+}
+
+/// Wait until `bob` has read each of `texts`: they were accepted before the session, and the session
+/// carries them when it attaches.
+async fn wait_for_frames(bob: &mut Member, texts: &[&str], name: &str) {
+    let waiting = Instant::now();
+    for text in texts {
+        while !bob.saw_msg(text) {
+            assert!(
+                waiting.elapsed() < PAYLOAD_DEADLINE,
+                "{name}: the frame {text:?} was accepted before the session and never reached bob"
+            );
+            time::sleep(Duration::from_millis(250)).await;
+        }
+    }
 }
 
 /// `udp_webrtc_ip_direct` with the order of the ids fixed: only the lower id offers a session,

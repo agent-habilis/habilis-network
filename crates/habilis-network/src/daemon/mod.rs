@@ -53,3 +53,5 @@ pub use shutdown::{OwnerPidError, validate_owner_pid};
 // `crate::runtime`, which is what a consumer imports.
 pub(crate) use config::{CoHostPolicy, DriverMode, EventLoopConfig};
 pub(crate) use event_loop::run;
+#[cfg(test)]
+pub(crate) use heal::apply_rung_change;

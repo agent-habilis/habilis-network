@@ -227,6 +227,91 @@ pub fn cohost_grace() -> Duration {
     current().cohost_grace
 }
 
+/// The live value of how often a member reads the liveness of its relay rung, after any override in the process tuning.
+///
+/// # Examples
+///
+/// The value is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::relay_liveness_interval;
+/// use std::time::Duration;
+///
+/// assert!(relay_liveness_interval() > Duration::ZERO);
+/// ```
+#[must_use]
+pub fn relay_liveness_interval() -> Duration {
+    relay_times(&current()).liveness_interval
+}
+
+/// The live value of how often a member on a later rung probes the rungs below it, after any override in the process tuning.
+///
+/// # Examples
+///
+/// The value is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::relay_return_probe_interval;
+/// use std::time::Duration;
+///
+/// assert!(relay_return_probe_interval() > Duration::ZERO);
+/// ```
+#[must_use]
+pub fn relay_return_probe_interval() -> Duration {
+    relay_times(&current()).return_probe_interval
+}
+
+/// The live value of how long a lower rung must answer before a member returns to it, after any override in the process tuning.
+///
+/// # Examples
+///
+/// The value is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::relay_return_hold;
+/// use std::time::Duration;
+///
+/// assert!(relay_return_hold() > Duration::ZERO);
+/// ```
+#[must_use]
+pub fn relay_return_hold() -> Duration {
+    relay_times(&current()).return_hold
+}
+
+/// The live value of the longest wait between two probe rounds that found no lower rung, after any override in the process tuning.
+///
+/// # Examples
+///
+/// The value is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::relay_reprobe_backoff_max;
+/// use std::time::Duration;
+///
+/// assert!(relay_reprobe_backoff_max() > Duration::ZERO);
+/// ```
+#[must_use]
+pub fn relay_reprobe_backoff_max() -> Duration {
+    relay_times(&current()).reprobe_backoff_max
+}
+
+/// The live value of how long a move in place waits for the new relay to become the home, after any override in the process tuning.
+///
+/// # Examples
+///
+/// The value is always positive.
+///
+/// ```
+/// use habilis_network_util::tuning::relay_home_settle;
+/// use std::time::Duration;
+///
+/// assert!(relay_home_settle() > Duration::ZERO);
+/// ```
+#[must_use]
+pub fn relay_home_settle() -> Duration {
+    relay_times(&current()).home_settle
+}
+
 /// How long a ping round collects pongs before the daemon
 /// emits its `ping_report`. Long enough for a relayed round-trip
 /// across the mesh; hidden flag `--ping-window-secs` so tests don't
@@ -340,6 +425,16 @@ pub struct Tuning {
     pub peerinfo_refresh_min: Duration,
     /// How much a live member adds to the refresh period.
     pub peerinfo_refresh_per_peer: Duration,
+    /// How often a member reads the liveness of its relay rung.
+    pub relay_liveness_interval: Duration,
+    /// How often a member on a later relay rung probes the rungs below it.
+    pub relay_return_probe_interval: Duration,
+    /// How long a lower relay rung must answer every round before a member returns to it.
+    pub relay_return_hold: Duration,
+    /// The longest wait between two probe rounds that found no lower relay rung.
+    pub relay_reprobe_backoff_max: Duration,
+    /// How long a move in place waits for the new relay to become the home.
+    pub relay_home_settle: Duration,
 }
 
 impl Tuning {
@@ -406,6 +501,41 @@ impl Tuning {
         self
     }
 
+    /// Set how often a member reads the liveness of its relay rung.
+    #[must_use]
+    pub fn relay_liveness_interval(mut self, relay_liveness_interval: Duration) -> Self {
+        self.relay_liveness_interval = relay_liveness_interval;
+        self
+    }
+
+    /// Set how often a member on a later rung probes the rungs below it.
+    #[must_use]
+    pub fn relay_return_probe_interval(mut self, relay_return_probe_interval: Duration) -> Self {
+        self.relay_return_probe_interval = relay_return_probe_interval;
+        self
+    }
+
+    /// Set how long a lower rung must answer before a member returns to it.
+    #[must_use]
+    pub fn relay_return_hold(mut self, relay_return_hold: Duration) -> Self {
+        self.relay_return_hold = relay_return_hold;
+        self
+    }
+
+    /// Set the longest wait between two probe rounds that found no lower rung.
+    #[must_use]
+    pub fn relay_reprobe_backoff_max(mut self, relay_reprobe_backoff_max: Duration) -> Self {
+        self.relay_reprobe_backoff_max = relay_reprobe_backoff_max;
+        self
+    }
+
+    /// Set how long a move in place waits for the new relay to become the home.
+    #[must_use]
+    pub fn relay_home_settle(mut self, relay_home_settle: Duration) -> Self {
+        self.relay_home_settle = relay_home_settle;
+        self
+    }
+
     /// Set how long a member waits before it asks for the rendezvous again.
     #[must_use]
     pub fn rendezvous_periodic_return(mut self, rendezvous_periodic_return: Duration) -> Self {
@@ -444,6 +574,11 @@ impl Tuning {
         topic_mdns_only: false,
         peerinfo_refresh_min: PEERINFO_REFRESH_MIN,
         peerinfo_refresh_per_peer: PEERINFO_REFRESH_PER_PEER,
+        relay_liveness_interval: RELAY_LIVENESS_INTERVAL,
+        relay_return_probe_interval: RELAY_RETURN_PROBE_INTERVAL,
+        relay_return_hold: RELAY_RETURN_HOLD,
+        relay_reprobe_backoff_max: RELAY_REPROBE_BACKOFF_MAX,
+        relay_home_settle: RELAY_HOME_SETTLE,
     };
 }
 
@@ -456,7 +591,8 @@ impl Default for Tuning {
 static TUNING: sync::OnceLock<Tuning> = sync::OnceLock::new();
 
 /// Install the process tuning, once, at daemon startup (from the parsed CLI
-/// flags). A second call is ignored; if never called (in-process: library API or MCP), `current`
+/// flags). It must run before anything reads a value that it sets: the relay follower reads its
+/// times once, when it starts, so a call after a follower started does not reach that follower. A second call is ignored; if never called (in-process: library API or MCP), `current`
 /// returns [`Tuning::DEFAULTS`].
 ///
 /// # Examples
@@ -475,6 +611,31 @@ pub fn init(tuning: Tuning) {
 
 fn current() -> Tuning {
     TUNING.get().copied().unwrap_or(Tuning::DEFAULTS)
+}
+
+/// The 5 times of the relay rung follower, as the getters read them.
+struct RelayTimes {
+    liveness_interval: Duration,
+    return_probe_interval: Duration,
+    return_hold: Duration,
+    reprobe_backoff_max: Duration,
+    home_settle: Duration,
+}
+
+/// The times as the getters read them. The builders and the public fields take any `Duration`,
+/// so the getters are the boundary: each time has a floor of 1 ms, and the cap of the backoff is at
+/// least the base interval, or an empty round would cut the wait and an outage would probe more
+/// often, not less. A positive override passes through.
+fn relay_times(tuning: &Tuning) -> RelayTimes {
+    let floor = Duration::from_millis(1);
+    let return_probe_interval = tuning.relay_return_probe_interval.max(floor);
+    RelayTimes {
+        liveness_interval: tuning.relay_liveness_interval.max(floor),
+        return_probe_interval,
+        return_hold: tuning.relay_return_hold.max(floor),
+        reprobe_backoff_max: tuning.relay_reprobe_backoff_max.max(return_probe_interval),
+        home_settle: tuning.relay_home_settle.max(floor),
+    }
 }
 
 /// How often the daemon re-asserts `peer_count` +
@@ -729,13 +890,19 @@ pub const LANE_OFFERS_IN_FLIGHT: usize = 4;
 /// 128 MiB/s the split cuts the frames lost from 22% to 0.1% to 0.4%.
 pub const MESH_TOPIC_EVENTS_CAP: usize = 2048;
 
-/// How long a node may hold two or more links fewer than G, and how long it waits
-/// between two fallbacks, before a graft asks with a `Join` instead of a low
-/// priority request. A low priority request evicts nobody, so a member that arrives
-/// when every other member is full gets no link from it. A `Join` evicts a random
-/// neighbor of the peer, and that peer lands at G - 1, so one fallback per 300 s per
-/// member bounds the churn to 0.2 link-ups per member per minute, and a fallback
-/// starts no chain.
+/// How long a node may hold fewer than G peers, and how long it waits between two fallbacks,
+/// before a graft asks with a `Join` instead of a low priority request. A node that is 1 peer
+/// short asks only if a peer refused it within the last `STARVED`. A low priority request
+/// evicts nobody, so a member that arrives when every other member is full gets no link from it. A `Join` to a full peer
+/// evicts a random neighbor of it, and the `ForwardJoin` walk ends in high priority requests
+/// that evict more: up to 1 + 2(G - 1) peers drop a link. Each of them is 1 peer short and
+/// asks its own `Join` after `STARVED`, so a fallback starts a chain. The chain ends when 2
+/// short nodes that are not linked to each other graft one another. A node that is 1 peer short
+/// by structure (the sum of the caps is odd, or the 2 short nodes are linked to each other)
+/// asks at most 1 `Join` per `STARVED` for ever, while a peer keeps refusing it: the wait of a
+/// refusing peer grows to 15 minutes: with 1 or 2 candidates, about once per 15 minutes in the long run; with 3 or more, the refusals of the different peers fall in different windows, and it is 1 `Join` per `STARVED`. One fallback
+/// per 300 s per short node is at most 0.2 `Join` per short node per minute, and each `Join` evicts
+/// up to 1 + 2(G - 1) links.
 pub const STARVED: Duration = Duration::from_mins(5);
 
 /// How often an advertising `create` re-broadcasts its mesh id into
@@ -930,16 +1097,23 @@ pub fn directory_private_for_test() -> bool {
 
 /// Per-rung timeout when selecting the public-mode bootstrap relay
 /// (`habilis_network::net`'s bootstrap-rung selection) and when the beacon polls
-/// its own rung's liveness. The selector walks the relay ladder and
-/// homes on the first rung whose pinned endpoint reaches `online()`
-/// within this budget; a rung that does not answer in time is treated
-/// as unreachable and the next is tried.
+/// its own rung's liveness. The selector probes every rung of the relay
+/// ladder at once and homes on the lowest rung whose pinned endpoint
+/// reaches `online()` within this budget. A rung that does not answer in
+/// time is treated as unreachable, so the walk of a ladder of silent rungs
+/// takes one budget, not one for each rung.
 ///
 /// Set to iroh's `NET_REPORT_TIMEOUT` (10s): `online()`'s own docs say
 /// to use a timeout close to it so at least one net-report has been
 /// attempted — a shorter budget can misjudge a healthy-but-slow relay
 /// as down and trigger a spurious fall-through.
 pub const RELAY_RUNG_PROBE: Duration = Duration::from_secs(10);
+
+/// The delay between the start of the probe of one relay rung and the start of the next, in a
+/// walk of the ladder. A rung that says no starts the next at once. A healthy rung answers in
+/// 0.3 to 0.5 s, so it answers before the next rung starts, and the later rungs see no probe. 7
+/// silent rungs below a live one add 7 s to the walk, beside a probe window of 10 s.
+pub const RELAY_RUNG_STAGGER: Duration = Duration::from_secs(1);
 
 /// How often the beacon polls whether its current relay rung is still
 /// connected (`timeout(RELAY_RUNG_PROBE, online())` on its own
@@ -963,6 +1137,27 @@ pub const RELAY_LIVENESS_FAILS_TO_EVICT: u32 = 2;
 pub const RELAY_REPROBE_BACKOFF_MIN: Duration = Duration::from_secs(30);
 /// The longest wait between two re-probes of a relay rung.
 pub const RELAY_REPROBE_BACKOFF_MAX: Duration = Duration::from_mins(5);
+
+/// How often a member homed on a later relay rung probes the rungs below it, to return to a lower
+/// rung that came back. A round binds one probe endpoint for each lower rung, about 15 ms of CPU
+/// each, so a round each minute costs nothing that a member feels.
+pub const RELAY_RETURN_PROBE_INTERVAL: Duration = Duration::from_mins(1);
+
+/// How long a lower relay rung must answer every probe round before a member returns to it: 4
+/// rounds in a row. A relay that restarts or flaps would otherwise move every member back and
+/// forth, and each move drops the relay paths of the member for a moment.
+///
+/// The hold applies to a return from a healthy rung only. When the rung of a member fails, the
+/// member walks the whole ladder, and the walk can pick a healthy lower rung at once, with no
+/// hold. That is by design: the member has to leave its rung anyway, and the lowest rung that
+/// answers is the rung that every member picks.
+pub const RELAY_RETURN_HOLD: Duration = Duration::from_mins(3);
+
+/// How long a member that moved its relay in place waits for the new relay to become its home
+/// before a read of the new rung counts as a failure. The old relay stays the home until the new
+/// one connects, so a read in that time finds the new rung not connected, and 2 such reads would
+/// walk the ladder and shed a healthy beacon.
+pub const RELAY_HOME_SETTLE: Duration = Duration::from_secs(30);
 
 /// Timeout for *one attempt* of the private-mode rendezvous identity
 /// probe. When a ladder rung is `AddrInUse`, a member probes it to tell
@@ -1253,3 +1448,81 @@ pub const DIGEST_SETTLE_JITTER: Duration = Duration::from_millis(500);
 
 /// How often the digest round checks its differences and sends its page requests, so a settle that ends is acted on at once.
 pub const DIGEST_ROUND_TICK: Duration = Duration::from_millis(250);
+
+#[cfg(test)]
+mod relay_times_tests {
+    use std::time::Duration;
+
+    use super::{Tuning, relay_times};
+
+    /// The getters say that each time is positive, and the builders and the public fields accept
+    /// `Duration::ZERO`. A zero liveness interval reads with no delay, and a zero return hold lets
+    /// the first successful round qualify, so the getters hold a floor of 1 ms.
+    #[test]
+    fn a_zero_relay_time_reads_as_the_floor() {
+        let mut zero: Tuning = Tuning::default();
+        zero = zero.relay_liveness_interval(Duration::ZERO);
+        zero = zero.relay_return_probe_interval(Duration::ZERO);
+        zero = zero.relay_return_hold(Duration::ZERO);
+        zero = zero.relay_reprobe_backoff_max(Duration::ZERO);
+        zero = zero.relay_home_settle(Duration::ZERO);
+
+        let times = relay_times(&zero);
+
+        let floor = Duration::from_millis(1);
+        assert_eq!(times.liveness_interval, floor, "the liveness interval");
+        assert_eq!(
+            times.return_probe_interval, floor,
+            "the return probe interval"
+        );
+        assert_eq!(times.return_hold, floor, "the return hold");
+        assert_eq!(times.reprobe_backoff_max, floor, "the backoff cap");
+        assert_eq!(times.home_settle, floor, "the home settle");
+    }
+
+    /// A cap below the base interval would make an empty round cut the wait: an outage would
+    /// probe more often, not less. The cap is at least the base interval.
+    #[test]
+    fn the_backoff_cap_is_at_least_the_return_probe_interval() {
+        let mut tuning: Tuning = Tuning::default();
+        tuning = tuning.relay_return_probe_interval(Duration::from_mins(1));
+        tuning = tuning.relay_reprobe_backoff_max(Duration::from_secs(1));
+
+        let times = relay_times(&tuning);
+
+        assert_eq!(
+            times.reprobe_backoff_max,
+            Duration::from_mins(1),
+            "a cap below the base interval is raised to it"
+        );
+    }
+
+    /// The defaults and any positive override pass through: the progression from 1 minute to 5
+    /// minutes stays.
+    #[test]
+    fn a_positive_relay_time_is_kept() {
+        let times = relay_times(&Tuning::default());
+
+        let defaults = Tuning::default();
+        assert_eq!(
+            times.liveness_interval, defaults.relay_liveness_interval,
+            "the liveness interval of the defaults"
+        );
+        assert_eq!(
+            times.return_probe_interval, defaults.relay_return_probe_interval,
+            "the return probe interval of the defaults"
+        );
+        assert_eq!(
+            times.return_hold, defaults.relay_return_hold,
+            "the return hold of the defaults"
+        );
+        assert_eq!(
+            times.reprobe_backoff_max, defaults.relay_reprobe_backoff_max,
+            "the backoff cap of the defaults"
+        );
+        assert_eq!(
+            times.home_settle, defaults.relay_home_settle,
+            "the home settle of the defaults"
+        );
+    }
+}

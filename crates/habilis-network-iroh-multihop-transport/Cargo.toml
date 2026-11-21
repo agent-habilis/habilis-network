@@ -36,7 +36,8 @@ bytes.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
-postcard = { version = "1", features = ["use-std"] }
+# No default features: the default heapless-cas pulls atomic-polyfill, which is unmaintained (RUSTSEC-2023-0089).
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 serde.workspace = true
 
 [features]
@@ -48,7 +49,7 @@ test-hooks = []
 habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
 tokio.workspace = true
 # A local relay server, for the tests that put a connection on the relay.
-iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "e970dd25148386850feaffbac044bba64765fe73", default-features = false, features = ["server"] }
+iroh-relay = { workspace = true, features = ["server"] }
 # The tables that take a rung away from one node, for the selector's unit tests.
 habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transport-util", features = ["test-hooks"] }
 # For the e2e that puts both custom transports on one endpoint.

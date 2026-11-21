@@ -1441,138 +1441,151 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn a_value_too_large_for_one_frame_is_chunked_and_reads_whole() {
-        let mut state = fresh_state();
-        let value = big_value('x', 70_000);
-        write_own(&mut state, Channel::State, value.clone())
-            .await
-            .expect("a chunked write");
-        let own = state.identity.author_key();
-        assert_eq!(
-            state.docs.own_value(Channel::State, &own),
-            value,
-            "the own value of a chunked slice must be the whole value and not the pointer"
-        );
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            2,
-            "a value of 70000 bytes must be kept as 2 chunks of 64 KiB"
-        );
-        assert_eq!(
-            state.docs.resolved_roots().count(),
-            1,
-            "the slice must name one root"
-        );
+    #[test]
+    fn a_value_too_large_for_one_frame_is_chunked_and_reads_whole() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let value = big_value('x', 70_000);
+            write_own(&mut state, Channel::State, value.clone())
+                .await
+                .expect("a chunked write");
+            let own = state.identity.author_key();
+            assert_eq!(
+                state.docs.own_value(Channel::State, &own),
+                value,
+                "the own value of a chunked slice must be the whole value and not the pointer"
+            );
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                2,
+                "a value of 70000 bytes must be kept as 2 chunks of 64 KiB"
+            );
+            assert_eq!(
+                state.docs.resolved_roots().count(),
+                1,
+                "the slice must name one root"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn a_value_with_too_many_units_is_refused_and_leaves_no_chunk() {
-        let mut state = fresh_state();
-        let numbers = SLICE_VALUE_UNITS_MAX;
-        let mut value = serde_json::Map::new();
-        value.insert("k".to_owned(), serde_json::json!(vec![1; numbers]));
-        let error = write_own(&mut state, Channel::State, value)
-            .await
-            .expect_err("a value with too many units must be refused");
-        assert!(
-            matches!(
-                error,
-                SendError::State(SliceError::ValueTooComplex { units, limit })
-                    if units == numbers + 1 && limit == numbers
-            ),
-            "the refusal must be the typed structure cap error, not {error:?}"
-        );
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            0,
-            "a refused value must leave no chunk"
-        );
+    #[test]
+    fn a_value_with_too_many_units_is_refused_and_leaves_no_chunk() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let numbers = SLICE_VALUE_UNITS_MAX;
+            let mut value = serde_json::Map::new();
+            value.insert("k".to_owned(), serde_json::json!(vec![1; numbers]));
+            let error = write_own(&mut state, Channel::State, value)
+                .await
+                .expect_err("a value with too many units must be refused");
+            assert!(
+                matches!(
+                    error,
+                    SendError::State(SliceError::ValueTooComplex { units, limit })
+                        if units == numbers + 1 && limit == numbers
+                ),
+                "the refusal must be the typed structure cap error, not {error:?}"
+            );
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                0,
+                "a refused value must leave no chunk"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn a_value_past_the_cap_is_refused_before_a_chunk_is_made() {
-        let mut state = fresh_state();
-        let error = write_own(&mut state, Channel::State, big_value('x', 2 * 1024 * 1024))
-            .await
-            .expect_err("a value past the cap must be refused");
-        assert!(
-            matches!(
-                error,
-                SendError::State(SliceError::ValueTooLarge {
-                    limit: 1_048_576,
-                    ..
-                })
-            ),
-            "the refusal must be the typed value cap error, not {error:?}"
-        );
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            0,
-            "a refused value must leave no chunk"
-        );
+    #[test]
+    fn a_value_past_the_cap_is_refused_before_a_chunk_is_made() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let error = write_own(&mut state, Channel::State, big_value('x', 2 * 1024 * 1024))
+                .await
+                .expect_err("a value past the cap must be refused");
+            assert!(
+                matches!(
+                    error,
+                    SendError::State(SliceError::ValueTooLarge {
+                        limit: 1_048_576,
+                        ..
+                    })
+                ),
+                "the refusal must be the typed value cap error, not {error:?}"
+            );
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                0,
+                "a refused value must leave no chunk"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn a_smaller_inline_version_drops_the_chunks_of_the_old_value() {
-        let mut state = fresh_state();
-        let channel = Channel::State;
-        write_own(&mut state, channel, big_value('x', 70_000))
-            .await
-            .expect("a chunked write");
-        write_own(&mut state, channel, big_value('y', 10))
-            .await
-            .expect("an inline write");
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            0,
-            "an inline version must drop the chunks of the old value"
-        );
-        assert_eq!(
-            state.docs.resolved_roots().count(),
-            0,
-            "an inline version must name no root"
-        );
+    #[test]
+    fn a_smaller_inline_version_drops_the_chunks_of_the_old_value() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let channel = Channel::State;
+            write_own(&mut state, channel, big_value('x', 70_000))
+                .await
+                .expect("a chunked write");
+            write_own(&mut state, channel, big_value('y', 10))
+                .await
+                .expect("an inline write");
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                0,
+                "an inline version must drop the chunks of the old value"
+            );
+            assert_eq!(
+                state.docs.resolved_roots().count(),
+                0,
+                "an inline version must name no root"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn a_chunked_rewrite_drops_the_chunks_of_the_old_version() {
-        let mut state = fresh_state();
-        let channel = Channel::State;
-        write_own(&mut state, channel, big_value('x', 70_000))
-            .await
-            .expect("the first chunked write");
-        write_own(&mut state, channel, big_value('y', 70_000))
-            .await
-            .expect("the second chunked write");
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            2,
-            "a rewrite must keep the chunks of the new version only"
-        );
+    #[test]
+    fn a_chunked_rewrite_drops_the_chunks_of_the_old_version() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let channel = Channel::State;
+            write_own(&mut state, channel, big_value('x', 70_000))
+                .await
+                .expect("the first chunked write");
+            write_own(&mut state, channel, big_value('y', 70_000))
+                .await
+                .expect("the second chunked write");
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                2,
+                "a rewrite must keep the chunks of the new version only"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn a_chunked_write_that_the_rate_limit_refuses_leaves_no_chunk() {
-        let mut state = fresh_state();
-        let channel = Channel::State;
-        let mut refused = None;
-        for count in 0..16 {
-            if let Err(error) = write_own(&mut state, channel, big_value('x', 70_000 + count)).await
-            {
-                refused = Some(error);
-                break;
+    #[test]
+    fn a_chunked_write_that_the_rate_limit_refuses_leaves_no_chunk() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let channel = Channel::State;
+            let mut refused = None;
+            for count in 0..16 {
+                if let Err(error) =
+                    write_own(&mut state, channel, big_value('x', 70_000 + count)).await
+                {
+                    refused = Some(error);
+                    break;
+                }
             }
-        }
-        assert!(
-            matches!(refused, Some(SendError::State(SliceError::RateLimited))),
-            "a burst of chunked writes must reach the rate limit, got {refused:?}"
-        );
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            2,
-            "a refused write must leave only the chunks of the held version"
-        );
+            assert!(
+                matches!(refused, Some(SendError::State(SliceError::RateLimited))),
+                "a burst of chunked writes must reach the rate limit, got {refused:?}"
+            );
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                2,
+                "a refused write must leave only the chunks of the held version"
+            );
+        });
     }
     /// Applies the merge patch `merge` to the own value and writes the result, as a state merge does.
     async fn merge_own(
@@ -1592,180 +1605,188 @@ mod tests {
         start + Duration::from_hours(hours)
     }
 
-    #[tokio::test]
-    async fn a_patch_whose_result_is_past_the_cap_is_refused_and_the_held_value_stays() {
-        let mut state = fresh_state();
-        let channel = Channel::State;
-        let start = clock::Instant::now();
-        let held = big_value('x', 600_000);
-        write_own_at(&mut state, channel, held.clone(), start)
-            .await
-            .expect("a chunked write under the cap");
-        let patch = serde_json::json!({ "j": "y".repeat(600_000) });
-        let error = merge_own(&mut state, channel, &patch, hours_after(start, 1))
-            .await
-            .expect_err("a patch with a whole value past the cap must be refused");
-        assert!(
-            matches!(
-                error,
-                SendError::State(SliceError::ValueTooLarge {
-                    limit: 1_048_576,
-                    ..
-                })
-            ),
-            "the cap applies to the value after the patch, got {error:?}"
-        );
-        let own = state.identity.author_key();
-        assert_eq!(
-            state.docs.own_value(channel, &own),
-            held,
-            "a refused patch must keep the held value"
-        );
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            10,
-            "a refused patch must keep the chunks of the held value and make none"
-        );
+    #[test]
+    fn a_patch_whose_result_is_past_the_cap_is_refused_and_the_held_value_stays() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let channel = Channel::State;
+            let start = clock::Instant::now();
+            let held = big_value('x', 600_000);
+            write_own_at(&mut state, channel, held.clone(), start)
+                .await
+                .expect("a chunked write under the cap");
+            let patch = serde_json::json!({ "j": "y".repeat(600_000) });
+            let error = merge_own(&mut state, channel, &patch, hours_after(start, 1))
+                .await
+                .expect_err("a patch with a whole value past the cap must be refused");
+            assert!(
+                matches!(
+                    error,
+                    SendError::State(SliceError::ValueTooLarge {
+                        limit: 1_048_576,
+                        ..
+                    })
+                ),
+                "the cap applies to the value after the patch, got {error:?}"
+            );
+            let own = state.identity.author_key();
+            assert_eq!(
+                state.docs.own_value(channel, &own),
+                held,
+                "a refused patch must keep the held value"
+            );
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                10,
+                "a refused patch must keep the chunks of the held value and make none"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn a_value_at_the_cap_is_taken_and_one_byte_more_is_refused() {
-        let mut state = fresh_state();
-        let channel = Channel::State;
-        let start = clock::Instant::now();
-        let cap = 1_048_576;
-        // The encoded value of `big_value(_, len)` has `len + 8` bytes.
-        write_own_at(&mut state, channel, big_value('x', cap - 9), start)
+    #[test]
+    fn a_value_at_the_cap_is_taken_and_one_byte_more_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let channel = Channel::State;
+            let start = clock::Instant::now();
+            let cap = 1_048_576;
+            // The encoded value of `big_value(_, len)` has `len + 8` bytes.
+            write_own_at(&mut state, channel, big_value('x', cap - 9), start)
+                .await
+                .expect("a value one byte under the cap");
+            let at_cap = big_value('y', cap - 8);
+            write_own_at(&mut state, channel, at_cap.clone(), hours_after(start, 1))
+                .await
+                .expect("a value at the cap");
+            let error = write_own_at(
+                &mut state,
+                channel,
+                big_value('z', cap - 7),
+                hours_after(start, 2),
+            )
             .await
-            .expect("a value one byte under the cap");
-        let at_cap = big_value('y', cap - 8);
-        write_own_at(&mut state, channel, at_cap.clone(), hours_after(start, 1))
-            .await
-            .expect("a value at the cap");
-        let error = write_own_at(
-            &mut state,
-            channel,
-            big_value('z', cap - 7),
-            hours_after(start, 2),
-        )
-        .await
-        .expect_err("a value one byte over the cap must be refused");
-        assert!(
-            matches!(
-                error,
-                SendError::State(SliceError::ValueTooLarge { bytes, limit })
-                    if bytes == cap + 1 && limit == cap
-            ),
-            "the refusal must name the size and the cap, got {error:?}"
-        );
-        let own = state.identity.author_key();
-        assert_eq!(
-            state.docs.own_value(channel, &own),
-            at_cap,
-            "a refused write must keep the last complete version"
-        );
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            16,
-            "the held version of 1 MiB must keep its 16 chunks and the refusal makes none"
-        );
-        write_own_at(
-            &mut state,
-            channel,
-            big_value('s', 10),
-            hours_after(start, 3),
-        )
-        .await
-        .expect("a shrink after a refusal");
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            0,
-            "a shrink to an inline value must drop every chunk"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_delete_patch_shrinks_a_chunked_value_to_inline_and_a_later_patch_grows_it_again() {
-        let mut state = fresh_state();
-        let channel = Channel::State;
-        let start = clock::Instant::now();
-        let own = state.identity.author_key();
-        let big = serde_json::json!({ "big": "x".repeat(70_000), "small": 1 });
-        merge_own(&mut state, channel, &big, start)
-            .await
-            .expect("a chunked write");
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            2,
-            "the big value must be chunked"
-        );
-        merge_own(
-            &mut state,
-            channel,
-            &serde_json::json!({ "big": null }),
-            hours_after(start, 1),
-        )
-        .await
-        .expect("a delete patch");
-        assert_eq!(
-            serde_json::Value::Object(state.docs.own_value(channel, &own)),
-            serde_json::json!({ "small": 1 }),
-            "a delete patch must leave the other keys"
-        );
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            0,
-            "a value that fits one frame again must drop every chunk"
-        );
-        merge_own(&mut state, channel, &big, hours_after(start, 2))
-            .await
-            .expect("a patch that grows the value again");
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            2,
-            "a value past one frame again must be chunked again"
-        );
-        let replace = serde_json::json!({ "other": 2, "big": null, "small": null });
-        merge_own(&mut state, channel, &replace, hours_after(start, 3))
-            .await
-            .expect("a patch that replaces the keys");
-        assert_eq!(
-            serde_json::Value::Object(state.docs.own_value(channel, &own)),
-            serde_json::json!({ "other": 2 }),
-            "a replace patch must leave only the new key"
-        );
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            0,
-            "a replace must drop every chunk"
-        );
-    }
-
-    #[tokio::test]
-    async fn fifty_rewrites_leave_the_chunks_of_the_held_version_only() {
-        let mut state = fresh_state();
-        let channel = Channel::State;
-        let start = clock::Instant::now();
-        for round in 0..50_u64 {
-            let (len, expected) = match round % 3 {
-                0 => (70_000 + usize::try_from(round).expect("a small round"), 2),
-                1 => (200_000, 4),
-                _ => (10, 0),
-            };
+            .expect_err("a value one byte over the cap must be refused");
+            assert!(
+                matches!(
+                    error,
+                    SendError::State(SliceError::ValueTooLarge { bytes, limit })
+                        if bytes == cap + 1 && limit == cap
+                ),
+                "the refusal must name the size and the cap, got {error:?}"
+            );
+            let own = state.identity.author_key();
+            assert_eq!(
+                state.docs.own_value(channel, &own),
+                at_cap,
+                "a refused write must keep the last complete version"
+            );
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                16,
+                "the held version of 1 MiB must keep its 16 chunks and the refusal makes none"
+            );
             write_own_at(
                 &mut state,
                 channel,
-                big_value('x', len),
-                hours_after(start, round),
+                big_value('s', 10),
+                hours_after(start, 3),
             )
             .await
-            .expect("a rewrite");
+            .expect("a shrink after a refusal");
             assert_eq!(
                 state.chunks.stored_chunks(),
-                expected,
-                "round {round} must keep only the chunks of its own version"
+                0,
+                "a shrink to an inline value must drop every chunk"
             );
-        }
+        });
+    }
+
+    #[test]
+    fn a_delete_patch_shrinks_a_chunked_value_to_inline_and_a_later_patch_grows_it_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let channel = Channel::State;
+            let start = clock::Instant::now();
+            let own = state.identity.author_key();
+            let big = serde_json::json!({ "big": "x".repeat(70_000), "small": 1 });
+            merge_own(&mut state, channel, &big, start)
+                .await
+                .expect("a chunked write");
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                2,
+                "the big value must be chunked"
+            );
+            merge_own(
+                &mut state,
+                channel,
+                &serde_json::json!({ "big": null }),
+                hours_after(start, 1),
+            )
+            .await
+            .expect("a delete patch");
+            assert_eq!(
+                serde_json::Value::Object(state.docs.own_value(channel, &own)),
+                serde_json::json!({ "small": 1 }),
+                "a delete patch must leave the other keys"
+            );
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                0,
+                "a value that fits one frame again must drop every chunk"
+            );
+            merge_own(&mut state, channel, &big, hours_after(start, 2))
+                .await
+                .expect("a patch that grows the value again");
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                2,
+                "a value past one frame again must be chunked again"
+            );
+            let replace = serde_json::json!({ "other": 2, "big": null, "small": null });
+            merge_own(&mut state, channel, &replace, hours_after(start, 3))
+                .await
+                .expect("a patch that replaces the keys");
+            assert_eq!(
+                serde_json::Value::Object(state.docs.own_value(channel, &own)),
+                serde_json::json!({ "other": 2 }),
+                "a replace patch must leave only the new key"
+            );
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                0,
+                "a replace must drop every chunk"
+            );
+        });
+    }
+
+    #[test]
+    fn fifty_rewrites_leave_the_chunks_of_the_held_version_only() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let channel = Channel::State;
+            let start = clock::Instant::now();
+            for round in 0..50_u64 {
+                let (len, expected) = match round % 3 {
+                    0 => (70_000 + usize::try_from(round).expect("a small round"), 2),
+                    1 => (200_000, 4),
+                    _ => (10, 0),
+                };
+                write_own_at(
+                    &mut state,
+                    channel,
+                    big_value('x', len),
+                    hours_after(start, round),
+                )
+                .await
+                .expect("a rewrite");
+                assert_eq!(
+                    state.chunks.stored_chunks(),
+                    expected,
+                    "round {round} must keep only the chunks of its own version"
+                );
+            }
+        });
     }
 
     /// The most characters of `big_value` that one frame takes, found by trial on fresh stores.
@@ -1786,145 +1807,155 @@ mod tests {
         inline
     }
 
-    #[tokio::test]
-    async fn the_boundary_of_one_frame_flips_between_inline_and_chunked_under_the_rate_limit() {
-        let inline_len = longest_inline_len().await;
-        let mut state = fresh_state();
-        let channel = Channel::State;
-        let mut now = clock::Instant::now();
-        let mut refused = false;
-        for round in 0..16_usize {
-            let chunked = round % 2 == 1;
-            // The version number is in the body, so the 10th version has one byte more than the 1st: the inline
-            // side stays 2 bytes under the edge that the first version found.
-            let len = if chunked {
-                inline_len + 1
-            } else {
-                inline_len - 2
-            };
-            let held_chunks = state.chunks.stored_chunks();
-            let written = write_own_at(&mut state, channel, big_value('x', len), now).await;
-            if matches!(written, Err(SendError::State(SliceError::RateLimited))) {
-                refused = true;
-                assert_eq!(
-                    state.chunks.stored_chunks(),
-                    held_chunks,
-                    "round {round}: a refused write must leave the chunks of the held version"
-                );
-                now = hours_after(now, 1);
-            } else {
-                written.unwrap_or_else(|other| {
-                    panic!("round {round}: an unexpected refusal {other:?}")
-                });
-                assert_eq!(
-                    state.chunks.stored_chunks(),
-                    usize::from(chunked),
-                    "round {round}: a value of {len} characters must be {}",
-                    if chunked { "chunked" } else { "inline" }
-                );
+    #[test]
+    fn the_boundary_of_one_frame_flips_between_inline_and_chunked_under_the_rate_limit() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let inline_len = longest_inline_len().await;
+            let mut state = fresh_state();
+            let channel = Channel::State;
+            let mut now = clock::Instant::now();
+            let mut refused = false;
+            for round in 0..16_usize {
+                let chunked = round % 2 == 1;
+                // The version number is in the body, so the 10th version has one byte more than the 1st: the inline
+                // side stays 2 bytes under the edge that the first version found.
+                let len = if chunked {
+                    inline_len + 1
+                } else {
+                    inline_len - 2
+                };
+                let held_chunks = state.chunks.stored_chunks();
+                let written = write_own_at(&mut state, channel, big_value('x', len), now).await;
+                if matches!(written, Err(SendError::State(SliceError::RateLimited))) {
+                    refused = true;
+                    assert_eq!(
+                        state.chunks.stored_chunks(),
+                        held_chunks,
+                        "round {round}: a refused write must leave the chunks of the held version"
+                    );
+                    now = hours_after(now, 1);
+                } else {
+                    written.unwrap_or_else(|other| {
+                        panic!("round {round}: an unexpected refusal {other:?}")
+                    });
+                    assert_eq!(
+                        state.chunks.stored_chunks(),
+                        usize::from(chunked),
+                        "round {round}: a value of {len} characters must be {}",
+                        if chunked { "chunked" } else { "inline" }
+                    );
+                }
             }
-        }
-        assert!(
-            refused,
-            "the burst must reach the rate limit at the boundary"
-        );
+            assert!(
+                refused,
+                "the burst must reach the rate limit at the boundary"
+            );
+        });
     }
-    #[tokio::test]
-    async fn the_surfaced_body_of_a_chunked_own_write_is_the_pointer_and_not_the_value() {
-        let mut state = fresh_state();
-        let channel = Channel::State;
-        write_own(&mut state, channel, big_value('x', 700_000))
-            .await
-            .expect("a chunked write");
-        let own = state.identity.author_key();
-        let body = state
-            .docs
-            .plain_body(channel, &own)
-            .expect("a body for a held slice");
-        let text: &[u8] = body.as_ref();
-        assert!(
-            text.len() < 400,
-            "the surfaced body must stay small for a value of 700000 bytes, got {} bytes",
-            text.len()
-        );
-        let parsed: serde_json::Value = serde_json::from_slice(text).expect("a JSON body");
-        assert!(
-            parsed["value"].get("$chunks").is_some(),
-            "the surfaced body must name the chunks, got {parsed}"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_surfaced_body_of_an_inline_own_write_is_the_value() {
-        let mut state = fresh_state();
-        let channel = Channel::State;
-        let value = big_value('x', 100);
-        write_own(&mut state, channel, value.clone())
-            .await
-            .expect("an inline write");
-        let own = state.identity.author_key();
-        let body = state
-            .docs
-            .plain_body(channel, &own)
-            .expect("a body for a held slice");
-        let text: &[u8] = body.as_ref();
-        let parsed: serde_json::Value = serde_json::from_slice(text).expect("a JSON body");
-        assert_eq!(
-            parsed["value"],
-            serde_json::Value::Object(value),
-            "the surfaced body of an inline write must carry the value"
-        );
-    }
-    #[tokio::test]
-    async fn a_chunked_own_write_on_a_passworded_mesh_stores_sealed_chunks() {
-        let mut state = fresh_state_with_mesh_key(SymmetricKey::from([5u8; 32]));
-        let channel = Channel::State;
-        let value = big_value('x', 70_000);
-        write_own(&mut state, channel, value.clone())
-            .await
-            .expect("a chunked write");
-        let own = state.identity.author_key();
-        assert_eq!(
-            state.docs.own_value(channel, &own),
-            value,
-            "the held value must stay whole"
-        );
-        let root = state
-            .docs
-            .resolved_roots()
-            .next()
-            .expect("the slice names one root");
-        let stored = state.chunks.stored_bytes(root).await;
-        let plain = serde_json::to_vec(&value).expect("a JSON value");
-        assert_eq!(
-            stored.len(),
-            plain.len() + SEAL_SYMMETRIC_OVERHEAD,
-            "the chunks must hold the sealed value"
-        );
-        let sample = &plain[plain.len() / 2..plain.len() / 2 + 64];
-        assert!(
-            !stored.windows(sample.len()).any(|window| window == sample),
-            "no plaintext of the value may be in the chunks of a passworded mesh"
-        );
+    #[test]
+    fn the_surfaced_body_of_a_chunked_own_write_is_the_pointer_and_not_the_value() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let channel = Channel::State;
+            write_own(&mut state, channel, big_value('x', 700_000))
+                .await
+                .expect("a chunked write");
+            let own = state.identity.author_key();
+            let body = state
+                .docs
+                .plain_body(channel, &own)
+                .expect("a body for a held slice");
+            let text: &[u8] = body.as_ref();
+            assert!(
+                text.len() < 400,
+                "the surfaced body must stay small for a value of 700000 bytes, got {} bytes",
+                text.len()
+            );
+            let parsed: serde_json::Value = serde_json::from_slice(text).expect("a JSON body");
+            assert!(
+                parsed["value"].get("$chunks").is_some(),
+                "the surfaced body must name the chunks, got {parsed}"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn a_value_at_the_cap_is_taken_on_a_passworded_mesh() {
-        let mut state = fresh_state_with_mesh_key(SymmetricKey::from([5u8; 32]));
-        let cap = 1_048_576;
-        let started = clock::Instant::now();
-        write_own(&mut state, Channel::State, big_value('x', cap - 8))
-            .await
-            .expect("the seal overhead must not count against the cap of the value");
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "a value of 1 MiB is too large for one frame, so it must not be sealed whole as a body: it took {:?}",
-            started.elapsed()
-        );
-        assert_eq!(
-            state.chunks.stored_chunks(),
-            17,
-            "a sealed value of the cap plus 28 bytes must take 17 chunks"
-        );
+    #[test]
+    fn the_surfaced_body_of_an_inline_own_write_is_the_value() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state();
+            let channel = Channel::State;
+            let value = big_value('x', 100);
+            write_own(&mut state, channel, value.clone())
+                .await
+                .expect("an inline write");
+            let own = state.identity.author_key();
+            let body = state
+                .docs
+                .plain_body(channel, &own)
+                .expect("a body for a held slice");
+            let text: &[u8] = body.as_ref();
+            let parsed: serde_json::Value = serde_json::from_slice(text).expect("a JSON body");
+            assert_eq!(
+                parsed["value"],
+                serde_json::Value::Object(value),
+                "the surfaced body of an inline write must carry the value"
+            );
+        });
+    }
+    #[test]
+    fn a_chunked_own_write_on_a_passworded_mesh_stores_sealed_chunks() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state_with_mesh_key(SymmetricKey::from([5u8; 32]));
+            let channel = Channel::State;
+            let value = big_value('x', 70_000);
+            write_own(&mut state, channel, value.clone())
+                .await
+                .expect("a chunked write");
+            let own = state.identity.author_key();
+            assert_eq!(
+                state.docs.own_value(channel, &own),
+                value,
+                "the held value must stay whole"
+            );
+            let root = state
+                .docs
+                .resolved_roots()
+                .next()
+                .expect("the slice names one root");
+            let stored = state.chunks.stored_bytes(root).await;
+            let plain = serde_json::to_vec(&value).expect("a JSON value");
+            assert_eq!(
+                stored.len(),
+                plain.len() + SEAL_SYMMETRIC_OVERHEAD,
+                "the chunks must hold the sealed value"
+            );
+            let sample = &plain[plain.len() / 2..plain.len() / 2 + 64];
+            assert!(
+                !stored.windows(sample.len()).any(|window| window == sample),
+                "no plaintext of the value may be in the chunks of a passworded mesh"
+            );
+        });
+    }
+
+    #[test]
+    fn a_value_at_the_cap_is_taken_on_a_passworded_mesh() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mut state = fresh_state_with_mesh_key(SymmetricKey::from([5u8; 32]));
+            let cap = 1_048_576;
+            let started = clock::Instant::now();
+            write_own(&mut state, Channel::State, big_value('x', cap - 8))
+                .await
+                .expect("the seal overhead must not count against the cap of the value");
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "a value of 1 MiB is too large for one frame, so it must not be sealed whole as a body: it took {:?}",
+                started.elapsed()
+            );
+            assert_eq!(
+                state.chunks.stored_chunks(),
+                17,
+                "a sealed value of the cap plus 28 bytes must take 17 chunks"
+            );
+        });
     }
 }

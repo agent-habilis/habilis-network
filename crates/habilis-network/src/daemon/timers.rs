@@ -441,41 +441,43 @@ mod tests {
     /// partition is the one that a reader of the time series wants most, and its counters are
     /// drained in the same tick whether the line comes or not.
     #[cfg(feature = "multihop")]
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_silent_partition_still_emits_the_census_reading() {
-        use crate::daemon::state::Standing;
-        use crate::util::clock::Instant;
-        use crate::util::tuning;
-        use iroh::endpoint::presets;
-        use iroh_gossip::net::Gossip;
-        // The logs of this thread only: the partition warns, which the guard of the binary would fail.
-        let (captured, _scoped) = testing::LogCapture::start(tracing::Level::INFO);
-        let endpoint = iroh::Endpoint::builder(presets::Minimal)
-            .bind()
-            .await
-            .expect("bind a local endpoint");
-        let gossip = Gossip::builder().spawn(endpoint.clone());
-        let mut state = testing::fresh_state();
-        state.standing.insert(Standing::Meshed);
-        state.peers.insert(testing::test_key("somebody"));
-        let long_ago = Instant::now()
-            .checked_sub(tuning::silent_partition_after() * 2)
-            .expect("the clock runs for longer than a heal");
-        state.start_zero_links_gap_at(long_ago);
-        assert!(
-            state.silent_partition_due(state.peers.len(), Instant::now()),
-            "the premise: the gap outlasted a heal"
-        );
+    #[test]
+    fn a_silent_partition_still_emits_the_census_reading() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::daemon::state::Standing;
+            use crate::util::clock::Instant;
+            use crate::util::tuning;
+            use iroh::endpoint::presets;
+            use iroh_gossip::net::Gossip;
+            // The logs of this thread only: the partition warns, which the guard of the binary would fail.
+            let (captured, _scoped) = testing::LogCapture::start(tracing::Level::INFO);
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let mut state = testing::fresh_state();
+            state.standing.insert(Standing::Meshed);
+            state.peers.insert(testing::test_key("somebody"));
+            let long_ago = Instant::now()
+                .checked_sub(tuning::silent_partition_after() * 2)
+                .expect("the clock runs for longer than a heal");
+            state.start_zero_links_gap_at(long_ago);
+            assert!(
+                state.silent_partition_due(state.peers.len(), Instant::now()),
+                "the premise: the gap outlasted a heal"
+            );
 
-        super::tick_state_refresh(&mut state, &endpoint, &gossip).await;
+            super::tick_state_refresh(&mut state, &endpoint, &gossip).await;
 
-        let logs = captured.text();
-        endpoint.close().await;
-        assert!(logs.contains("silent partition"), "the warning: {logs}");
-        assert!(
-            logs.contains("mesh census"),
-            "the census reading comes with the warning: {logs}"
-        );
+            let logs = captured.text();
+            endpoint.close().await;
+            assert!(logs.contains("silent partition"), "the warning: {logs}");
+            assert!(
+                logs.contains("mesh census"),
+                "the census reading comes with the warning: {logs}"
+            );
+        });
     }
 
     /// The join phase is the first 5 minutes after the join, and the census says so.

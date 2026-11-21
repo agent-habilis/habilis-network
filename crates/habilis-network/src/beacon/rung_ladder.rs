@@ -8,16 +8,15 @@ use crate::util::clock::Instant;
 
 use super::{RendezvousParams, RungRead, RungWatch, rung_is_busy};
 
-/// The rendezvous's **dialable** address: the id plus somewhere to reach it.
+/// The rendezvous's **dialable** address: the id plus somewhere to reach it. It names every place
+/// where the beacon can be. What a member registers for the id is a part of it, see
+/// [`rendezvous_addr_offering`], and what a rival probe dials is all of it: the probe asks "is
+/// anyone serving the identity anywhere on the ladder?", and a rung that is not offered to
+/// the dials of the member can still hold the beacon.
 ///
-/// One construction, two callers that must not drift — the hint a joiner
-/// pre-registers on its peer endpoint (`daemon::setup::register_rendezvous`)
-/// and the target `spawn_rival_probe` dials. They are the same address by
-/// definition: the probe asks "is anyone serving the identity a joiner would
-/// reach?", so asking it anywhere else answers a different question.
-///
-/// - Private (a non-empty ladder): every loopback rung, because iroh's
-///   node-id dial reaches whichever rung our beacon actually bound.
+/// - Private (a non-empty ladder): every loopback rung. A member does not register them all: the
+///   mesh shares a host with other meshes, and the port of a rung that nobody has proven to be ours
+///   can be the rung of another mesh, whose beacon answers a dial with its own identity.
 /// - Public: every rung of the relay choice of the member, and `bootstrap_relay`. The beacon homes
 ///   on one rung of the ladder (`beacon_lookups`), and a dial reaches it by the relay it homes
 ///   on. The rung that a member reads as the first reachable one is the outcome of a walk with a
@@ -54,13 +53,16 @@ pub(crate) fn rendezvous_addr(params: &RendezvousParams) -> Option<EndpointAddr>
     Some(address)
 }
 
-/// [`rendezvous_addr`] without the rungs of `withheld`: the address that a member registers for the
-/// rendezvous id while those rungs are busy and not read as ours ([`RungWatch::withheld_rungs`]).
-pub(crate) fn rendezvous_addr_without(
+/// [`rendezvous_addr`] with only the loopback rungs of `offered`: the address that a member
+/// registers for the rendezvous id ([`RungWatch::offered_rungs`]). A rung that was never read as
+/// ours is not in it, because another mesh whose ladder shares the port can hold it, and the
+/// dial of the id ends on the first answer of a listener of another identity. An address of
+/// another kind (a relay rung) stays.
+pub(crate) fn rendezvous_addr_offering(
     params: &RendezvousParams,
-    withheld: &[u16],
+    offered: &[u16],
 ) -> Option<EndpointAddr> {
-    rendezvous_addr(params).map(|address| keeping_rungs(address, |port| !withheld.contains(&port)))
+    rendezvous_addr(params).map(|address| keeping_rungs(address, |port| offered.contains(&port)))
 }
 
 /// The rendezvous id at one rung of the loopback ladder.
@@ -68,12 +70,16 @@ pub(crate) fn rendezvous_holder_addr(params: &RendezvousParams, port: u16) -> En
     EndpointAddr::new(params.id).with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
 }
 
-/// `addr` without the IP addresses whose port `keep` refuses. An address of another kind stays.
+/// `addr` without the rungs that `keep` refuses. A rung is the loopback address and a port of the
+/// ladder, so an address of another host with the same port stays, and so does an address of
+/// another kind.
 pub(crate) fn keeping_rungs(address: EndpointAddr, keep: impl Fn(u16) -> bool) -> EndpointAddr {
     EndpointAddr::from_parts(
         address.id,
         address.addrs.into_iter().filter(|transport| {
-            if let iroh::TransportAddr::Ip(socket) = transport {
+            if let iroh::TransportAddr::Ip(socket) = transport
+                && socket.ip() == Ipv4Addr::LOCALHOST
+            {
                 keep(socket.port())
             } else {
                 true
@@ -124,45 +130,22 @@ pub(crate) async fn forget_rungs(
     if forgotten.addrs.is_empty() {
         return;
     }
+    forget_rungs_in_book(params, peer_book, &forget);
+    peer.remove_endpoint_addr(forgotten).await;
+}
+
+/// [`forget_rungs`] on the book alone: for a caller that cannot wait, which leaves the endpoint to
+/// a later tick.
+pub(crate) fn forget_rungs_in_book(
+    params: &RendezvousParams,
+    peer_book: &memory::MemoryLookup,
+    forget: impl Fn(u16) -> bool,
+) {
     if let Some(info) = peer_book.get_endpoint_info(params.id) {
         replace_peer_addr(
             peer_book,
             keeping_rungs(info.into_endpoint_addr(), |port| !forget(port)),
         );
-    }
-    peer.remove_endpoint_addr(forgotten).await;
-}
-
-/// The rungs of the ladder that somebody holds, read by a bind that fails: instant, no probe. A
-/// member that starts does not know yet whether the holder is our beacon, so it keeps these out of
-/// the book until a probe answers.
-pub(crate) fn busy_rungs(params: &RendezvousParams) -> Vec<u16> {
-    params
-        .bind_ports
-        .iter()
-        .copied()
-        .filter(|&port| rung_is_busy(port))
-        .collect()
-}
-
-/// Put the rung `port` back among the addresses of the rendezvous id, when a probe said nothing
-/// of it and the book does not name it yet: a host too loaded to answer holds our beacon on it
-/// all the same. The endpoint is told too, as in [`settle_on_rung`].
-pub(crate) async fn admit_rung(
-    params: &RendezvousParams,
-    peer: &Endpoint,
-    peer_book: &memory::MemoryLookup,
-    port: u16,
-) {
-    let entry = peer_book.get_endpoint_info(params.id);
-    let held: bool = entry.is_some_and(|info| info.ip_addrs().any(|socket| socket.port() == port));
-    if held {
-        return;
-    }
-    let holder = rendezvous_holder_addr(params, port);
-    add_peer_addr(peer_book, holder.clone());
-    if let Err(error) = peer.add_endpoint_addr(holder).await {
-        tracing::debug!(target: "habilis_network::beacon", %error, port, "the endpoint did not take the rung");
     }
 }
 
@@ -201,13 +184,14 @@ pub(crate) async fn refresh_holder_rung(
                 settle_on_rung(params, peer, peer_book, port).await;
                 return;
             }
+            RungRead::Foreign => {
+                rungs.mark_foreign(port);
+                forget_rungs(params, peer, peer_book, |rung| rung == port).await;
+            }
             RungRead::Unknown if rung_is_busy(port) => {
                 rungs.ask(params, peer.id(), port, false);
             }
-            RungRead::Unknown
-            | RungRead::Foreign
-            | RungRead::Silent
-            | RungRead::SilentLongEnough => {}
+            RungRead::Unknown | RungRead::Silent | RungRead::SilentLongEnough => {}
         }
     }
 }
@@ -220,9 +204,9 @@ pub(crate) async fn refresh_holder_rung(
 pub(crate) fn holder_entry(
     holder: EndpointAddr,
     params: &RendezvousParams,
-    withheld: &[u16],
+    offered: &[u16],
 ) -> EndpointAddr {
-    match rendezvous_addr_without(params, withheld) {
+    match rendezvous_addr_offering(params, offered) {
         Some(registered) => {
             EndpointAddr::from_parts(holder.id, holder.addrs.into_iter().chain(registered.addrs))
         }

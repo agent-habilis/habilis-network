@@ -26,7 +26,7 @@ use anyhow::Result;
 use super::setup_error::SetupError;
 use iroh::{Endpoint, RelayUrl};
 use rand::RngCore;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot};
 #[cfg(all(unix, feature = "host"))]
 use zeroize::Zeroizing;
 
@@ -70,7 +70,7 @@ fn rendezvous_params(
     mesh: &Mesh,
     topic_id: proto::TopicId,
     lookups: &LookupOpts,
-    rung_tx: watch::Sender<Option<RelayUrl>>,
+    rung_tx: mpsc::UnboundedSender<lookup::RungDecision>,
 ) -> RendezvousParams {
     let bind_ports = if mesh.is_loopback() {
         mesh.rendezvous_ports().to_vec()
@@ -106,7 +106,7 @@ fn rendezvous_params(
 /// relay-disabled) ladder.
 fn spawn_startup_rung_confirmation(
     ladder: Vec<RelayUrl>,
-    rung_tx: watch::Sender<Option<RelayUrl>>,
+    rung_tx: mpsc::UnboundedSender<lookup::RungDecision>,
 ) -> Option<StoppableTask> {
     if ladder.is_empty() {
         return None;
@@ -117,23 +117,39 @@ fn spawn_startup_rung_confirmation(
             // A departure ended the walk: its `None` is not a verdict.
             return;
         }
-        rung_tx.send_if_modified(|current| {
-            if *current == confirmed {
-                false
-            } else {
-                *current = confirmed;
-                true
-            }
-        });
+        // The setup homes on the first rung of the ladder, so a verdict that is that rung is no news.
+        if confirmed != ladder.first().cloned() {
+            let _ = rung_tx.send(lookup::RungDecision::at_startup(confirmed));
+        }
     }))
+}
+
+/// The rungs of the ladder that a member offers in the rendezvous address it registers at setup,
+/// from what each busy rung answered to a probe: only a rung read as ours. A rung that nobody has
+/// read can be the rung of another mesh, whose beacon would end the dial with its own identity.
+/// A rung that says nothing, or refuses, is not offered either: the member reads the ladder while
+/// it is not meshed (`read_ladder_while_unmeshed`, for every policy, a `discover` session included),
+/// and admits the rung that answers as ours. A silent rung is asked again and stays out until it
+/// answers.
+pub(crate) fn rungs_offered_at_setup(read: &[(u16, ProbeAnswer)]) -> Vec<u16> {
+    read.iter()
+        .filter(|(_, answer)| matches!(answer, ProbeAnswer::Ours))
+        .map(|(port, _)| *port)
+        .collect()
 }
 
 /// Pre-register `rendezvous_id`'s address so a cold joiner reaches it
 /// with **zero address-lookup wait** — a creator-independent bootstrap
 /// that needs no discovery query to make the first dial:
 ///
-/// - **loopback-only**: every loopback ladder rung (iroh's node-id dial
-///   reaches whichever rung our beacon bound; see `crate::beacon`).
+/// - **loopback-only**: the loopback ladder rungs of `offered`, those that
+///   were read as serving our beacon (iroh's node-id dial reaches whichever
+///   of them our beacon bound; see `crate::beacon`). A rung that nobody has
+///   proven to be ours stays out: other meshes on the host derive ladders
+///   from their own seeds, the ports can coincide, and a dial that meets the
+///   beacon of another mesh ends on its identity. The member reads the busy
+///   rungs of the ladder (`beacon::read_ladder`) and admits the rung that
+///   answers as ours, a few hundred ms after the beacon binds.
 /// - **reachable across machines**: the seed-derived `rendezvous_id` at
 ///   **every rung** of the relay choice, and at the rung of the walk
 ///   (`params.bootstrap_relay`). The beacon homes on one rung of the ladder
@@ -151,35 +167,18 @@ fn spawn_startup_rung_confirmation(
 /// with the rival probe's dial target: the probe asks whether anyone serves
 /// the identity *a joiner would reach*, so the two must name the same place or
 /// it is answering a different question.
-/// The rungs a member leaves out of the rendezvous address it registers at setup, from what each
-/// busy rung answered to a probe. A member that walks the ladder (every policy but `Never`) keeps
-/// only a rung read as ours: its walk reads the rest and admits one that turns out to be ours, and
-/// a foreign listener never fails its dial. A member that never walks (`CoHostPolicy::Never`, the
-/// `discover` session) leaves out only a rung read as foreign: it reads no rung later, and a rung
-/// that refused or said nothing may be the beacon it came for, starting or loaded.
-fn rungs_withheld_at_setup(policy: CoHostPolicy, read: &[(u16, ProbeAnswer)]) -> Vec<u16> {
-    read.iter()
-        .filter(|(_, answer)| match policy {
-            CoHostPolicy::Never => matches!(answer, ProbeAnswer::Foreign),
-            CoHostPolicy::Eager | CoHostPolicy::EagerProbed | CoHostPolicy::Deferred => {
-                !matches!(answer, ProbeAnswer::Ours)
-            }
-        })
-        .map(|(port, _)| *port)
-        .collect()
-}
-
 pub(crate) fn register_rendezvous(
     book: &memory::MemoryLookup,
     params: &RendezvousParams,
-    withheld: &[u16],
+    offered: &[u16],
 ) {
     // Relay disabled (not in the allowlist) or private without a port ladder:
     // nothing to pre-register — joiners resolve the rendezvous id via
     // mDNS/DHT only.
-    // Without the rungs in `withheld`: a dial of the id tries every address that the endpoint knows
-    // for it, and a listener of another program on one of them fails the dial as a whole.
-    let Some(address) = beacon::rendezvous_addr_without(params, withheld) else {
+    // Only the rungs in `offered`: a dial of the id tries every address that the endpoint knows
+    // for it, and a listener of another identity on one of them (another mesh whose ladder shares
+    // the port, or another program) ends the dial with its answer.
+    let Some(address) = beacon::rendezvous_addr_offering(params, offered) else {
         return;
     };
     if params.bind_ports.is_empty() {
@@ -197,6 +196,25 @@ pub(crate) fn register_rendezvous(
         );
     }
     add_peer_addr(book, address);
+}
+
+/// [`register_rendezvous`] again, for a member that registered it before: the hint of the rendezvous
+/// is asserted again, and a rung leaves the book and the endpoint only on evidence that it is not
+/// ours (`RungWatch::not_ours_rungs`: read as foreign, or refused). The endpoint keeps the address
+/// that it was told for the id (`settle_on_rung`) and, in the iroh fork, does not read the book again
+/// for an id that it knows while a non-relay path is selected, as it is on the loopback ladder, so a
+/// rung that a dial would meet another identity on must leave it too. A rung that
+/// nobody read lately stays: the absence of a reading says nothing, and a member that is meshed does
+/// not read the ladder. The rung of the holder, in particular, stays after a stall.
+pub(crate) async fn reregister_rendezvous(
+    book: &memory::MemoryLookup,
+    peer: &Endpoint,
+    params: &RendezvousParams,
+    rungs: &beacon::RungWatch,
+) {
+    let not_ours = rungs.not_ours_rungs();
+    beacon::forget_rungs(params, peer, book, |port| not_ours.contains(&port)).await;
+    register_rendezvous(book, params, &rungs.offered_rungs());
 }
 
 /// Build the endpoint, subscribe to the topic, and produce a ready
@@ -524,9 +542,6 @@ struct SetupBuild<'build> {
     )]
     multihop: bool,
     transports: lookup::TransportOpts,
-    /// The caller's co-host override, read before the policy is final: what a joiner registers
-    /// for the rendezvous depends on whether it will walk the ladder.
-    cohost: Option<CoHostPolicy>,
     /// The caller's ALPN handlers, moved out exactly once by whichever of
     /// create/join runs. Interior mutability because they are boxed trait
     /// objects — not `Clone` — and `SetupBuild` is threaded by reference.
@@ -538,7 +553,7 @@ struct SetupBuild<'build> {
     /// contended here and nothing holds the guard across an `.await`; the
     /// `Mutex` is bought purely for the `Sync` it carries.
     protocols: sync::Mutex<CallerProtocols>,
-    rung_tx: &'build watch::Sender<Option<RelayUrl>>,
+    rung_tx: &'build mpsc::UnboundedSender<lookup::RungDecision>,
     /// The mesh's `transport.relay_transport`, for the accept gates.
     relay_transport: transport::PayloadPath,
 }
@@ -605,6 +620,8 @@ struct Assembled {
     webrtc_ice: transport::IceProfile,
     /// The raw topic string (`SetupKind::Topic` only); `None` for create/join.
     topic_string: Option<String>,
+    /// The closes of the endpoints that read the busy rungs at setup; the run waits for them at its end.
+    prober_closes: Vec<oneshot::Receiver<()>>,
 }
 
 /// `max_connections` with `0` taken as the default. Every option set (`Opts`, the C
@@ -1521,11 +1538,12 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     let transports = member_transports(&lookups, transports, &mesh_config.transport)?;
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the
-    // event loop applies it (re-register + re-home) without ever running
-    // a ladder walk on the sole loop. Initialized to the optimistic
-    // rung 0 (empty ladder ⇒ `None`).
+    // event loop applies each decision, in the order that they were sent (re-register + re-home),
+    // without ever running a ladder walk on the sole loop. The channel has no initial value: the
+    // setup homes on the optimistic rung 0 (empty ladder ⇒ `None`), and the probe sends a decision
+    // only when its verdict is another rung.
     let ladder: Vec<_> = relay_ladder(&lookups.relay_lookup).collect();
-    let (rung_tx, rung_rx) = watch::channel(ladder.first().cloned());
+    let (rung_tx, rung_rx) = mpsc::unbounded_channel();
     let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);
     let (chunk_rx, chunk_acceptor) = chunk_inbox(relay_transport);
 
@@ -1545,7 +1563,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         protocols: sync::Mutex::new(protocols),
         rung_tx: &rung_tx,
         relay_transport,
-        cohost: cohost_override,
     };
     let Assembled {
         mesh_id,
@@ -1569,6 +1586,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         address_book,
         webrtc_ice,
         topic_string,
+        prober_closes,
     } = assemble(kind, &build, injected).await?;
     // Read out of `build` before anything below moves what it borrows
     // (`author`, `sink`, `rung_tx`).
@@ -1623,6 +1641,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
             // once the IPC socket accepts. Confirm/correct the optimistic rung 0 in the
             // background (covers a joiner, which has no beacon self-monitor of its own).
             rung_probe: spawn_startup_rung_confirmation(ladder, rung_tx),
+            prober_closes,
             cohost: cohost_override.unwrap_or(cohost),
         },
         runtime: RuntimeConfig {
@@ -1837,7 +1856,9 @@ async fn setup_create(
     // Creator has no peers yet — bootstrap is empty.
     let topic = split::subscribe_mesh(&gossip, topic_id, rdv.id, []).await?;
 
-    register_rendezvous(&address_book, &rdv, &beacon::busy_rungs(&rdv));
+    // The creator offers no rung: its own beacon binds one, and `claim` settles the endpoint and the
+    // book on it. A rung that nobody has read as ours can be the rung of another mesh.
+    register_rendezvous(&address_book, &rdv, &[]);
 
     Ok(Assembled {
         mesh_id,
@@ -1861,6 +1882,7 @@ async fn setup_create(
         address_book,
         webrtc_ice,
         topic_string: None,
+        prober_closes: Vec::new(),
     })
 }
 
@@ -1913,8 +1935,8 @@ async fn setup_join(
     // this registered address — the loopback port ladder (loopback-only) or
     // the chosen relay rung (reachable across machines).
     let read = beacon::read_busy_rungs(&rdv, SETUP_RUNG_READ).await;
-    let withheld = rungs_withheld_at_setup(build.cohost.unwrap_or(cohost), &read);
-    register_rendezvous(&address_book, &rdv, &withheld);
+    let offered = rungs_offered_at_setup(&read.answers);
+    register_rendezvous(&address_book, &rdv, &offered);
     // We subscribe, background-connect to the rendezvous, and — for a plain
     // join — `daemon::run` defers co-hosting our own (same seed-id) rendezvous
     // until we are meshed, so we never register a duplicate `rendezvous_id` on
@@ -1970,6 +1992,7 @@ async fn setup_join(
         address_book,
         webrtc_ice,
         topic_string,
+        prober_closes: read.closes,
     })
 }
 
@@ -2638,6 +2661,15 @@ mod tests {
         }
     }
 
+    /// A restart of `state`, the way the setup takes it: [`super::hold_member_key`] tries the lock again for
+    /// `KEY_LOCK_RETRY`. A start that tries it once fails while a child that another test spawns still holds a
+    /// copy of the lock file, between its fork and its exec.
+    #[cfg(all(unix, feature = "host"))]
+    async fn start_again(state: &Path) -> anyhow::Result<RunKeys> {
+        let key_lock = super::hold_member_key(Some(state)).await?;
+        super::run_keys_holding(Some(state), key_lock, &super::NEVER_CANCELLED)
+    }
+
     /// The owner binding reads the path that the keys came from. A start with no state file of its
     /// own keeps its pair under the default path of the mesh, and the explicit state file is `None`
     /// there: a binding that read that field alone stamped nothing, and a later owner of the same
@@ -2688,104 +2720,110 @@ mod tests {
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn each_start_records_its_run_in_the_key_file() {
-        let dir = TempDir::new("habilis-run-recorded");
-        let state = dir.path().join("session.json");
-        let first =
-            ended(super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the first start"));
-        let second =
-            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the second start");
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = TempDir::new("habilis-run-recorded");
+            let state = dir.path().join("session.json");
+            let first = ended(
+                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the first start"),
+            );
+            let second = start_again(&state).await.expect("the second start");
 
-        let bytes = fs::read(state.with_extension("key")).expect("the key file");
-        let named = bytes
-            .get(40..48)
-            .and_then(|tail| <[u8; 8]>::try_from(tail).ok())
-            .map(u64::from_le_bytes);
+            let bytes = fs::read(state.with_extension("key")).expect("the key file");
+            let named = bytes
+                .get(40..48)
+                .and_then(|tail| <[u8; 8]>::try_from(tail).ok())
+                .map(u64::from_le_bytes);
 
-        assert_eq!(first.run, 1, "the first start is run 1");
-        assert_eq!(second.run, 2, "the second start is run 2");
-        assert_eq!(named, Some(second.run), "the key file names the last run");
+            assert_eq!(first.run, 1, "the first start is run 1");
+            assert_eq!(second.run, 2, "the second start is run 2");
+            assert_eq!(named, Some(second.run), "the key file names the last run");
+        });
     }
 
     /// The wait for the run lock holds no thread of the runtime: while another start keeps the lock for 700 ms, a
     /// ticker on the same current-thread runtime keeps running. A blocking sleep on the runtime thread (up to 30 s)
     /// would stop every timer of a daemon that starts in the same process.
     #[cfg(all(unix, feature = "host"))]
-    #[tokio::test]
-    async fn the_wait_for_the_run_lock_does_not_stop_the_runtime() {
-        use std::fs;
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::time::Duration;
-        use tokio::task;
-        let dir = TempDir::new("habilis-run-lock-runtime");
-        let state = dir.path().join("session.json");
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(false);
-        let holder: fs::File = options
-            .open(state.with_extension("run.lock"))
-            .expect("the file of the holder");
-        holder.lock().expect("the holder takes the lock");
-        let releaser = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(700));
-            drop(holder);
+    #[test]
+    fn the_wait_for_the_run_lock_does_not_stop_the_runtime() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use std::fs;
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::time::Duration;
+            use tokio::task;
+            let dir = TempDir::new("habilis-run-lock-runtime");
+            let state = dir.path().join("session.json");
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(false);
+            let holder: fs::File = options
+                .open(state.with_extension("run.lock"))
+                .expect("the file of the holder");
+            holder.lock().expect("the holder takes the lock");
+            let releaser = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(700));
+                drop(holder);
+            });
+            // the test and the ticker task share the count
+            let ticks = Arc::new(AtomicUsize::new(0));
+            let ticker = {
+                let ticks = Arc::clone(&ticks);
+                tokio::spawn(async move {
+                    loop {
+                        time::sleep(Duration::from_millis(20)).await;
+                        ticks.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            };
+            // let the ticker start
+            task::yield_now().await;
+
+            let keys = super::run_keys_off_the_runtime(Some(state), None).await;
+
+            ticker.abort();
+            releaser.join().expect("the holder ends");
+            assert!(
+                keys.is_ok(),
+                "the start did not get the lock after the holder let go"
+            );
+            let seen = ticks.load(Ordering::Relaxed);
+            assert!(
+                seen >= 10,
+                "the wait for the run lock stopped the runtime: the ticker ran {seen} times in 700 ms"
+            );
         });
-        // the test and the ticker task share the count
-        let ticks = Arc::new(AtomicUsize::new(0));
-        let ticker = {
-            let ticks = Arc::clone(&ticks);
-            tokio::spawn(async move {
-                loop {
-                    time::sleep(Duration::from_millis(20)).await;
-                    ticks.fetch_add(1, Ordering::Relaxed);
-                }
-            })
-        };
-        // let the ticker start
-        task::yield_now().await;
-
-        let keys = super::run_keys_off_the_runtime(Some(state), None).await;
-
-        ticker.abort();
-        releaser.join().expect("the holder ends");
-        assert!(
-            keys.is_ok(),
-            "the start did not get the lock after the holder let go"
-        );
-        let seen = ticks.load(Ordering::Relaxed);
-        assert!(
-            seen >= 10,
-            "the wait for the run lock stopped the runtime: the ticker ran {seen} times in 700 ms"
-        );
     }
 
     /// A setup that is cancelled while it waits for the run lock leaves nothing behind: the worker that waits stops
     /// at its next step. Else it keeps the member key lock that it holds, and when the holder lets go it takes the run
     /// lock and writes the run counter of a start that does not exist.
     #[cfg(all(unix, feature = "host"))]
-    #[tokio::test]
-    async fn a_cancelled_wait_for_the_run_lock_writes_no_run_counter() {
-        use std::fs;
-        use std::time::Duration;
-        let dir = TempDir::new("habilis-run-lock-cancel");
-        let state = dir.path().join("session.json");
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(false);
-        let holder: fs::File = options
-            .open(state.with_extension("run.lock"))
-            .expect("the file of the holder");
-        holder.lock().expect("the holder takes the lock");
-        let start = tokio::spawn(super::run_keys_off_the_runtime(Some(state.clone()), None));
-        time::sleep(Duration::from_millis(150)).await;
+    #[test]
+    fn a_cancelled_wait_for_the_run_lock_writes_no_run_counter() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use std::fs;
+            use std::time::Duration;
+            let dir = TempDir::new("habilis-run-lock-cancel");
+            let state = dir.path().join("session.json");
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(false);
+            let holder: fs::File = options
+                .open(state.with_extension("run.lock"))
+                .expect("the file of the holder");
+            holder.lock().expect("the holder takes the lock");
+            let start = tokio::spawn(super::run_keys_off_the_runtime(Some(state.clone()), None));
+            time::sleep(Duration::from_millis(150)).await;
 
-        start.abort();
-        time::sleep(Duration::from_millis(150)).await;
-        drop(holder);
-        time::sleep(Duration::from_millis(500)).await;
+            start.abort();
+            time::sleep(Duration::from_millis(150)).await;
+            drop(holder);
+            time::sleep(Duration::from_millis(500)).await;
 
-        assert!(
-            !state.with_extension("run").exists(),
-            "the cancelled start took the run lock when the holder let go, and wrote a run counter"
-        );
+            assert!(
+                !state.with_extension("run").exists(),
+                "the cancelled start took the run lock when the holder let go, and wrote a run counter"
+            );
+        });
     }
 
     /// A start that is cancelled before the lock is free writes no run counter either. The wait reads the flag
@@ -2818,36 +2856,38 @@ mod tests {
     #[test]
     fn a_restart_with_no_state_file_keeps_its_member_key_in_the_default_state_path() {
         use crate::protocol::{MeshId, Nickname};
-        let dir = TempDir::new("habilis-default-state");
-        let base = dir.path();
-        let (mesh, author) = (MeshId::from("test"), Nickname::from("alice"));
-        let explicit = dir.path().join("explicit.json");
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = TempDir::new("habilis-default-state");
+            let base = dir.path();
+            let (mesh, author) = (MeshId::from("test"), Nickname::from("alice"));
+            let explicit = dir.path().join("explicit.json");
 
-        let path = |state: Option<&Path>, on: bool| {
-            super::keys_state_path(state, Some(base), &mesh, &author, on).expect("a state path")
-        };
-        let default = path(None, true).expect("the flag asks for the default state path");
-        let first = ended(
-            super::run_keys(Some(&default), &super::NEVER_CANCELLED).expect("the first start"),
-        );
-        let second = super::run_keys(Some(&default), &super::NEVER_CANCELLED).expect("the restart");
+            let path = |state: Option<&Path>, on: bool| {
+                super::keys_state_path(state, Some(base), &mesh, &author, on).expect("a state path")
+            };
+            let default = path(None, true).expect("the flag asks for the default state path");
+            let first = ended(
+                super::run_keys(Some(&default), &super::NEVER_CANCELLED).expect("the first start"),
+            );
+            let second = start_again(&default).await.expect("the restart");
 
-        assert!(
-            default.starts_with(base),
-            "the default path is under the runtime base"
-        );
-        assert_eq!(
-            member_of(&first),
-            member_of(&second),
-            "the restart made a new member key"
-        );
-        assert_eq!(second.run, first.run + 1, "the run counts on");
-        assert!(path(None, false).is_none(), "no flag keeps ephemeral keys");
-        assert_eq!(
-            path(Some(&explicit), true).as_deref(),
-            Some(explicit.as_path()),
-            "an explicit state file wins"
-        );
+            assert!(
+                default.starts_with(base),
+                "the default path is under the runtime base"
+            );
+            assert_eq!(
+                member_of(&first),
+                member_of(&second),
+                "the restart made a new member key"
+            );
+            assert_eq!(second.run, first.run + 1, "the run counts on");
+            assert!(path(None, false).is_none(), "no flag keeps ephemeral keys");
+            assert_eq!(
+                path(Some(&explicit), true).as_deref(),
+                Some(explicit.as_path()),
+                "an explicit state file wins"
+            );
+        });
     }
 
     /// The run counter file is read like the key file: no link is followed, a file that is not a regular file is
@@ -2951,33 +2991,35 @@ mod tests {
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_member_whose_run_file_is_deleted_restarts_from_the_clock() {
-        let _guard = ::habilis_network_test_tracing::init();
-        ::habilis_network_test_tracing::expect_warn(
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn(
             "habilis_network::lifecycle",
             "run counter file is unreadable",
         );
-        let dir = TempDir::new("habilis-run-deleted");
-        let state = dir.path().join("session.json");
-        let first =
-            ended(super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the first start"));
-        let second = ended(
-            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the second start"),
-        );
-        assert_eq!(
-            (first.run, second.run),
-            (1, 2),
-            "the first starts count 1, 2"
-        );
-        fs::remove_file(state.with_extension("run")).expect("the run file is deleted");
+        ::habilis_network_test_tracing::run(guard, async {
+            let dir = TempDir::new("habilis-run-deleted");
+            let state = dir.path().join("session.json");
+            let first = ended(
+                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the first start"),
+            );
+            let second = ended(start_again(&state).await.expect("the second start"));
+            assert_eq!(
+                (first.run, second.run),
+                (1, 2),
+                "the first starts count 1, 2"
+            );
+            fs::remove_file(state.with_extension("run")).expect("the run file is deleted");
 
-        let third = super::run_keys(Some(&state), &super::NEVER_CANCELLED)
-            .expect("the start after the deletion");
+            let third = start_again(&state)
+                .await
+                .expect("the start after the deletion");
 
-        assert!(
-            third.run > 1_000_000_000,
-            "the run after a deleted file is {}, below the runs that peers hold",
-            third.run
-        );
+            assert!(
+                third.run > 1_000_000_000,
+                "the run after a deleted file is {}, below the runs that peers hold",
+                third.run
+            );
+        });
     }
 
     /// A first start has no run file and no member key: the count starts at 1, with no warning.
@@ -2997,49 +3039,49 @@ mod tests {
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_pair_of_files_from_another_owner_is_not_reused() {
-        let _guard = ::habilis_network_test_tracing::init();
-        ::habilis_network_test_tracing::expect_warn(
-            "habilis_network::lifecycle",
-            "from another owner",
-        );
-        let dir = TempDir::new("habilis-owner");
-        let state = dir.path().join("session.json");
-        let first = ended(super::bind_to_owner(
-            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
-            Some(&state),
-            Some(100),
-        ));
-        let restart = ended(super::bind_to_owner(
-            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("restart"),
-            Some(&state),
-            Some(100),
-        ));
-        assert_eq!(
-            member_of(&first),
-            member_of(&restart),
-            "the same owner keeps the member key"
-        );
-        assert_eq!(restart.run, 2, "and the run counter goes on");
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "from another owner");
+        ::habilis_network_test_tracing::run(guard, async {
+            let dir = TempDir::new("habilis-owner");
+            let state = dir.path().join("session.json");
+            let first = ended(super::bind_to_owner(
+                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
+                Some(&state),
+                Some(100),
+            ));
+            let restart = ended(super::bind_to_owner(
+                start_again(&state).await.expect("restart"),
+                Some(&state),
+                Some(100),
+            ));
+            assert_eq!(
+                member_of(&first),
+                member_of(&restart),
+                "the same owner keeps the member key"
+            );
+            assert_eq!(restart.run, 2, "and the run counter goes on");
 
-        let reused_pid = ended(super::bind_to_owner(
-            super::run_keys(Some(&state), &super::NEVER_CANCELLED)
-                .expect("a start of another process"),
-            Some(&state),
-            Some(200),
-        ));
+            let reused_pid = ended(super::bind_to_owner(
+                start_again(&state)
+                    .await
+                    .expect("a start of another process"),
+                Some(&state),
+                Some(200),
+            ));
 
-        assert_ne!(
-            member_of(&first),
-            member_of(&reused_pid),
-            "another owner start time is a new member"
-        );
-        assert_eq!(reused_pid.run, 1, "and its run counter starts again");
-        let next = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the start after");
-        assert_eq!(
-            member_of(&reused_pid),
-            member_of(&next),
-            "the new member key is kept, for the restarts of the new owner"
-        );
+            assert_ne!(
+                member_of(&first),
+                member_of(&reused_pid),
+                "another owner start time is a new member"
+            );
+            assert_eq!(reused_pid.run, 1, "and its run counter starts again");
+            let next = start_again(&state).await.expect("the start after");
+            assert_eq!(
+                member_of(&reused_pid),
+                member_of(&next),
+                "the new member key is kept, for the restarts of the new owner"
+            );
+        });
     }
 
     /// An owner whose start time cannot be read gets no reuse of an old pair: the safe side. A pair
@@ -3048,28 +3090,28 @@ mod tests {
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn with_no_start_time_an_old_pair_is_not_reused_and_a_new_one_is_kept() {
-        let _guard = ::habilis_network_test_tracing::init();
-        ::habilis_network_test_tracing::expect_warn(
-            "habilis_network::lifecycle",
-            "from another owner",
-        );
-        let dir = TempDir::new("habilis-owner-none");
-        let state = dir.path().join("session.json");
-        let made = ended(super::bind_to_owner(
-            super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
-            Some(&state),
-            None,
-        ));
-        let old = super::run_keys(Some(&state), &super::NEVER_CANCELLED)
-            .expect("a start with the pair of the first");
-        let checked = super::bind_to_owner(old.clone(), Some(&state), None);
+        let guard = ::habilis_network_test_tracing::init();
+        guard.expect_warn("habilis_network::lifecycle", "from another owner");
+        ::habilis_network_test_tracing::run(guard, async {
+            let dir = TempDir::new("habilis-owner-none");
+            let state = dir.path().join("session.json");
+            let made = ended(super::bind_to_owner(
+                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
+                Some(&state),
+                None,
+            ));
+            let old = start_again(&state)
+                .await
+                .expect("a start with the pair of the first");
+            let checked = super::bind_to_owner(old.clone(), Some(&state), None);
 
-        assert_eq!(made.run, 1, "a pair made by this start is kept");
-        assert_ne!(
-            member_of(&old),
-            member_of(&checked),
-            "an old pair is not reused with no start time to check"
-        );
+            assert_eq!(made.run, 1, "a pair made by this start is kept");
+            assert_ne!(
+                member_of(&old),
+                member_of(&checked),
+                "an old pair is not reused with no start time to check"
+            );
+        });
     }
 
     /// The member key survives a restart and the session key does not: the session key signs the
@@ -3077,32 +3119,34 @@ mod tests {
     #[cfg(all(unix, feature = "host"))]
     #[test]
     fn a_restart_keeps_the_member_key_and_changes_the_session_key() {
-        let dir = env::temp_dir().join(format!("habilis-run-keys-{}", process::id()));
-        fs::create_dir_all(&dir).expect("a temp dir");
-        let state = dir.join("session.json");
-        let first =
-            ended(super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"));
-        let second = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("restart");
-        assert_eq!(
-            member_of(&first),
-            member_of(&second),
-            "the restart keeps the member key"
-        );
-        assert_ne!(
-            first.session.author_key(),
-            second.session.author_key(),
-            "the restart makes a new session key"
-        );
-        assert_ne!(
-            first.session.author_key(),
-            member_of(&first),
-            "the session key is not the member key"
-        );
-        assert_eq!(
-            (first.run, second.run),
-            (1, 2),
-            "the run number counts the starts"
-        );
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = env::temp_dir().join(format!("habilis-run-keys-{}", process::id()));
+            fs::create_dir_all(&dir).expect("a temp dir");
+            let state = dir.join("session.json");
+            let first =
+                ended(super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"));
+            let second = start_again(&state).await.expect("restart");
+            assert_eq!(
+                member_of(&first),
+                member_of(&second),
+                "the restart keeps the member key"
+            );
+            assert_ne!(
+                first.session.author_key(),
+                second.session.author_key(),
+                "the restart makes a new session key"
+            );
+            assert_ne!(
+                first.session.author_key(),
+                member_of(&first),
+                "the session key is not the member key"
+            );
+            assert_eq!(
+                (first.run, second.run),
+                (1, 2),
+                "the run number counts the starts"
+            );
+        });
     }
 
     /// Two live daemons cannot be one member: the second start of a state path that a live start
@@ -3171,32 +3215,88 @@ mod tests {
     #[test]
     fn a_start_after_the_holder_is_gone_works_even_while_a_child_of_it_lives() {
         use std::io::{BufRead, BufReader};
-        let dir = env::temp_dir().join(format!("habilis-key-lock-child-{}", process::id()));
-        fs::create_dir_all(&dir).expect("a temp dir");
-        let state = dir.join("child.json");
-        let first = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start");
-        let first_member = member_of(&first);
-        // The child says that it runs: before its exec it still holds a copy of every descriptor of this
-        // process, the lock file too, and a holder that is dropped in that gap leaves the lock held for it.
-        let mut child: process::Child = process::Command::new("sh")
-            .args(["-c", "echo ready; sleep 30"])
-            .stdout(process::Stdio::piped())
-            .spawn()
-            .expect("a child that outlives the holder");
-        let mut ready = String::new();
-        let pipe = child.stdout.take().expect("a pipe");
-        BufRead::read_line(&mut BufReader::new(pipe), &mut ready)
-            .expect("the child says that it runs");
-        drop(first);
-        let second = super::run_keys(Some(&state), &super::NEVER_CANCELLED);
-        child.kill().expect("the child is stopped");
-        child.wait().expect("the child is reaped");
-        let second = second.expect("the child does not keep the lock");
-        assert_eq!(
-            (member_of(&second), second.run),
-            (first_member, 2),
-            "the restart keeps the member key and takes the next run"
-        );
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = env::temp_dir().join(format!("habilis-key-lock-child-{}", process::id()));
+            fs::create_dir_all(&dir).expect("a temp dir");
+            let state = dir.join("child.json");
+            let first =
+                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start");
+            let first_member = member_of(&first);
+            // The child says that it runs: before its exec it still holds a copy of every descriptor of this
+            // process, the lock file too, and a holder that is dropped in that gap leaves the lock held for it.
+            let mut child: process::Child = process::Command::new("sh")
+                .args(["-c", "echo ready; sleep 30"])
+                .stdout(process::Stdio::piped())
+                .spawn()
+                .expect("a child that outlives the holder");
+            let mut ready = String::new();
+            let pipe = child.stdout.take().expect("a pipe");
+            BufRead::read_line(&mut BufReader::new(pipe), &mut ready)
+                .expect("the child says that it runs");
+            drop(first);
+            let second = start_again(&state).await;
+            child.kill().expect("the child is stopped");
+            child.wait().expect("the child is reaped");
+            let second = second.expect("the child does not keep the lock");
+            assert_eq!(
+                (member_of(&second), second.run),
+                (first_member, 2),
+                "the restart keeps the member key and takes the next run"
+            );
+        });
+    }
+
+    /// A restart waits out a child that another thread spawns. Between its fork and its exec the child holds a
+    /// copy of every descriptor of this process, the lock file too, so the lock stays held for a moment after its
+    /// holder drops. Each test of this binary that spawns a child opens that gap, and a restart that tried the
+    /// lock once failed in it. Here the child stays in the gap for 1 s.
+    #[cfg(all(unix, feature = "host"))]
+    #[expect(
+        unsafe_code,
+        reason = "`CommandExt::pre_exec`: only a hook between the fork and the exec keeps the child in that gap"
+    )]
+    #[test]
+    fn a_restart_waits_out_a_child_that_holds_a_copy_of_the_lock_until_its_exec() {
+        use std::io::{self, Read as _, Write as _};
+        use std::os::unix::process::CommandExt as _;
+        use std::time::Duration;
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = TempDir::new("habilis-key-lock-fork-gap");
+            let state = dir.path().join("session.json");
+            let first =
+                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("the first start");
+            let first_member = member_of(&first);
+            let (mut forked, mut forked_tx) = io::pipe().expect("a pipe");
+            let mut command = process::Command::new("true");
+            // SAFETY: the hook makes 1 write and 1 sleep, and touches no lock or allocator of the parent.
+            unsafe {
+                command.pre_exec(move || {
+                    forked_tx.write_all(b"f")?;
+                    thread::sleep(Duration::from_secs(1));
+                    Ok(())
+                });
+            }
+            let spawner = thread::spawn(move || command.status());
+            let mut byte = [0u8; 1];
+            forked
+                .read_exact(&mut byte)
+                .expect("the child says that it forked");
+
+            drop(ended(first));
+            let second = start_again(&state).await;
+
+            let status = spawner.join().expect("the spawner ends");
+            assert!(
+                status.as_ref().is_ok_and(process::ExitStatus::success),
+                "the child runs: {status:?}"
+            );
+            let second = second.expect("the restart waits until the child has done its exec");
+            assert_eq!(
+                (member_of(&second), second.run),
+                (first_member, 2),
+                "the restart keeps the member key and takes the next run"
+            );
+        });
     }
 
     /// The failure this prevents: a restarted session starts its slices again at version 1. Each
@@ -3209,52 +3309,52 @@ mod tests {
         use crate::protocol::{Channel, MeshId, Message, MessageBody};
         use crate::testing;
         use crate::util::clock::Instant;
-        let dir = env::temp_dir().join(format!("habilis-restart-actor-{}", process::id()));
-        fs::create_dir_all(&dir).expect("a temp dir");
-        let state = dir.join("session.json");
-        let mesh = MeshId::from("💬test");
-        let author = testing::nick("alice");
-        let write = |keys: &RunKeys, version: u8| {
-            let body = MessageBody::try_new(&format!(r#"{{"version":{version},"value":{{}}}}"#))
-                .expect("a slice body");
-            Message::new_channel_event(&mesh, &author, body, Channel::State).sign(&keys.session)
-        };
-        let before = write(
-            &super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
-            5,
-        );
-        let after = write(
-            &super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("restart"),
-            1,
-        );
-        let mut replica = SliceStore::new(
-            Channel::State,
-            SliceLimits::default(),
-            worst_frame_overhead(),
-        );
-        assert!(
-            matches!(
-                replica.ingest(&before, true, Instant::now()),
-                SliceIngest::Applied
-            ),
-            "the replica takes the first run"
-        );
-        let outcome = replica.ingest(&after, true, Instant::now());
-        assert!(
-            matches!(outcome, SliceIngest::Applied),
-            "the replica takes the restarted run, got {outcome:?}: the session key is new"
-        );
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = env::temp_dir().join(format!("habilis-restart-actor-{}", process::id()));
+            fs::create_dir_all(&dir).expect("a temp dir");
+            let state = dir.join("session.json");
+            let mesh = MeshId::from("💬test");
+            let author = testing::nick("alice");
+            let write = |keys: &RunKeys, version: u8| {
+                let body =
+                    MessageBody::try_new(&format!(r#"{{"version":{version},"value":{{}}}}"#))
+                        .expect("a slice body");
+                Message::new_channel_event(&mesh, &author, body, Channel::State).sign(&keys.session)
+            };
+            let before = write(
+                &super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start"),
+                5,
+            );
+            let after = write(&start_again(&state).await.expect("restart"), 1);
+            let mut replica = SliceStore::new(
+                Channel::State,
+                SliceLimits::default(),
+                worst_frame_overhead(),
+            );
+            assert!(
+                matches!(
+                    replica.ingest(&before, true, Instant::now()),
+                    SliceIngest::Applied
+                ),
+                "the replica takes the first run"
+            );
+            let outcome = replica.ingest(&after, true, Instant::now());
+            assert!(
+                matches!(outcome, SliceIngest::Applied),
+                "the replica takes the restarted run, got {outcome:?}: the session key is new"
+            );
+        });
     }
 
     use crate::daemon::node::SignalHandling;
     use crate::transport::PayloadPath;
     use crate::{embed, lookup, membership, transport};
     use tokio::time;
-    /// A walking member keeps only the rung read as ours; the `discover` session, which never
-    /// walks, leaves out only a rung read as foreign: a silent or refusing one may be its beacon.
+    /// A member offers only the rung read as ours, whatever its policy: a rung that nobody read, a
+    /// silent rung, a refusing rung and a foreign rung stay out of the book until a read admits them.
     #[test]
-    fn what_a_member_leaves_out_at_setup_follows_its_walk() {
-        use super::{CoHostPolicy, ProbeAnswer, rungs_withheld_at_setup};
+    fn what_a_member_offers_at_setup_is_the_rungs_read_as_ours() {
+        use super::{ProbeAnswer, rungs_offered_at_setup};
 
         let _guard = ::habilis_network_test_tracing::init();
         let read = [
@@ -3264,19 +3364,13 @@ mod tests {
             (11743, ProbeAnswer::Ours),
         ];
         assert_eq!(
-            rungs_withheld_at_setup(CoHostPolicy::Never, &read),
-            vec![4161],
-            "a never policy withholds the rungs of its walk at setup"
+            rungs_offered_at_setup(&read),
+            vec![11743],
+            "only the rung read as ours is offered"
         );
-        assert_eq!(
-            rungs_withheld_at_setup(CoHostPolicy::Deferred, &read),
-            vec![4161, 5511, 8450],
-            "a deferred policy withholds its rungs at setup"
-        );
-        assert_eq!(
-            rungs_withheld_at_setup(CoHostPolicy::Eager, &read),
-            vec![4161, 5511, 8450],
-            "an eager policy withholds its rungs at setup"
+        assert!(
+            rungs_offered_at_setup(&[]).is_empty(),
+            "a ladder that nobody read offers no rung"
         );
     }
 
@@ -3356,8 +3450,6 @@ mod tests {
                 .expect_err("no relay to carry payload"),
         );
     }
-
-    use tokio::sync::watch;
 
     use crate::testing::{errors_through_runtime_drop, silent_relay_rung};
 
@@ -3676,123 +3768,127 @@ mod tests {
 
     /// A handle made from a key other than the one the endpoint binds is refused
     /// by `bind`, both for the `WebRTC` transport and for the multihop handle.
-    #[tokio::test]
-    async fn an_injected_handle_on_another_key_is_refused_at_bind() {
-        let secret = iroh::SecretKey::from_bytes(&[91; 32]);
-        let other = iroh::SecretKey::from_bytes(&[5; 32]);
-        let lookups = LookupOpts::loopback();
-        let bind = |webrtc, multihop| {
-            super::InjectedEndpoint::bind(
+    #[test]
+    fn an_injected_handle_on_another_key_is_refused_at_bind() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let secret = iroh::SecretKey::from_bytes(&[91; 32]);
+            let other = iroh::SecretKey::from_bytes(&[5; 32]);
+            let lookups = LookupOpts::loopback();
+            let bind = |webrtc, multihop| {
+                super::InjectedEndpoint::bind(
+                    &lookups,
+                    secret.clone(),
+                    Vec::new(),
+                    lookup::TransportHandles {
+                        multihop,
+                        webrtc,
+                        gossip: None,
+                        admission: None,
+                        underlay: false,
+                        options: lookup::TransportOpts::default(),
+                    },
+                    tuning::MAX_CONNECTIONS,
+                )
+            };
+            let own_webrtc = lookup::build_webrtc_handle(secret.public());
+            let other_webrtc = lookup::build_webrtc_handle(other.public());
+
+            let other_hop = multihop_on(&other, PayloadPath::DirectOnly).await;
+            let hop_error = bind(Some(own_webrtc.clone()), Some(other_hop.clone()))
+                .await
+                .expect_err("a hop identity on another key");
+            assert!(hop_error.to_string().contains("multihop"), "{hop_error}");
+            other_hop.close().await;
+
+            let webrtc_error = bind(Some(other_webrtc), None)
+                .await
+                .expect_err("a WebRTC handle on another key");
+            assert!(
+                webrtc_error.to_string().contains("WebRTC"),
+                "{webrtc_error}"
+            );
+
+            // A refused handle is not bound, so the one that was refused is still free.
+            let accepted = bind(Some(own_webrtc.clone()), None)
+                .await
+                .expect("handles on the bound key are accepted");
+            accepted.endpoint.close().await;
+
+            let table = transport::SignalAdmission::new(tuning::MAX_CONNECTIONS);
+            let table_error = super::InjectedEndpoint::bind(
                 &lookups,
                 secret.clone(),
                 Vec::new(),
                 lookup::TransportHandles {
-                    multihop,
-                    webrtc,
-                    gossip: None,
-                    admission: None,
-                    underlay: false,
-                    options: lookup::TransportOpts::default(),
+                    webrtc: Some(own_webrtc),
+                    admission: Some(table),
+                    ..lookup::TransportHandles::default()
                 },
                 tuning::MAX_CONNECTIONS,
             )
-        };
-        let own_webrtc = lookup::build_webrtc_handle(secret.public());
-        let other_webrtc = lookup::build_webrtc_handle(other.public());
-
-        let other_hop = multihop_on(&other, PayloadPath::DirectOnly).await;
-        let hop_error = bind(Some(own_webrtc.clone()), Some(other_hop.clone()))
             .await
-            .expect_err("a hop identity on another key");
-        assert!(hop_error.to_string().contains("multihop"), "{hop_error}");
-        other_hop.close().await;
-
-        let webrtc_error = bind(Some(other_webrtc), None)
-            .await
-            .expect_err("a WebRTC handle on another key");
-        assert!(
-            webrtc_error.to_string().contains("WebRTC"),
-            "{webrtc_error}"
-        );
-
-        // A refused handle is not bound, so the one that was refused is still free.
-        let accepted = bind(Some(own_webrtc.clone()), None)
-            .await
-            .expect("handles on the bound key are accepted");
-        accepted.endpoint.close().await;
-
-        let table = transport::SignalAdmission::new(tuning::MAX_CONNECTIONS);
-        let table_error = super::InjectedEndpoint::bind(
-            &lookups,
-            secret.clone(),
-            Vec::new(),
-            lookup::TransportHandles {
-                webrtc: Some(own_webrtc),
-                admission: Some(table),
-                ..lookup::TransportHandles::default()
-            },
-            tuning::MAX_CONNECTIONS,
-        )
-        .await
-        .expect_err("a caller's admission table");
-        assert!(
-            table_error.to_string().contains("admission"),
-            "{table_error}"
-        );
+            .expect_err("a caller's admission table");
+            assert!(
+                table_error.to_string().contains("admission"),
+                "{table_error}"
+            );
+        });
     }
 
     /// The hook of an injected endpoint reports its connections to the table the mesh
     /// enforces: a peer that dials it holds a direct slot there, and the count rises.
-    #[tokio::test]
-    async fn an_injected_endpoints_hook_reports_to_its_admission_table() {
-        // Only the unicast ALPN counts against the ceiling; every connection still lands in the slot table.
-        const ALPN: &[u8] = transport::UNICAST_ALPN;
-        let secret = iroh::SecretKey::from_bytes(&[92; 32]);
-        let injected: super::InjectedEndpoint = super::InjectedEndpoint::bind(
-            &LookupOpts::loopback(),
-            secret.clone(),
-            vec![ALPN.to_vec()],
-            lookup::TransportHandles {
-                webrtc: Some(lookup::build_webrtc_handle(secret.public())),
-                ..lookup::TransportHandles::default()
-            },
-            tuning::MAX_CONNECTIONS,
-        )
-        .await
-        .expect("the injected endpoint binds");
-        assert_eq!(injected.admission.direct_units(), 0, "no peer dialed yet");
-
-        let dialer = lookup::build_peer_endpoint(&LookupOpts::loopback())
+    #[test]
+    fn an_injected_endpoints_hook_reports_to_its_admission_table() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // Only the unicast ALPN counts against the ceiling; every connection still lands in the slot table.
+            const ALPN: &[u8] = transport::UNICAST_ALPN;
+            let secret = iroh::SecretKey::from_bytes(&[92; 32]);
+            let injected: super::InjectedEndpoint = super::InjectedEndpoint::bind(
+                &LookupOpts::loopback(),
+                secret.clone(),
+                vec![ALPN.to_vec()],
+                lookup::TransportHandles {
+                    webrtc: Some(lookup::build_webrtc_handle(secret.public())),
+                    ..lookup::TransportHandles::default()
+                },
+                tuning::MAX_CONNECTIONS,
+            )
             .await
-            .expect("a dialer binds");
-        let server = injected.endpoint.clone();
-        let serving = tokio::spawn(async move {
-            let incoming = server.accept().await.expect("an incoming connection");
-            incoming.await.expect("the handshake completes")
-        });
-        let connection = dialer
-            .connect(injected.endpoint.addr(), ALPN)
-            .await
-            .expect("the dial connects");
-        let _served = serving.await.expect("the accept task");
+            .expect("the injected endpoint binds");
+            assert_eq!(injected.admission.direct_units(), 0, "no peer dialed yet");
 
-        // The hook runs after the handshake, so the slot may land a moment after the dial.
-        let mut units = 0;
-        for _ in 0..200 {
-            units = injected.admission.direct_units();
-            if units > 0 {
-                break;
+            let dialer = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                .await
+                .expect("a dialer binds");
+            let server = injected.endpoint.clone();
+            let serving = tokio::spawn(async move {
+                let incoming = server.accept().await.expect("an incoming connection");
+                incoming.await.expect("the handshake completes")
+            });
+            let connection = dialer
+                .connect(injected.endpoint.addr(), ALPN)
+                .await
+                .expect("the dial connects");
+            let _served = serving.await.expect("the accept task");
+
+            // The hook runs after the handshake, so the slot may land a moment after the dial.
+            let mut units = 0;
+            for _ in 0..200 {
+                units = injected.admission.direct_units();
+                if units > 0 {
+                    break;
+                }
+                time::sleep(Duration::from_millis(10)).await;
             }
-            time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(
-            units, 1,
-            "the endpoint's hook did not report the dialer to its table"
-        );
+            assert_eq!(
+                units, 1,
+                "the endpoint's hook did not report the dialer to its table"
+            );
 
-        drop(connection);
-        dialer.close().await;
-        injected.endpoint.close().await;
+            drop(connection);
+            dialer.close().await;
+            injected.endpoint.close().await;
+        });
     }
 
     async fn setup_with(
@@ -3888,8 +3984,9 @@ mod tests {
         let (_silent, rung) = silent_relay_rung();
 
         let errors = errors_through_runtime_drop(async {
-            let probe = super::spawn_startup_rung_confirmation(vec![rung], watch::channel(None).0)
-                .expect("a ladder to walk");
+            let probe =
+                super::spawn_startup_rung_confirmation(vec![rung], mpsc::unbounded_channel().0)
+                    .expect("a ladder to walk");
             // Let the probe bind and start waiting for its relay.
             time::sleep(Duration::from_millis(200)).await;
             probe.stop_and_wait().await;

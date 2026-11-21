@@ -253,11 +253,58 @@ A lost `PeerInfo` is back within one period, that is within 7.5 minutes for a me
 
 ### 5.3 The relay ladder
 
-`RENDEZVOUS_RELAY_LADDER` is a four-rung list of the n0 regions. The project relay is rung 0 only when `OPERATED_RELAY_IS_RUNG_0` is on. It is off, because the project relay has no QUIC address discovery behind Cloudflare.
+`RENDEZVOUS_RELAY_LADDER` is an 8-rung list of `DefaultRung` values: 4 rungs of the project relay fleet, then the 4 n0 rungs.
+Each URL reaches its own relay process.
+A relay drops the older session of an endpoint id, so 2 URLs of one process make an endpoint drop its own session.
+
+Each rung has a `RungPath`: direct or tunnel.
+A direct rung faces the internet and answers QUIC address discovery (QAD) on a UDP port.
+A member homed on a direct rung learns its public address.
+A tunnel rung is behind an HTTP tunnel, which carries no UDP, so it answers no QAD.
+Rung 0 is direct, rungs 1 and 2 are tunnels, and the n0 rungs are direct.
+A tunnel host has no direct name: each relay host and path has 1 URL on the ladder.
+The relay config of a rung asks for QAD only on a direct rung.
+An endpoint that asks a tunnel rung for QAD waits 3 s for its first net report, and has no home relay until then.
+The QAD setting follows the URL.
+Thus a beacon that homes on a default rung through a one-rung custom ladder gets it too.
+A custom ladder is URLs only, on the wire and in the API.
+A custom `https` rung asks for QAD on port 7842, and a custom `http` rung asks for none.
+
 The beacon homes on the first reachable rung, and the joiner pre-registers at the same rung.
 These two choices must agree, or the bootstrap dial finds nothing.
 Setup picks rung 0 without a probe, so readiness never blocks on the network.
 A startup task probes off-loop and corrects the rung through a watch channel into the event loop.
+
+The walk starts the probe of rung 0 at once, and of each later rung 1 s after the one before it.
+A rung that says no starts the next rung at once.
+A healthy rung answers in 0.3 to 0.5 s, so a healthy rung 0 answers before rung 1 starts.
+Then the later rungs see no probe.
+A rung wins only when every rung below it said no, so every member picks the same rung.
+A lower rung that answers late still wins over a higher rung that answers early.
+A ladder of silent rungs costs one probe window plus the staggers, not one window for each rung.
+When the walk decides, it starts no more probes and stops the probes that are left.
+Each probe closes its endpoint before the walk returns.
+
+The peer endpoint and the beacon follow their rung with one loop.
+A rung is alive when the relay status says that the relay connection is up, and the net report has a preferred relay.
+After 2 failed reads in a row, the member walks the ladder.
+A walk that finds no rung keeps the member on its rung, the beacon too, and the next failed reads walk again.
+A walk that stays on the rung starts the waits of the lower rungs over, because the rung failed.
+After a move, the failed reads of the old rung do not count, and the next read comes one read interval after the move.
+The beacon is not demoted to no relay by a short full outage, because the peers are not.
+A peer endpoint moves its relay map in place.
+The beacon publishes the new rung through the watch channel, and the event loop re-homes the beacon on it.
+
+A member on a later rung returns to a lower rung when that rung comes back.
+Each minute, the member probes every rung below its rung, in a task beside the liveness reads.
+Each lower rung keeps the time since which it answered every round.
+When a lower rung answered every round for 3 minutes, the member moves to the lowest such rung.
+A rung that flaps restarts only its own wait, so it does not hold back a steady rung above it.
+A round that comes later than its wait plus a read interval and a probe starts every wait again, because no round probed the rungs in the gap.
+The hold keeps a relay that restarts or flaps from moving every member back and forth.
+A round that finds no lower rung doubles the wait to the next round, up to 5 minutes.
+A walk after a failure can pick a healthy lower rung with no hold, because the member must leave its rung anyway.
+The rendezvous address names every rung, so a joiner still reaches the beacon while it moves.
 
 ### 5.4 Rendezvous and beacon
 

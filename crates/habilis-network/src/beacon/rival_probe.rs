@@ -1,12 +1,16 @@
+use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Duration;
+
+use futures_util::future as future_util;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use n0_future::task::JoinHandle;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
-use crate::lookup::{TransportHandles, build_endpoint, probe_connect};
+use crate::lookup::{ProbeAnswer, TransportHandles, build_endpoint, probe_answer, probe_connect};
 use crate::protocol::meshes::LookupOpts;
 use crate::util::tuning::{HEAL_PROBE, RENDEZVOUS_CLOSE, heal_interval};
 
-use super::{RendezvousParams, beacon_lookups, rendezvous_addr};
+use super::{RendezvousParams, beacon_lookups, rendezvous_addr, rung_is_busy};
 
 use n0_future::{task, time};
 use std::future;
@@ -34,13 +38,13 @@ pub(crate) struct RivalProbe {
     /// [`probe_verdict`].
     pub(crate) rx: oneshot::Receiver<bool>,
     pub(crate) task: JoinHandle<()>,
-    /// The throwaway prober endpoint, retained for the same reason
-    /// `Rendezvous` retains its own: aborting the task drops the endpoint
-    /// open, and iroh tears an unclosed endpoint down ungracefully. The
-    /// task closes it on the happy path; this is for the departure that
-    /// cancels it first. `None` when the probe never dialed — an
-    /// unanswerable target pre-resolves the verdict without an endpoint.
-    pub(crate) endpoint: Option<Endpoint>,
+    /// The throwaway prober endpoints, retained for the same reason `Rendezvous` retains its own:
+    /// aborting the task drops the endpoints open, and iroh tears an unclosed endpoint down
+    /// ungracefully. The task closes them on the happy path; this is for the departure that cancels
+    /// it first. A public probe dials with one endpoint. A private ladder has one endpoint for each
+    /// busy rung ([`spawn_ladder_probe`]). Empty when the probe never dialed: an unanswerable target
+    /// pre-resolves the verdict without an endpoint, and a ladder with no busy rung is free.
+    pub(crate) endpoints: Vec<Endpoint>,
     /// Tells the task to stop dialing and go straight to its own close.
     /// `None` when there is no dial to stop.
     pub(crate) cancel: Option<oneshot::Sender<()>>,
@@ -57,7 +61,7 @@ impl RivalProbe {
     /// `close()` returns at once while one is in flight, so nothing would
     /// finish it.
     pub(crate) async fn abort_and_close(mut self) {
-        if self.endpoint.is_none() {
+        if self.endpoints.is_empty() {
             // Never dialed, nothing to close.
             return;
         }
@@ -149,6 +153,9 @@ pub(crate) async fn spawn_rival_probe(
     node: EndpointId,
 ) -> Option<RivalProbe> {
     use tracing::Instrument as _;
+    if !params.bind_ports.is_empty() {
+        return spawn_ladder_probe(params, node).await;
+    }
     let target = match rendezvous_addr(params) {
         Some(address) => address,
         // Nothing to name (relay disabled, no ladder). The bare id is a
@@ -164,7 +171,7 @@ pub(crate) async fn spawn_rival_probe(
             return Some(RivalProbe {
                 rx,
                 task: task::spawn(async {}),
-                endpoint: None,
+                endpoints: Vec::new(),
                 cancel: None,
             });
         }
@@ -217,9 +224,114 @@ pub(crate) async fn spawn_rival_probe(
     Some(RivalProbe {
         rx,
         task,
-        endpoint: Some(endpoint),
+        endpoints: vec![endpoint],
         cancel: Some(cancel),
     })
+}
+
+/// The probe of a private ladder: one throwaway prober for each busy rung, and a rung that answers
+/// as the rendezvous id is a rival. A prober that dials the whole ladder takes the first answer for
+/// the answer of the id: another mesh whose ladder shares a rung answers with its own identity, the
+/// dial ends on it, and the verdict says "free" while the beacon of this mesh is live on another
+/// rung. A rung that nobody holds has no listener to ask, so a ladder with no busy rung is free at
+/// once.
+async fn spawn_ladder_probe(params: &RendezvousParams, node: EndpointId) -> Option<RivalProbe> {
+    use tracing::Instrument as _;
+    let rungs: Vec<u16> = params
+        .bind_ports
+        .iter()
+        .copied()
+        .filter(|&port| rung_is_busy(port))
+        .collect();
+    let (tx, rx) = oneshot::channel();
+    if rungs.is_empty() {
+        let _ = tx.send(false);
+        return Some(RivalProbe {
+            rx,
+            task: task::spawn(async {}),
+            endpoints: Vec::new(),
+            cancel: None,
+        });
+    }
+    let lookups = beacon_lookups(params);
+    let mut probers = Vec::with_capacity(rungs.len());
+    for _ in &rungs {
+        match build_endpoint(
+            &lookups,
+            None,
+            None,
+            Vec::new(),
+            TransportHandles::default(),
+        )
+        .await
+        {
+            Ok(prober) => probers.push(prober),
+            Err(error) => {
+                tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), %error, "rival probe endpoint build failed; next tick retries");
+                for built in probers {
+                    built.close().await;
+                }
+                return None;
+            }
+        }
+    }
+    tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), rungs = rungs.len(), "rival probe endpoints built");
+    let budget = HEAL_PROBE.min(heal_interval());
+    let endpoints = probers.clone();
+    let id = params.id;
+    let (cancel, cancelled) = oneshot::channel();
+    let (stop, stopped) = watch::channel(false);
+    let probe_span = tracing::info_span!(
+        target: "habilis_network::beacon",
+        "rival_probe",
+        node = %node.fmt_short()
+    );
+    let task = task::spawn(
+        async move {
+            let mut rung_reads = Vec::new();
+            let paired = probers.into_iter().zip(rungs);
+            for (prober, port) in paired {
+                rung_reads.push(read_rung(prober, id, port, budget, stopped.clone()));
+            }
+            let reads = future_util::join_all(rung_reads);
+            tokio::pin!(reads);
+            let found_rival = tokio::select! {
+                answers = &mut reads => answers.contains(&ProbeAnswer::Ours),
+                // A departure: no one will read the verdict, but every prober must still close.
+                _ = cancelled => {
+                    let _ = stop.send(true);
+                    reads.await;
+                    true
+                }
+            };
+            let _ = tx.send(found_rival);
+        }
+        .instrument(probe_span),
+    );
+    Some(RivalProbe {
+        rx,
+        task,
+        endpoints,
+        cancel: Some(cancel),
+    })
+}
+
+/// What one rung of a private ladder answers to a prober of its own, and the close of the prober.
+/// A stop ends the dial and goes straight to the close.
+async fn read_rung(
+    prober: Endpoint,
+    id: EndpointId,
+    port: u16,
+    budget: Duration,
+    mut stopped: watch::Receiver<bool>,
+) -> ProbeAnswer {
+    let address = EndpointAddr::new(id).with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+    let answer = tokio::select! {
+        answer = probe_answer(&prober, address, budget) => answer,
+        _ = stopped.wait_for(|stop| *stop) => ProbeAnswer::NoAnswer,
+    };
+    prober.close().await;
+    answer
 }
 
 /// Whether this build can resolve a bare endpoint id under `lookups` — the

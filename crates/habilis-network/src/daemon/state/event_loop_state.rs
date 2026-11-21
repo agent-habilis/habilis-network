@@ -637,9 +637,13 @@ pub struct EventLoopState {
     /// Tests only: the closes of direct connections and the reconnects soon after.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) redials: redial::Redials,
-    /// Since when this node holds two or more links fewer than G, with the link to
-    /// the rendezvous counted. Cleared as soon as it holds G - 1. See `note_link_count`.
+    /// Since when this node holds fewer than G peers. Cleared as soon as it holds G. See
+    /// `note_link_count`.
     pub(crate) below_target_since: Option<Instant>,
+    /// How many peers short of G this node was at the last `note_link_count`.
+    pub(crate) links_short: usize,
+    /// The G of the last `note_link_count`, so that a link transition can refresh the count.
+    link_cap: Option<usize>,
     /// When a graft last fell back to a `Join` for a starved node.
     pub(crate) join_fallback_at: Option<Instant>,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
@@ -1120,6 +1124,8 @@ impl EventLoopState {
             latches: BTreeSet::new(),
             last_flooded_addr: None,
             below_target_since: None,
+            links_short: 0,
+            link_cap: None,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             redials: redial::Redials::default(),
             join_fallback_at: None,
@@ -1394,13 +1400,24 @@ impl EventLoopState {
         self.joined_refloods_peerinfo(false, now)
     }
 
-    /// Record how many links this node holds out of `max_connections` (G). Below G - 1 starts
-    /// the clock of a starved node, and G - 1 or more stops it.
-    pub(crate) fn note_link_count(&mut self, linked: usize, max_connections: usize, now: Instant) {
-        if linked.saturating_add(1) < max_connections {
+    /// Record how many peers this node holds out of `max_connections` (G). Below G starts the
+    /// clock of a starved node, and G stops it. `linked_endpoints` holds peers only: the link to the
+    /// rendezvous is kept in `rendezvous_flags` (`RendezvousFlag::Linked`), never in the set.
+    pub(crate) fn note_link_count(&mut self, max_connections: usize, now: Instant) {
+        self.link_cap = Some(max_connections);
+        self.links_short = max_connections.saturating_sub(self.linked_endpoints.len());
+        if self.links_short > 0 {
             self.below_target_since.get_or_insert(now);
         } else {
             self.below_target_since = None;
+        }
+    }
+
+    /// Count again after a link transition, with the G of the last count, so that the clock does not
+    /// keep the timestamp of a shortfall that a link ended between 2 counts.
+    fn refresh_link_count(&mut self) {
+        if let Some(max_connections) = self.link_cap {
+            self.note_link_count(max_connections, Instant::now());
         }
     }
 
@@ -1497,14 +1514,25 @@ impl EventLoopState {
     /// before it no longer holds the graft that follows. The proof says that the pair is
     /// reachable, not that the peer has room: one more ask per attach is the price.
     pub(crate) fn note_path_proven(&mut self, peer: EndpointId) {
-        self.direct.insert(peer, DirectState::Direct);
-        self.clear_lane_wanted(peer);
+        self.note_path_known(peer);
         self.graft_backoff.reset(peer);
     }
 
-    /// Whether a graft at `now` falls back to a `Join` for a starved node: it has held
-    /// two or more links fewer than G for `STARVED`, and the last fallback is
-    /// `STARVED` old. A `true` stamps the fallback.
+    /// A graft goes to `peer` whose direct path is already known (a probe proved it before, or the
+    /// relay may carry the payload). This is no new information, so the refusal of the peer stays:
+    /// the fallback of a starved node reads it, and a graft that dropped it would send a
+    /// `Neighbor` request to a full peer again and again.
+    pub(crate) fn note_path_known(&mut self, peer: EndpointId) {
+        self.direct.insert(peer, DirectState::Direct);
+        self.clear_lane_wanted(peer);
+    }
+
+    /// Whether a graft at `now` falls back to a `Join` for a starved node: it has held fewer
+    /// than G peers for `STARVED`, and the last fallback is `STARVED` old. A node that is 1 peer
+    /// short asks only if a peer refused it within `STARVED` (`GraftBackoff::has_refusal`): without a refusal
+    /// its `Neighbor` requests can still bring the link, and a `Join` would make a full peer drop
+    /// a neighbor for nothing. A node that is 2 or more peers short asks with or without one.
+    /// A `true` stamps the fallback.
     pub(crate) fn starved_join_due(&mut self, now: Instant) -> bool {
         let due = self.starved_join_ready(now);
         if due {
@@ -1522,12 +1550,16 @@ impl EventLoopState {
         let waited = self
             .join_fallback_at
             .is_none_or(|at| now.duration_since(at) >= window);
-        starved && waited
+        let stuck = self.links_short >= 2 || self.graft_backoff.has_refusal(now);
+        starved && waited && stuck
     }
 
     /// Whether a graft leaves `peer` alone at `now`: it refused a `Neighbor` request and its
     /// wait runs. A starved node whose fallback is due asks every peer, because a `Join` is not
-    /// refused: those dials, one per peer once per `STARVED`, are expected.
+    /// refused. A peer with a direct path gets the graft at once, the graft sets the relink
+    /// cooldown and stamps the fallback, so the dial is once per window. A peer with no direct
+    /// path gets no graft and no cooldown: it is probed on each pass, as any relay-only peer is,
+    /// until the fallback goes out.
     pub(crate) fn graft_blocked(&self, peer: EndpointId, now: Instant) -> bool {
         self.graft_backoff.is_blocked(&peer, now) && !self.starved_join_ready(now)
     }
@@ -2034,6 +2066,7 @@ impl EventLoopState {
             self.zero_links_since.get_or_insert_with(Instant::now);
         }
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
+        self.refresh_link_count();
     }
 
     /// Whether the census calls the state a silent partition: a meshed member that knows
@@ -2066,6 +2099,7 @@ impl EventLoopState {
         self.regraft_at.remove(&peer);
         self.graft_backoff.reset(peer);
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
+        self.refresh_link_count();
     }
 
     /// A member's `PeerInfo` read: `flag.held` says it holds the rendezvous. A flag from a
