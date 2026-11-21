@@ -111,6 +111,13 @@ impl GraftBackoff {
         self.by_peer.len()
     }
 
+    /// Whether a peer refused a `Neighbor` request and has not linked since. A record stays until
+    /// the link to its peer comes up or the peer has a new address ([`Self::reset`]), so a refusal
+    /// counts for as long as it holds, past the end of its wait.
+    pub(crate) fn has_refusal(&self) -> bool {
+        self.by_peer.values().any(|entry| entry.until.is_some())
+    }
+
     /// Whether `peer` is left alone at `now`.
     pub(crate) fn is_blocked(&self, peer: &EndpointId, now: Instant) -> bool {
         self.by_peer

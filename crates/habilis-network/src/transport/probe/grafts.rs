@@ -185,7 +185,7 @@ pub(crate) async fn retry_direct(
 ) {
     // Every alive tick, so that the clock of a starved node does not outlive its cause.
     let now = Instant::now();
-    state.note_link_count(state.linked_endpoints.len(), context.max_connections, now);
+    state.note_link_count(context.max_connections, now);
     state.settle_graft_backoff(now);
     if state.relay_transport.relay_allowed() {
         regraft::fill_active_view(state, context).await;

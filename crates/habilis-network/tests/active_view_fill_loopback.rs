@@ -228,7 +228,9 @@ fn a_mesh_of_g_plus_one_links_every_member_to_every_other_the_beacon_holder_too(
 /// number of links per member is at least 90 percent of G, and every member holds at
 /// least G - 1 links in at least half of the samples. A member that every other member
 /// refuses gets a link only from the fallback of a starved node (`STARVED`), so the
-/// window starts after two of them.
+/// window starts after two of them. A member that is 1 link short and was refused asks a
+/// fallback `Join` too, and each peer that drops a link for it is 1 link short in turn, so the
+/// links can still change in the window: at most twice per member per minute.
 /// Takes eighteen minutes, so it only runs when asked for: `-- --ignored`.
 #[test]
 #[ignore = "eighteen minutes: the views are sampled"]

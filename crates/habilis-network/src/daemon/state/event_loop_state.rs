@@ -637,9 +637,11 @@ pub struct EventLoopState {
     /// Tests only: the closes of direct connections and the reconnects soon after.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) redials: redial::Redials,
-    /// Since when this node holds two or more links fewer than G, with the link to
-    /// the rendezvous counted. Cleared as soon as it holds G - 1. See `note_link_count`.
+    /// Since when this node holds fewer than G peers, counted as the engine counts them: the
+    /// link to the rendezvous takes no slot. Cleared as soon as it holds G. See `note_link_count`.
     pub(crate) below_target_since: Option<Instant>,
+    /// How many peers short of G this node was at the last `note_link_count`.
+    pub(crate) links_short: usize,
     /// When a graft last fell back to a `Join` for a starved node.
     pub(crate) join_fallback_at: Option<Instant>,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
@@ -1120,6 +1122,7 @@ impl EventLoopState {
             latches: BTreeSet::new(),
             last_flooded_addr: None,
             below_target_since: None,
+            links_short: 0,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             redials: redial::Redials::default(),
             join_fallback_at: None,
@@ -1394,10 +1397,23 @@ impl EventLoopState {
         self.joined_refloods_peerinfo(false, now)
     }
 
-    /// Record how many links this node holds out of `max_connections` (G). Below G - 1 starts
-    /// the clock of a starved node, and G - 1 or more stops it.
-    pub(crate) fn note_link_count(&mut self, linked: usize, max_connections: usize, now: Instant) {
-        if linked.saturating_add(1) < max_connections {
+    /// How many peers this node holds links to. The link to the rendezvous is not one of them:
+    /// the engine gives it no slot of the active view (`subscribe_mesh`), so G peers and the
+    /// rendezvous is a full view.
+    fn peer_links(&self) -> usize {
+        let to_rendezvous = self
+            .rendezvous_id
+            .is_some_and(|rendezvous| self.linked_endpoints.contains(&rendezvous));
+        self.linked_endpoints
+            .len()
+            .saturating_sub(usize::from(to_rendezvous))
+    }
+
+    /// Record how many peers this node holds out of `max_connections` (G). Below G starts the
+    /// clock of a starved node, and G stops it.
+    pub(crate) fn note_link_count(&mut self, max_connections: usize, now: Instant) {
+        self.links_short = max_connections.saturating_sub(self.peer_links());
+        if self.links_short > 0 {
             self.below_target_since.get_or_insert(now);
         } else {
             self.below_target_since = None;
@@ -1502,9 +1518,12 @@ impl EventLoopState {
         self.graft_backoff.reset(peer);
     }
 
-    /// Whether a graft at `now` falls back to a `Join` for a starved node: it has held
-    /// two or more links fewer than G for `STARVED`, and the last fallback is
-    /// `STARVED` old. A `true` stamps the fallback.
+    /// Whether a graft at `now` falls back to a `Join` for a starved node: it has held fewer
+    /// than G peers for `STARVED`, and the last fallback is `STARVED` old. A node that is 1 peer
+    /// short asks only if a peer refused it (`GraftBackoff::has_refusal`): without a refusal
+    /// its `Neighbor` requests can still bring the link, and a `Join` would make a full peer drop
+    /// a neighbor for nothing. A node that is 2 or more peers short asks with or without one.
+    /// A `true` stamps the fallback.
     pub(crate) fn starved_join_due(&mut self, now: Instant) -> bool {
         let due = self.starved_join_ready(now);
         if due {
@@ -1522,7 +1541,8 @@ impl EventLoopState {
         let waited = self
             .join_fallback_at
             .is_none_or(|at| now.duration_since(at) >= window);
-        starved && waited
+        let stuck = self.links_short >= 2 || self.graft_backoff.has_refusal();
+        starved && waited && stuck
     }
 
     /// Whether a graft leaves `peer` alone at `now`: it refused a `Neighbor` request and its
