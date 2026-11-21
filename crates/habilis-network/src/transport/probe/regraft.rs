@@ -192,13 +192,22 @@ pub(crate) fn retry_candidates_at(
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::time::Duration;
 
     use iroh::EndpointId;
+    use iroh::endpoint::presets;
+    use iroh_gossip::net::Gossip;
+    use iroh_gossip::proto::TopicId;
 
-    use super::{next_fill, retry_candidates_at};
-    use crate::daemon::state::EventLoopState;
+    use super::{graft_one, next_fill, retry_candidates_at};
+    use crate::daemon::handler_ctx::HandlerCtx;
+    use crate::daemon::state::{DirectState, EventLoopState};
+    use crate::gossip::event::CountingSink;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::{MeshId, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick, test_key};
+    use crate::transport::MeshSender;
     use crate::util::clock::Instant;
     use crate::util::tuning::{GRAFT_REFUSED_AFTER, RELINK_COOLDOWN, STARVED};
 
@@ -319,5 +328,92 @@ mod tests {
             after_the_cooldown.is_empty(),
             "the fallback went out: the backoff holds the refusing peer again"
         );
+    }
+
+    /// A node on a peerless topic, with the borrows of a `HandlerCtx`, and `max_connections` set.
+    struct Node {
+        endpoint: iroh::Endpoint,
+        _gossip: Gossip,
+        sender: MeshSender,
+        mesh: MeshId,
+        identity: Identity,
+        author: Nickname,
+        sink: CountingSink,
+    }
+
+    impl Node {
+        async fn spawn() -> Self {
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(TopicId::from_bytes([4u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            Self {
+                endpoint,
+                _gossip: gossip,
+                sender: MeshSender::new(gossip_sender),
+                mesh: MeshId::from("test"),
+                identity: Identity::generate(),
+                author: nick("member"),
+                sink: CountingSink::new(),
+            }
+        }
+
+        fn context(&self) -> HandlerCtx<'_> {
+            HandlerCtx {
+                sender: &self.sender,
+                endpoint: &self.endpoint,
+                mesh: &self.mesh,
+                author: &self.author,
+                identity: &self.identity,
+                our_pubkey: self.identity.author_key(),
+                max_connections: MAX_CONNECTIONS,
+                rendezvous_id: rendezvous(),
+                external_msg_tx: None,
+                sink: &self.sink,
+            }
+        }
+    }
+
+    /// The fill tick grafts a peer whose path is already known, and that is no new proof of the
+    /// path. A node 1 peer short whose only candidate refused it lately, and whose fallback is
+    /// due, asks that candidate with a `Join`: the graft must not drop the refusal, as a new
+    /// proof of the path does. The `Join` stamps the fallback.
+    #[test]
+    fn the_fill_tick_keeps_the_refusal_of_a_peer_whose_path_it_did_not_prove_again() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // The `Join` dials a peer that does not exist: the dial fails, and says so.
+            ::habilis_network_test_tracing::allow_warn("iroh_gossip::net", "dial failed");
+            let node = Node::spawn().await;
+            let context = node.context();
+            let now = Instant::now();
+            let candidate = endpoint_id(2);
+            let mut state = state_with_a_member_to_fill(3);
+            state.direct.insert(candidate, DirectState::Direct);
+            // The node is starved since over STARVED, and the candidate refused it 5 s ago.
+            state.below_target_since = now.checked_sub(STARVED + SECOND);
+            state.graft_backoff.asked(
+                candidate,
+                now.checked_sub(GRAFT_REFUSED_AFTER * 2).unwrap_or(now),
+            );
+            state.settle_graft_backoff(now.checked_sub(SECOND * 5).unwrap_or(now));
+            assert!(state.starved_join_ready(now), "the fallback is due");
+            let socket = SocketAddr::from(([192, 0, 2, 7], 4000));
+            let address = iroh::EndpointAddr::new(candidate).with_ip_addr(socket);
+
+            graft_one(&mut state, &context, address, now).await;
+
+            let fell_back = state.join_fallback_at.is_some();
+            node.endpoint.close().await;
+            assert!(
+                fell_back,
+                "the graft of a known path dropped the refusal, so the fallback asked a Neighbor"
+            );
+        });
     }
 }

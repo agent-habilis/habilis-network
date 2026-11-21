@@ -1502,9 +1502,17 @@ impl EventLoopState {
     /// before it no longer holds the graft that follows. The proof says that the pair is
     /// reachable, not that the peer has room: one more ask per attach is the price.
     pub(crate) fn note_path_proven(&mut self, peer: EndpointId) {
+        self.note_path_known(peer);
+        self.graft_backoff.reset(peer);
+    }
+
+    /// A graft goes to `peer` whose direct path is already known (a probe proved it before, or the
+    /// relay may carry the payload). This is no new information, so the refusal of the peer stays:
+    /// the fallback of a starved node reads it, and a graft that dropped it would send a
+    /// `Neighbor` request to a full peer again and again.
+    pub(crate) fn note_path_known(&mut self, peer: EndpointId) {
         self.direct.insert(peer, DirectState::Direct);
         self.clear_lane_wanted(peer);
-        self.graft_backoff.reset(peer);
     }
 
     /// Whether a graft at `now` falls back to a `Join` for a starved node: it has held fewer
