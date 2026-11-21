@@ -201,8 +201,9 @@ pub(crate) fn register_rendezvous(
 /// [`register_rendezvous`] again, for a member that registered it before: the hint of the rendezvous
 /// is asserted again, and a rung leaves the book and the endpoint only on evidence that it is not
 /// ours (`RungWatch::not_ours_rungs`: read as foreign, or refused). The endpoint keeps the address
-/// that it was told for the id (`settle_on_rung`) and does not read the book again for an id that
-/// it knows, so a rung that a dial would meet another identity on must leave it too. A rung that
+/// that it was told for the id (`settle_on_rung`) and, in the iroh fork, does not read the book again
+/// for an id that it knows while a non-relay path is selected, as it is on the loopback ladder, so a
+/// rung that a dial would meet another identity on must leave it too. A rung that
 /// nobody read lately stays: the absence of a reading says nothing, and a member that is meshed does
 /// not read the ladder. The rung of the holder, in particular, stays after a stall.
 pub(crate) async fn reregister_rendezvous(

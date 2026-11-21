@@ -150,6 +150,9 @@ impl RungWatch {
     /// bind it, and only a later reading says what holds it.
     pub(crate) fn release_rung(&mut self, port: u16) {
         self.ours.remove(&port);
+        // The cached reading goes too: it stays readable for a heal tick, and a walk that reached
+        // the port while it is still busy would take it for the answer of the rung.
+        self.readings.remove(&port);
         self.retired.insert(port);
     }
 

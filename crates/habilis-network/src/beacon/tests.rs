@@ -2046,6 +2046,43 @@ fn a_holder_that_missed_a_check_does_not_stamp_its_rung_while_the_next_check_is_
     });
 }
 
+/// A rung that this member released is not read as ours from the cache. `release_rung` takes it out
+/// of `ours`, but the reading of the walk stays readable for a heal tick, and a later walk that
+/// reaches the port while it is still busy would take that reading for the answer of the rung
+/// and offer a rung that was just shed. Only a later reading can say what holds it.
+#[test]
+fn a_rung_that_was_released_is_not_read_as_ours_from_its_cache() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        use super::{RungRead, RungReport};
+        use crate::lookup::ProbeAnswer;
+
+        let rung = 40_005;
+        let mut rungs = super::RungWatch::detached();
+        rungs.clear_foreign(rung);
+        rungs.note(
+            RungReport {
+                port: rung,
+                answer: ProbeAnswer::Ours,
+                generation: 0,
+            },
+            Instant::now(),
+        );
+        assert_eq!(
+            rungs.reading(rung, Instant::now()),
+            RungRead::Ours,
+            "a fresh reading is read as ours"
+        );
+
+        rungs.release_rung(rung);
+
+        assert_eq!(
+            rungs.reading(rung, Instant::now()),
+            RungRead::Unknown,
+            "the cached reading of a rung that was released still says ours"
+        );
+    });
+}
+
 /// The holder of the beacon asks for a reading of its own rung every heal tick, and the answer
 /// comes after the tick that asked. While the check is out, the rung is still the one that the
 /// holder bound, so it stays offered: without a reading to stamp it, the rung left the offered
