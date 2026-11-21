@@ -54,8 +54,9 @@ pub(crate) struct GraftTarget {
 /// can make up to 1 + 2(G - 1) peers drop a link. Each peer that dropped one is 1 peer short.
 /// A node that is 1 peer short by structure (the sum of the caps is odd, or the 2 nodes that
 /// are short are linked to each other) asks at most 1 `Join` per `STARVED` for ever, while a
-/// peer keeps refusing it. The wait of a refusing peer grows to 15 minutes, so such a node asks
-/// about once per 15 minutes in the long run.
+/// peer keeps refusing it. The wait of a refusing peer grows to 15 minutes. With 1 or 2
+/// candidates, such a node asks about once per 15 minutes in the long run. With 3 or more, the
+/// refusals of the different peers fall in different windows, and it asks 1 `Join` per `STARVED`.
 pub(crate) fn graft_request(
     state: &mut EventLoopState,
     target: GraftTarget,
@@ -102,16 +103,11 @@ mod tests {
         endpoint_id(1)
     }
 
-    /// A state that holds a link to each of `peers` peers, of the `MAX_CONNECTIONS` that it
-    /// wants, and to the rendezvous too when `with_rendezvous`. The rendezvous takes no slot.
-    fn state_with_links(peers: u8, with_rendezvous: bool) -> EventLoopState {
+    /// A state that holds a link to each of `peers` peers, of the `MAX_CONNECTIONS` that it wants.
+    fn state_with_links(peers: u8) -> EventLoopState {
         let mut state = fresh_state();
-        state.rendezvous_id = Some(rendezvous());
         for seed in 10..10 + peers {
             state.linked_endpoints.insert(endpoint_id(seed));
-        }
-        if with_rendezvous {
-            state.linked_endpoints.insert(rendezvous());
         }
         state
     }
@@ -150,7 +146,7 @@ mod tests {
     #[test]
     fn a_node_at_g_minus_one_with_all_grafts_refused_for_five_minutes_asks_one_join() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut state = state_with_links(3, false);
+        let mut state = state_with_links(3);
         let start = Instant::now();
         let candidates = all_candidates_refuse(&mut state, start);
 
@@ -171,22 +167,6 @@ mod tests {
         );
     }
 
-    /// The link to the rendezvous takes no slot of the engine, so a node that holds G - 1 peers
-    /// and the rendezvous is at G - 1, not at G.
-    #[test]
-    fn the_link_to_the_rendezvous_is_not_one_of_the_g_links() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = state_with_links(3, true);
-        let start = Instant::now();
-        let candidates = all_candidates_refuse(&mut state, start);
-
-        assert_eq!(
-            ask(&mut state, candidates[1], start + STARVED),
-            GraftRequest::Join,
-            "3 peers and the rendezvous is G - 1 peers: starved"
-        );
-    }
-
     /// Control: a node at G - 1 for which no ask stayed unanswered for `GRAFT_REFUSED_AFTER`
     /// keeps asking with `Neighbor`. It is not stuck, so it makes no member of a full view drop a
     /// neighbor. The test does not settle the backoff: `settle_graft_backoff` reads an ask that
@@ -195,7 +175,7 @@ mod tests {
     #[test]
     fn a_node_at_g_minus_one_that_no_peer_refused_never_asks_a_join() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut state = state_with_links(3, false);
+        let mut state = state_with_links(3);
         let start = Instant::now();
         let candidate = endpoint_id(2);
 
@@ -212,7 +192,7 @@ mod tests {
     #[test]
     fn a_node_at_g_minus_two_asks_a_join_after_five_minutes_without_a_refusal() {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut state = state_with_links(2, false);
+        let mut state = state_with_links(2);
         let start = Instant::now();
         let candidate = endpoint_id(2);
 
@@ -238,7 +218,7 @@ mod tests {
         // The refusal is read GRAFT_REFUSED_AFTER after the request.
         let read_at = start + GRAFT_REFUSED_AFTER;
 
-        let mut fresh = state_with_links(3, false);
+        let mut fresh = state_with_links(3);
         let candidates = all_candidates_refuse(&mut fresh, start);
         assert_eq!(
             ask(
@@ -250,7 +230,7 @@ mod tests {
             "a refusal read just under STARVED ago counts"
         );
 
-        let mut stale = state_with_links(3, false);
+        let mut stale = state_with_links(3);
         let stale_candidates = all_candidates_refuse(&mut stale, start);
         assert_ne!(
             ask(&mut stale, stale_candidates[1], read_at + STARVED + SECOND),
@@ -261,13 +241,15 @@ mod tests {
 
     /// Pins the accepted cost of the rule: a node that stays 1 peer short, as the sum of the caps
     /// is odd or the 2 short nodes are linked to each other, asks at most 1 `Join` per `STARVED`
-    /// for ever, and none in between, while a peer keeps refusing it. Each round, a peer that
-    /// waited its backoff out refuses a new `Neighbor` request. Nothing changes its links. A later
-    /// fix that ends the chain changes this test on purpose.
+    /// for ever, and none in between, while a peer keeps refusing it. Each round resets the backoff
+    /// of every candidate (`GraftBackoff::reset`) and reads a new refusal of each, which stands
+    /// for a peer that waited its wait out and refuses again. Nothing changes the links of the
+    /// node. A later fix that ends the chain changes this test on purpose.
     #[test]
-    fn a_node_that_stays_at_g_minus_one_asks_one_join_every_five_minutes_for_ever() {
+    fn a_node_that_stays_at_g_minus_one_asks_at_most_one_join_per_starved_while_peers_keep_refusing()
+     {
         let _guard = ::habilis_network_test_tracing::init();
-        let mut state = state_with_links(3, false);
+        let mut state = state_with_links(3);
         let start = Instant::now();
         let candidates = all_candidates_refuse(&mut state, start);
 

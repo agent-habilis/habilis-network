@@ -637,8 +637,8 @@ pub struct EventLoopState {
     /// Tests only: the closes of direct connections and the reconnects soon after.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) redials: redial::Redials,
-    /// Since when this node holds fewer than G peers, counted as the engine counts them: the
-    /// link to the rendezvous takes no slot. Cleared as soon as it holds G. See `note_link_count`.
+    /// Since when this node holds fewer than G peers. Cleared as soon as it holds G. See
+    /// `note_link_count`.
     pub(crate) below_target_since: Option<Instant>,
     /// How many peers short of G this node was at the last `note_link_count`.
     pub(crate) links_short: usize,
@@ -1397,22 +1397,11 @@ impl EventLoopState {
         self.joined_refloods_peerinfo(false, now)
     }
 
-    /// How many peers this node holds links to. The link to the rendezvous is not one of them:
-    /// the engine gives it no slot of the active view (`subscribe_mesh`), so G peers and the
-    /// rendezvous is a full view.
-    pub(crate) fn peer_links(&self) -> usize {
-        let to_rendezvous = self
-            .rendezvous_id
-            .is_some_and(|rendezvous| self.linked_endpoints.contains(&rendezvous));
-        self.linked_endpoints
-            .len()
-            .saturating_sub(usize::from(to_rendezvous))
-    }
-
     /// Record how many peers this node holds out of `max_connections` (G). Below G starts the
-    /// clock of a starved node, and G stops it.
+    /// clock of a starved node, and G stops it. `linked_endpoints` holds peers only: the link to the
+    /// rendezvous is kept in `rendezvous_flags` (`RendezvousFlag::Linked`), never in the set.
     pub(crate) fn note_link_count(&mut self, max_connections: usize, now: Instant) {
-        self.links_short = max_connections.saturating_sub(self.peer_links());
+        self.links_short = max_connections.saturating_sub(self.linked_endpoints.len());
         if self.links_short > 0 {
             self.below_target_since.get_or_insert(now);
         } else {

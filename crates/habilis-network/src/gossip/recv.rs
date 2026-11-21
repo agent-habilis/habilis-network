@@ -2060,7 +2060,7 @@ async fn handle_peer_info(
     webrtc::negotiate_session::negotiate_session(state, context, peer_id, peer_addr.clone());
     // No `rendezvous_wanted` gate on this graft: `peer_id` is never the
     // rendezvous here, which returned above.
-    let below = state.peer_links()
+    let below = state.linked_endpoints.len()
         < peer_info_graft_below(context.max_connections, state.member_addresses().len() + 1);
     if !defer_first_dial
         && below

@@ -875,7 +875,7 @@ pub const MESH_TOPIC_EVENTS_CAP: usize = 2048;
 /// short nodes that are not linked to each other graft one another. A node that is 1 peer short
 /// by structure (the sum of the caps is odd, or the 2 short nodes are linked to each other)
 /// asks at most 1 `Join` per `STARVED` for ever, while a peer keeps refusing it: the wait of a
-/// refusing peer grows to 15 minutes, so about once per 15 minutes in the long run. One fallback
+/// refusing peer grows to 15 minutes: with 1 or 2 candidates, about once per 15 minutes in the long run; with 3 or more, the refusals of the different peers fall in different windows, and it is 1 `Join` per `STARVED`. One fallback
 /// per 300 s per short node is at most 0.2 `Join` per short node per minute, and each `Join` evicts
 /// up to 1 + 2(G - 1) links.
 pub const STARVED: Duration = Duration::from_mins(5);

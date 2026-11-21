@@ -34,8 +34,7 @@ pub(crate) async fn regraft_due(state: &mut EventLoopState, context: &HandlerCtx
 /// first group and wraps. A fixed pick would send every member below G to the
 /// same few peers, and a full peer evicts a random neighbor on each join, so the
 /// caller passes a random one. `None` once the active view holds `max_connections` (G)
-/// peers (the link to the rendezvous is not one of them, see `EventLoopState::peer_links`), or
-/// when nobody is free.
+/// peers, or when nobody is free.
 pub(crate) fn next_fill(
     state: &EventLoopState,
     max_connections: usize,
@@ -43,7 +42,7 @@ pub(crate) fn next_fill(
     now: Instant,
     pick: usize,
 ) -> Option<iroh::EndpointAddr> {
-    if state.peer_links() >= max_connections {
+    if state.linked_endpoints.len() >= max_connections {
         return None;
     }
     let peer_addresses = state.member_addresses();
@@ -164,7 +163,7 @@ pub(crate) fn retry_candidates_at(
     now: Instant,
 ) -> Vec<iroh::EndpointAddr> {
     // A graft is the reason for a session, and none runs at G.
-    if !distrust_links && state.peer_links() >= max_connections {
+    if !distrust_links && state.linked_endpoints.len() >= max_connections {
         return Vec::new();
     }
     let peer_addresses = state.member_addresses();
@@ -210,17 +209,12 @@ mod tests {
         endpoint_id(1)
     }
 
-    /// A node that links `peers` peers, and the rendezvous when `with_rendezvous`, and that
-    /// knows one more member, `candidate`, that it is not linked to. The link to the rendezvous
-    /// takes no slot of the active view.
-    fn state_with_a_member_to_fill(peers: u8, with_rendezvous: bool) -> EventLoopState {
+    /// A node that links `peers` peers and knows one more member, `candidate`, that it is not
+    /// linked to.
+    fn state_with_a_member_to_fill(peers: u8) -> EventLoopState {
         let mut state = fresh_state();
-        state.rendezvous_id = Some(rendezvous());
         for seed in 10..10 + peers {
             state.linked_endpoints.insert(endpoint_id(seed));
-        }
-        if with_rendezvous {
-            state.linked_endpoints.insert(rendezvous());
         }
         state.names.insert(test_key("candidate"), nick("candidate"));
         state.bind_peer_endpoint(
@@ -231,44 +225,11 @@ mod tests {
         state
     }
 
-    /// The fill tick grafts a member while the node holds fewer than G peers. G - 1 peers and the
-    /// link to the rendezvous are G - 1 peers: the engine gives the rendezvous no slot, so the
-    /// view has a free one.
-    #[test]
-    fn the_fill_tick_grafts_a_member_at_g_minus_one_peers_and_the_rendezvous() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let state = state_with_a_member_to_fill(3, true);
-
-        let next = next_fill(&state, MAX_CONNECTIONS, rendezvous(), Instant::now(), 0);
-
-        assert_eq!(
-            next.map(|address| address.id),
-            Some(endpoint_id(2)),
-            "G - 1 peers and the rendezvous leave a slot, so the tick grafts the member"
-        );
-    }
-
-    /// Control: at G peers the view is full, with or without the rendezvous.
-    #[test]
-    fn the_fill_tick_grafts_nobody_at_g_peers() {
-        let _guard = ::habilis_network_test_tracing::init();
-        for with_rendezvous in [false, true] {
-            let state = state_with_a_member_to_fill(4, with_rendezvous);
-
-            let next = next_fill(&state, MAX_CONNECTIONS, rendezvous(), Instant::now(), 0);
-
-            assert_eq!(
-                next, None,
-                "G peers fill the view (with the rendezvous: {with_rendezvous})"
-            );
-        }
-    }
-
-    /// Control: G - 1 peers and no link to the rendezvous leave a slot.
+    /// The fill tick grafts a member while the node holds fewer than G peers.
     #[test]
     fn the_fill_tick_grafts_a_member_at_g_minus_one_peers() {
         let _guard = ::habilis_network_test_tracing::init();
-        let state = state_with_a_member_to_fill(3, false);
+        let state = state_with_a_member_to_fill(3);
 
         let next = next_fill(&state, MAX_CONNECTIONS, rendezvous(), Instant::now(), 0);
 
@@ -279,14 +240,25 @@ mod tests {
         );
     }
 
-    /// The retry of the alive tick asks the unlinked members while the node holds fewer than G
-    /// peers, and none at G, with the rendezvous link left out of the count.
+    /// Control: at G peers the view is full.
     #[test]
-    fn the_retry_asks_a_member_at_g_minus_one_peers_and_the_rendezvous_and_none_at_g() {
+    fn the_fill_tick_grafts_nobody_at_g_peers() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let state = state_with_a_member_to_fill(4);
+
+        let next = next_fill(&state, MAX_CONNECTIONS, rendezvous(), Instant::now(), 0);
+
+        assert_eq!(next, None, "G peers fill the view");
+    }
+
+    /// The retry of the alive tick asks the unlinked members while the node holds fewer than G
+    /// peers, and none at G.
+    #[test]
+    fn the_retry_asks_a_member_at_g_minus_one_peers_and_none_at_g() {
         let _guard = ::habilis_network_test_tracing::init();
         let now = Instant::now();
-        let short = state_with_a_member_to_fill(3, true);
-        let full = state_with_a_member_to_fill(4, true);
+        let short = state_with_a_member_to_fill(3);
+        let full = state_with_a_member_to_fill(4);
 
         let asked = retry_candidates_at(&short, rendezvous(), MAX_CONNECTIONS, false, now);
         let none = retry_candidates_at(&full, rendezvous(), MAX_CONNECTIONS, false, now);
@@ -294,7 +266,7 @@ mod tests {
         assert_eq!(
             asked.len(),
             1,
-            "G - 1 peers and the rendezvous leave a slot: the member is asked"
+            "G - 1 peers leave a slot: the member is asked"
         );
         assert!(none.is_empty(), "G peers fill the view: nobody is asked");
     }
@@ -304,15 +276,16 @@ mod tests {
     /// does not ask the peer again, and the `Join` of that graft stamps the fallback, so the
     /// backoff holds the peer again: the dial of a refusing peer is once per window, as long as
     /// the graft goes out. A peer with no direct path gets no graft and no cooldown, and is
-    /// probed on each pass like any relay-only peer.
+    /// probed on each pass like any relay-only peer. This test pins the bound that exists for a
+    /// peer with a direct path; it has no red step, since the bound was there already.
     #[test]
-    fn a_starved_node_retries_a_refusing_peer_once_per_window() {
+    fn a_starved_node_retries_a_refusing_peer_with_a_direct_path_once_per_window() {
         let _guard = ::habilis_network_test_tracing::init();
         let start = Instant::now();
         let asked_at = start + STARVED;
         let now = asked_at + GRAFT_REFUSED_AFTER + SECOND;
         let candidate = endpoint_id(2);
-        let mut state = state_with_a_member_to_fill(3, false);
+        let mut state = state_with_a_member_to_fill(3);
         state.below_target_since = Some(start);
         state.graft_backoff.asked(candidate, asked_at);
         state.settle_graft_backoff(asked_at + GRAFT_REFUSED_AFTER);
