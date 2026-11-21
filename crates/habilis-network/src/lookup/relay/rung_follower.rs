@@ -106,7 +106,10 @@ impl<'ladder> RungFollower<'ladder> {
     /// Note the rungs that answered the return round that ended at `completed_at`, read at `now`.
     /// Returns the rung to return to, once it answered every round for the hold. The round counts
     /// at the time that it ended, not at the time that the member read it: after a stall, the gap
-    /// to the round before it is long, and the streak starts again.
+    /// to the round before it is long, and the streak starts again. A round that the member reads
+    /// more than the longest gap after its end is stale: the rung can be down since, so the round
+    /// returns nothing and its credit, and the hold, start over. A round that is read soon after its
+    /// end, under load, keeps its credit.
     pub(super) fn round_ended(
         &mut self,
         answered: &[RelayUrl],
@@ -120,6 +123,10 @@ impl<'ladder> RungFollower<'ladder> {
         let max_gap = self.return_wait + self.times.interval + self.times.probe;
         self.return_wait = next_return_wait(self.return_wait, !answered.is_empty(), self.times);
         self.next_round = now + self.return_wait;
+        if now.saturating_duration_since(completed_at) > max_gap {
+            self.watch = ReturnWatch::default();
+            return None;
+        }
         self.watch
             .observe(answered, completed_at, self.times.return_hold, max_gap)
     }
@@ -622,6 +629,59 @@ mod tests {
             returned,
             Some(rung("a")),
             "4 rounds, read within a read interval of their end, make the hold"
+        );
+    }
+
+    /// **A round that completes the hold before a stall, and that the member reads after it, moves
+    /// nobody.**
+    ///
+    /// The rung answered every round up to minute 4, which makes the hold, and the member stalled
+    /// until minute 9. The answer is 5 minutes old: the rung can be down since, and the member
+    /// would move off a healthy rung onto a dead one and stay there until the reads evict it. The
+    /// round is discarded with its credit, and the hold starts again.
+    #[test]
+    fn a_round_that_completes_the_hold_before_a_stall_and_is_read_after_it_returns_nothing() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let ladder = ladder();
+        let start = Instant::now();
+        let mut follower = RungFollower::new(&ladder, rung("c"), TIMES, true, start);
+        let minute = |count: u32| start + TIMES.return_every * count;
+        for count in 1..4 {
+            assert_eq!(
+                round(&mut follower, &[rung("a")], minute(count)),
+                None,
+                "minute {count}: the hold is not complete"
+            );
+        }
+        let ended_at = minute(4);
+        assert!(follower.round_due(ended_at).is_some(), "minute 4 starts");
+        let resumed_at = minute(9);
+
+        let late = follower.round_ended(&[rung("a")], ended_at, resumed_at);
+
+        assert_eq!(
+            late, None,
+            "a round read 5 minutes after its end moves nobody"
+        );
+        for count in 1..4 {
+            assert_eq!(
+                round(
+                    &mut follower,
+                    &[rung("a")],
+                    resumed_at + TIMES.return_every * count
+                ),
+                None,
+                "live round {count} after the resume: the discarded round left no credit"
+            );
+        }
+        assert_eq!(
+            round(
+                &mut follower,
+                &[rung("a")],
+                resumed_at + TIMES.return_every * 4
+            ),
+            Some(rung("a")),
+            "3 minutes after the first live round"
         );
     }
 }
