@@ -1830,6 +1830,74 @@ fn the_check_of_our_own_rung_keeps_it_offered() {
     });
 }
 
+/// A rung that was read as ours long ago is not only no longer offered: the heal registration
+/// takes it out of the book, or a dial of the id still tries it and meets whatever listener took
+/// the port. The registration merged the offered address into the entry, so it kept every rung
+/// that an earlier registration had put there.
+#[test]
+fn a_heal_registration_takes_a_rung_that_is_no_longer_offered_out_of_the_book() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let (squat, ports) = ladder_of_two();
+        drop(squat);
+        let mut params = public_params();
+        params.bind_ports = ports.clone();
+        let peer = loopback_endpoint().await;
+        let book = lookup::address_book(&peer);
+        let booked = || -> Vec<u16> {
+            book.get_endpoint_info(params.id)
+                .map(EndpointInfo::into_endpoint_addr)
+                .map(|address| address.ip_addrs().map(net::SocketAddr::port).collect())
+                .unwrap_or_default()
+        };
+        let mut rungs = super::RungWatch::detached();
+        rungs.clear_foreign(ports[0]);
+        setup::register_rendezvous(&book, &params, &rungs.offered_rungs());
+        assert_eq!(
+            booked(),
+            vec![ports[0]],
+            "a rung read as ours is registered"
+        );
+
+        rungs.expire_ours();
+        setup::register_rendezvous(&book, &params, &rungs.offered_rungs());
+
+        let after = booked();
+        peer.close().await;
+        let none: Vec<u16> = Vec::new();
+        assert_eq!(
+            after, none,
+            "the book still names a rung that is not offered any more"
+        );
+    });
+}
+
+/// The holder of the beacon asks for a reading of its own rung every heal tick, and the answer
+/// comes after the tick that asked. While the check is out, the rung is still the one that the
+/// holder bound, so it stays offered: without a reading to stamp it, the rung left the offered
+/// set every second tick and came back with the next answer.
+#[test]
+fn a_holder_keeps_its_rung_offered_while_the_check_of_that_rung_is_out() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let params = public_params();
+        let node = SecretKey::generate().public();
+        let rung = 40_003;
+        let mut rungs = super::RungWatch::detached();
+        rungs.clear_foreign(rung);
+        rungs.expire_ours();
+
+        let failed = rungs.own_rung_failed(&params, node, rung);
+
+        let offered = rungs.offered_rungs();
+        rungs.finish().await;
+        assert!(!failed, "a check that is out has not failed");
+        assert_eq!(
+            offered,
+            vec![rung],
+            "the rung of the held beacon left the offered set while its check was out"
+        );
+    });
+}
+
 /// A rung that a foreign listener held and that this member then binds is its own rung: it
 /// is not foreign any more, or `register_rendezvous` would leave it out of the book after each
 /// heal.

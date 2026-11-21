@@ -61,7 +61,7 @@ pub(crate) use rendezvous::{Rendezvous, RendezvousLane};
 pub(crate) use rendezvous_params::RendezvousParams;
 pub(crate) use rival_probe::{RivalProbe, probe_verdict, spawn_rival_probe};
 pub(crate) use rung_ladder::{
-    refresh_holder_rung, rendezvous_addr, rendezvous_addr_offering, rung_of,
+    refresh_holder_rung, register_offered, rendezvous_addr, rendezvous_addr_offering, rung_of,
 };
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub(crate) use rung_probe::set_blind_rung_probes;

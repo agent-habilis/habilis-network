@@ -65,6 +65,31 @@ pub(crate) fn rendezvous_addr_offering(
     rendezvous_addr(params).map(|address| keeping_rungs(address, |port| offered.contains(&port)))
 }
 
+/// Register `address` for the rendezvous id in `book`: the entry is replaced, and it keeps the
+/// rungs of the ladder that are `offered` and every address that is not a rung of the ladder.
+/// A merge kept every rung that an earlier registration had put in the entry, so a rung that
+/// is no longer offered (read as ours longer ago than a heal tick) stayed in the book, and a dial
+/// of the id still tried it and met whatever listener had taken the port.
+pub(crate) fn register_offered(
+    book: &memory::MemoryLookup,
+    params: &RendezvousParams,
+    offered: &[u16],
+    address: EndpointAddr,
+) {
+    let kept = book.get_endpoint_info(params.id).map(|info| {
+        keeping_rungs(info.into_endpoint_addr(), |port| {
+            offered.contains(&port) || !params.bind_ports.contains(&port)
+        })
+    });
+    let entry = match kept {
+        Some(kept) => {
+            EndpointAddr::from_parts(address.id, kept.addrs.into_iter().chain(address.addrs))
+        }
+        None => address,
+    };
+    replace_peer_addr(book, entry);
+}
+
 /// The rendezvous id at one rung of the loopback ladder.
 pub(crate) fn rendezvous_holder_addr(params: &RendezvousParams, port: u16) -> EndpointAddr {
     EndpointAddr::new(params.id).with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))

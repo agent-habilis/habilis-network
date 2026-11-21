@@ -36,9 +36,7 @@ use crate::protocol::crypto::Password;
 use crate::protocol::meshes::{LookupOpts, Mesh, MeshConfig, MeshName, Transport};
 use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::{RELAY_RUNG_PROBE, SETUP_RUNG_READ};
-use lookup::{
-    ProbeAnswer, StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
-};
+use lookup::{ProbeAnswer, StoppableTask, build_mesh, relay_ladder, select_bootstrap_rung};
 
 use crate::beacon::RendezvousParams;
 use crate::lifecycle;
@@ -199,7 +197,7 @@ pub(crate) fn register_rendezvous(
             "pre-registered rendezvous on the loopback port ladder"
         );
     }
-    add_peer_addr(book, address);
+    beacon::register_offered(book, params, offered, address);
 }
 
 /// Build the endpoint, subscribe to the topic, and produce a ready

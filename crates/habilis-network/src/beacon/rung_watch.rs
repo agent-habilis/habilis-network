@@ -277,6 +277,12 @@ impl RungWatch {
                 false
             }
             RungRead::Unknown => {
+                // The answer to this check comes after the tick that asks. Until then the rung is
+                // the one that this member bound, so it stays offered: without a reading to stamp
+                // it, it would leave the offered set every second tick.
+                if let Some(read_at) = self.ours.get_mut(&own_port) {
+                    *read_at = Instant::now();
+                }
                 self.ask(params, node, own_port, false);
                 false
             }
