@@ -20,13 +20,27 @@ pub(crate) struct InFlightDial {
 }
 
 impl InFlightDial {
-    /// Tell the waiters how the dial ended. The entry leaves the map in the same step, under its
-    /// lock: a send that registers after the outcome is a new dialer, and does not take the outcome
-    /// of a dial that ended before it asked.
+    /// Tell the waiters how the dial ended. The plan of the dial is released and the entry leaves
+    /// the map in the same step, under its lock: a send that registers after the outcome is a new
+    /// dialer and plans its own dial, and the release of the old plan, which is by peer, cannot
+    /// reach the plan of that new dial. It does not take the outcome of a dial that ended before it
+    /// asked either.
     pub(in crate::transport::pool) fn publish(&self, outcome: Result<(), String>) {
         let mut dialing = self.pool.inner.dialing.lock();
+        self.release_plan_once();
         self.leave(&mut dialing);
         self.outcome_tx.send_replace(Some(outcome));
+    }
+
+    /// The dial planned a unit or a pin, and a dial that ends with no connection gives it back. A
+    /// connection that the dial opened holds its own unit and pin in the ledger already. Only a
+    /// dial that has not published releases: after the outcome, the plan was released with the
+    /// entry, and the plan of a later dial of the peer is not ours. The caller holds the lock of
+    /// `dialing`, as the plan of a dial is made under it (`register_planned_dial`).
+    fn release_plan_once(&self) {
+        if self.outcome_tx.borrow().is_none() {
+            self.pool.release_plan(self.eid);
+        }
     }
 
     /// Remove the entry of this dial from `dialing`, and not the entry of a later dial of the peer.
@@ -45,12 +59,9 @@ impl Drop for InFlightDial {
     fn drop(&mut self) {
         {
             let mut dialing = self.pool.inner.dialing.lock();
+            self.release_plan_once();
             self.leave(&mut dialing);
         }
-        // The dial planned a unit or a pin, and a dial that ends with no connection gives it back. A
-        // connection that the dial opened holds its own unit and pin in the ledger already. The lock
-        // of `dialing` is released first: the plan has its own locks.
-        self.pool.release_plan(self.eid);
         self.outcome_tx.send_if_modified(|outcome| {
             if outcome.is_some() {
                 return false;

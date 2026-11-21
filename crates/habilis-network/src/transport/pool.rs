@@ -1063,6 +1063,37 @@ mod tests {
         });
     }
 
+    /// **The plan of a dial that published is released before its entry leaves the map.**
+    ///
+    /// The dial A publishes, so that its entry leaves and B registers and plans a dial of the same
+    /// peer. The drop of A must not release the plan by peer: that is the reservation of B, and B
+    /// would dial without the unit that its plan holds. With 1 unit, the reservation of B keeps
+    /// another peer out until B ends.
+    #[test]
+    fn the_drop_of_a_dial_that_published_keeps_the_reservation_of_the_next_dial() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, bob, endpoint, _silent) = pool_with_silent_peer().await;
+            let admission = SignalAdmission::new(1);
+            pool.set_admission(admission.clone());
+
+            let first = pool.register_planned_dial(bob, || None);
+            if let super::registration::Registration::Dialer(first) = &first {
+                first.publish(Err("an old dial failed".to_owned()));
+            }
+            let second = pool.register_planned_dial(bob, || None);
+            drop(first);
+
+            let room_for_another = admission.has_room(testing::endpoint_id(8));
+            drop(second);
+            endpoint.close().await;
+            assert!(
+                !room_for_another,
+                "the drop of the old dial released the reservation of the new one"
+            );
+        });
+    }
+
     /// **The guard of an old dial that drops keeps the entry of the new dialer.**
     ///
     /// A third send while the new dial is in flight waits for it, and does not start a second dial.
