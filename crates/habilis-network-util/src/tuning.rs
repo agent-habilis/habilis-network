@@ -876,8 +876,8 @@ pub const MESH_TOPIC_EVENTS_CAP: usize = 2048;
 /// by structure (the sum of the caps is odd, or the 2 short nodes are linked to each other)
 /// asks at most 1 `Join` per `STARVED` for ever, while a peer keeps refusing it: the wait of a
 /// refusing peer grows to 15 minutes, so about once per 15 minutes in the long run. One fallback
-/// per 300 s per short node bounds the churn to the asks of the short nodes and the evictions
-/// that they cause.
+/// per 300 s per short node is at most 0.2 `Join` per short node per minute, and each `Join` evicts
+/// up to 1 + 2(G - 1) links.
 pub const STARVED: Duration = Duration::from_mins(5);
 
 /// How often an advertising `create` re-broadcasts its mesh id into

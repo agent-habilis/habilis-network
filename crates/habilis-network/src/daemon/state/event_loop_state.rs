@@ -1547,7 +1547,10 @@ impl EventLoopState {
 
     /// Whether a graft leaves `peer` alone at `now`: it refused a `Neighbor` request and its
     /// wait runs. A starved node whose fallback is due asks every peer, because a `Join` is not
-    /// refused: those dials, one per peer once per `STARVED`, are expected.
+    /// refused. A peer with a direct path gets the graft at once, the graft sets the relink
+    /// cooldown and stamps the fallback, so the dial is once per window. A peer with no direct
+    /// path gets no graft and no cooldown: it is probed on each pass, as any relay-only peer is,
+    /// until the fallback goes out.
     pub(crate) fn graft_blocked(&self, peer: EndpointId, now: Instant) -> bool {
         self.graft_backoff.is_blocked(&peer, now) && !self.starved_join_ready(now)
     }

@@ -193,14 +193,18 @@ pub(crate) fn retry_candidates_at(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use iroh::EndpointId;
 
     use super::{next_fill, retry_candidates_at};
     use crate::daemon::state::EventLoopState;
     use crate::testing::{endpoint_id, fresh_state, nick, test_key};
     use crate::util::clock::Instant;
+    use crate::util::tuning::{GRAFT_REFUSED_AFTER, RELINK_COOLDOWN, STARVED};
 
     const MAX_CONNECTIONS: usize = 4;
+    const SECOND: Duration = Duration::from_secs(1);
 
     fn rendezvous() -> EndpointId {
         endpoint_id(1)
@@ -293,5 +297,54 @@ mod tests {
             "G - 1 peers and the rendezvous leave a slot: the member is asked"
         );
         assert!(none.is_empty(), "G peers fill the view: nobody is asked");
+    }
+
+    /// A starved node whose fallback is due asks a peer that refused it, which the backoff leaves
+    /// alone otherwise. The graft that follows sets the relink cooldown (10 s), so the next pass
+    /// does not ask the peer again, and the `Join` of that graft stamps the fallback, so the
+    /// backoff holds the peer again: the dial of a refusing peer is once per window, as long as
+    /// the graft goes out. A peer with no direct path gets no graft and no cooldown, and is
+    /// probed on each pass like any relay-only peer.
+    #[test]
+    fn a_starved_node_retries_a_refusing_peer_once_per_window() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let asked_at = start + STARVED;
+        let now = asked_at + GRAFT_REFUSED_AFTER + SECOND;
+        let candidate = endpoint_id(2);
+        let mut state = state_with_a_member_to_fill(3, false);
+        state.below_target_since = Some(start);
+        state.graft_backoff.asked(candidate, asked_at);
+        state.settle_graft_backoff(asked_at + GRAFT_REFUSED_AFTER);
+        assert!(
+            state.starved_join_ready(now),
+            "the node is starved, refused and has not fallen back yet"
+        );
+        let pass = |view: &EventLoopState, at: Instant| {
+            retry_candidates_at(view, rendezvous(), MAX_CONNECTIONS, false, at)
+        };
+
+        let first = pass(&state, now);
+        state.note_relink(candidate, now);
+        let during_the_cooldown = pass(&state, now + SECOND);
+        assert!(
+            state.starved_join_due(now),
+            "the graft of the first pass is the fallback"
+        );
+        let after_the_cooldown = pass(&state, now + RELINK_COOLDOWN + SECOND);
+
+        assert_eq!(
+            first.len(),
+            1,
+            "the fallback is due: the refusing peer is asked"
+        );
+        assert!(
+            during_the_cooldown.is_empty(),
+            "the relink cooldown of the graft holds the peer for the next pass"
+        );
+        assert!(
+            after_the_cooldown.is_empty(),
+            "the fallback went out: the backoff holds the refusing peer again"
+        );
     }
 }

@@ -44,7 +44,10 @@ pub(crate) struct GraftTarget {
 /// `GRAFT_BACKOFF_MAX` (15 minutes). A node whose refusals are all older asks `Neighbor` again
 /// when the wait of a peer ends, and the next refusal makes the `Join` due. When 2 nodes that
 /// are 1 peer short hold a backoff on each other, the `Neighbor` request goes out after the wait,
-/// and a peer with a free slot accepts it.
+/// and a peer with a free slot accepts it. The `Join` of a short node goes to the peer that
+/// `next_fill` picks at random among the free members, not to the other short node, so the
+/// 2 short nodes meet by chance: each `Join` to a full peer moves the shortage to the peer that
+/// it evicts.
 ///
 /// A `Join` to a full peer evicts one neighbor of it, and the `ForwardJoin` walk that it
 /// starts ends in a `Neighbor` request of high priority at up to G - 1 more peers, so a `Join`
@@ -184,8 +187,11 @@ mod tests {
         );
     }
 
-    /// Control: a node at G - 1 that no candidate refused keeps asking with `Neighbor`. It is
-    /// not stuck, so it makes no member of a full view drop a neighbor.
+    /// Control: a node at G - 1 for which no ask stayed unanswered for `GRAFT_REFUSED_AFTER`
+    /// keeps asking with `Neighbor`. It is not stuck, so it makes no member of a full view drop a
+    /// neighbor. The test does not settle the backoff: `settle_graft_backoff` reads an ask that
+    /// no link answered in `GRAFT_REFUSED_AFTER` as a refusal, so a silent peer makes the node
+    /// stuck on the next alive tick.
     #[test]
     fn a_node_at_g_minus_one_that_no_peer_refused_never_asks_a_join() {
         let _guard = ::habilis_network_test_tracing::init();
