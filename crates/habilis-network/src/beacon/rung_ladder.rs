@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
-use iroh::address_lookup::memory;
+use iroh::address_lookup::{EndpointInfo, memory};
 use iroh::{Endpoint, EndpointAddr, RelayUrl};
 
 use crate::lookup::{add_peer_addr, relay_ladder, replace_peer_addr};
@@ -78,7 +78,7 @@ pub(crate) fn register_offered(
 ) {
     let booked: Option<EndpointAddr> = book
         .get_endpoint_info(params.id)
-        .map(|info| info.into_endpoint_addr());
+        .map(EndpointInfo::into_endpoint_addr);
     let kept: Option<EndpointAddr> = booked.map(|entry| {
         keeping_rungs(entry, |port| {
             offered.contains(&port) || !params.bind_ports.contains(&port)
