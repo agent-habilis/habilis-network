@@ -277,6 +277,21 @@ struct HopHealth {
     state: HopState,
 }
 
+/// A cell that is charged to the shared byte budget of the writers. The bytes go back to the budget when the
+/// value is dropped, so no exit of a writer (a close, a write error, a drop at the deadline) can forget them.
+#[derive(Debug)]
+struct Charged {
+    cell: Cell,
+    // the pool is shared by every writer and every charge that it made
+    pool: Arc<WriterPool>,
+}
+
+impl Drop for Charged {
+    fn drop(&mut self) {
+        self.pool.release(self.cell.packet.len());
+    }
+}
+
 /// The outbound writer set and its shared byte budget.
 ///
 /// Split out from [`Forwarder`] so a writer task can hold exactly what it needs
@@ -285,7 +300,7 @@ struct HopHealth {
 #[derive(Debug, Default)]
 struct WriterPool {
     /// One outbound writer channel per next-hop underlay endpoint id.
-    writers: Mutex<HashMap<UnderlayId, mpsc::Sender<Cell>>>,
+    writers: Mutex<HashMap<UnderlayId, mpsc::Sender<Charged>>>,
     /// Bytes queued across every writer.
     queued_bytes: AtomicUsize,
     /// Cells a writer dropped because its connection was not on a direct path.
@@ -307,14 +322,29 @@ impl WriterPool {
     /// Drop `key`'s entry, but only if it is still `sender`'s. A writer that has
     /// already been replaced must not delete its successor's channel — that race
     /// is how a sibling transport grew a permanent phantom session.
-    fn retire(&self, key: UnderlayId, sender: &mpsc::Sender<Cell>) {
+    ///
+    /// Says whether the entry was `sender`'s: a writer that was replaced must leave the health of its successor
+    /// alone too.
+    fn retire(&self, key: UnderlayId, sender: &mpsc::Sender<Charged>) -> bool {
         let mut writers = self.writers.lock().expect("writers mutex poisoned");
-        if writers
+        let mine = writers
             .get(&key)
-            .is_some_and(|live| live.same_channel(sender))
-        {
+            .is_some_and(|live| live.same_channel(sender));
+        if mine {
             writers.remove(&key);
         }
+        mine
+    }
+
+    /// Charge `cell` to the byte budget. `None` when the budget is spent: the bytes are given back.
+    fn charge(pool: &Arc<Self>, cell: Cell) -> Option<Charged> {
+        let cost = cell.packet.len();
+        let total = pool.queued_bytes.fetch_add(cost, Ordering::Relaxed) + cost;
+        let charged = Charged {
+            cell,
+            pool: Arc::clone(pool),
+        };
+        (total <= FORWARD_QUEUE_BYTES).then_some(charged)
     }
 
     /// The number of changes of state that the hops have had.
@@ -360,9 +390,9 @@ impl WriterPool {
     fn note_waiting(&self, underlay: UnderlayId, stuck_after: Duration) -> HopState {
         let mut health = self.health.lock().expect("health mutex poisoned");
         let Some(hop) = health.get_mut(&underlay) else {
-            return HopState::Wait {
-                since: Instant::now(),
-            };
+            // No entry: nobody advertises this hop and no cell may wait for it for ever. A writer reaches this
+            // only when its entry was forgotten under it, which `retire` prevents.
+            return HopState::Stuck;
         };
         match hop.state {
             HopState::Admit => {
@@ -407,12 +437,29 @@ impl WriterPool {
     }
 
     /// The hops that wait for a direct path now: candidates, behind the hops that admit.
+    #[cfg(test)]
     fn waiting_app_ids(&self) -> Vec<AppId> {
         let health = self.health.lock().expect("health mutex poisoned");
         let waiting = health
             .values()
             .filter(|hop| matches!(hop.state, HopState::Wait { .. }));
         waiting.map(|hop| hop.app_id).collect()
+    }
+
+    /// The hops that are stuck and the hops that wait, read under one lock: a hop that goes from wait to stuck
+    /// between two reads would be in neither set and would read as admitting.
+    fn gate_sets(&self) -> (Vec<AppId>, Vec<AppId>) {
+        let health = self.health.lock().expect("health mutex poisoned");
+        let mut stuck = Vec::new();
+        let mut waiting = Vec::new();
+        for hop in health.values() {
+            match hop.state {
+                HopState::Stuck => stuck.push(hop.app_id),
+                HopState::Wait { .. } => waiting.push(hop.app_id),
+                HopState::Admit => {}
+            }
+        }
+        (stuck, waiting)
     }
 
     /// The hops that waited for the whole deadline: no candidates, and not advertised as links.
@@ -425,10 +472,10 @@ impl WriterPool {
     }
 }
 
-/// A cell that this node does not send: counted, and its bytes go back to the budget.
-fn drop_cell(pool: &WriterPool, cell: &Cell) {
-    pool.release(cell.packet.len());
+/// A cell that this node does not send: counted, and its bytes go back to the budget with the charge.
+fn drop_cell(pool: &WriterPool, charged: Charged) {
     pool.refused_on_relay.fetch_add(1, Ordering::Relaxed);
+    drop(charged);
 }
 
 /// Ask the gate about the connection of `key` and tell the pool: the state of the hop after the call.
@@ -454,8 +501,8 @@ fn settle(
 async fn writer_task(
     underlay: Endpoint,
     dst: EndpointAddr,
-    mut rx: mpsc::Receiver<Cell>,
-    handle: mpsc::Sender<Cell>,
+    mut rx: mpsc::Receiver<Charged>,
+    handle: mpsc::Sender<Charged>,
     // the writer pool is shared by the forwarder and its accept loops
     pool: Arc<WriterPool>,
     rule: RelayRule,
@@ -465,19 +512,23 @@ async fn writer_task(
         tracing::debug!(hop = %dst.id.fmt_short(), %error, "multihop underlay writer stopping");
     }
     let key = UnderlayId::new(dst.id);
-    pool.retire(key, &handle);
-    pool.forget(key);
-    // Whatever never made it onto the wire is still charged to the budget.
-    rx.close();
-    while let Ok(cell) = rx.try_recv() {
-        pool.release(cell.packet.len());
+    if pool.retire(key, &handle) {
+        pool.forget(key);
     }
+    // Whatever never made it onto the wire is still charged: the charges of the queue go back with `rx`.
+    rx.close();
 }
 
+/// The loop of one writer: it sends the cells of its queue to one next hop, while the gate admits the hop.
+///
+/// A write that never ends is not covered: a peer that keeps its connection alive and reads nothing fills the
+/// flow control of the stream, `write_cell` waits for room, and `connection.closed()` cannot end it, because the
+/// write runs in the body of the arm and not in the select. The hop stays in the state "admit", its queue fills,
+/// and the cells for it are dropped at the queue and counted. A hostile neighbor costs only its own hop.
 async fn drain_to_hop(
     underlay: &Endpoint,
     dst: &EndpointAddr,
-    rx: &mut mpsc::Receiver<Cell>,
+    rx: &mut mpsc::Receiver<Charged>,
     pool: &WriterPool,
     rule: RelayRule,
 ) -> anyhow::Result<()> {
@@ -504,7 +555,7 @@ async fn drain_to_hop(
     let mut path_events = connection.path_events();
     let mut events_open = true;
     // A cell that the writer took from its queue while the hop was in wait. It goes first when the wait ends.
-    let mut held: Option<Cell> = None;
+    let mut held: Option<Charged> = None;
     let mut state = settle(&mut gate, &connection, pool, key, rule);
     loop {
         // While the hop waits, the queue is not read: the cells stay in its bounded channel.
@@ -522,15 +573,14 @@ async fn drain_to_hop(
                 state = settle(&mut gate, &connection, pool, key, rule);
                 match state {
                     HopState::Admit => {
-                        let cost = cell.packet.len();
-                        let written = write_cell(&mut send, &cell).await;
-                        pool.release(cost);
-                        written.context("underlay write failed")?;
+                        write_cell(&mut send, &cell.cell)
+                            .await
+                            .context("underlay write failed")?;
                     }
                     HopState::Wait { .. } => held = Some(cell),
                     // Dropped like any other loss: QUIC above retransmits, and a direct path takes over
                     // once one opens.
-                    HopState::Stuck => drop_cell(pool, &cell),
+                    HopState::Stuck => drop_cell(pool, cell),
                 }
             }
             event = path_events.next(), if events_open && !rule.allow_relay => {
@@ -545,25 +595,21 @@ async fn drain_to_hop(
         match state {
             HopState::Admit => {
                 if let Some(cell) = held.take() {
-                    let cost = cell.packet.len();
-                    let written = write_cell(&mut send, &cell).await;
-                    pool.release(cost);
-                    written.context("underlay write failed")?;
+                    write_cell(&mut send, &cell.cell)
+                        .await
+                        .context("underlay write failed")?;
                 }
             }
             HopState::Wait { .. } => {}
             HopState::Stuck => {
                 if let Some(cell) = held.take() {
-                    drop_cell(pool, &cell);
+                    drop_cell(pool, cell);
                 }
                 while let Ok(cell) = rx.try_recv() {
-                    drop_cell(pool, &cell);
+                    drop_cell(pool, cell);
                 }
             }
         }
-    }
-    if let Some(cell) = held.take() {
-        drop_cell(pool, &cell);
     }
     let _ = send.finish();
     Ok(())
@@ -1351,6 +1397,103 @@ mod tests {
                 from.forwarder.pool.waiting_app_ids().is_empty(),
                 "the hop admits again"
             );
+        });
+    }
+
+    /// A writer that was replaced does not retire its successor: `retire` says that the entry is not its own, so
+    /// the health of the successor stays. A hop with no entry in the health map is stuck, and not a wait with no end.
+    #[test]
+    fn a_replaced_writer_leaves_the_entry_of_its_successor_and_an_untracked_hop_is_stuck() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (hop, app) = (stranger(61).underlay_id, stranger(62).app_id);
+            let pool = super::WriterPool::default();
+            let (old, _old_rx) = mpsc::channel(1);
+            let (new, _new_rx) = mpsc::channel(1);
+            pool.writers
+                .lock()
+                .expect("writers mutex poisoned")
+                .insert(hop, new.clone());
+            pool.track(hop, app);
+
+            assert!(!pool.retire(hop, &old), "the entry is not the old writer's");
+            assert!(
+                pool.writers
+                    .lock()
+                    .expect("writers mutex poisoned")
+                    .contains_key(&hop),
+                "the successor stays"
+            );
+            assert!(pool.retire(hop, &new), "the successor retires itself");
+
+            pool.forget(hop);
+            assert!(
+                matches!(
+                    pool.note_waiting(hop, Duration::from_mins(1)),
+                    super::HopState::Stuck
+                ),
+                "a hop with no entry never waits for ever"
+            );
+        });
+    }
+
+    /// One try of the scenario below with the nodes of `seed`: the bytes still charged after the connection of a
+    /// writer that holds a cell in wait closed. `None` when the writer did not hold the cell (the one-second tick
+    /// can put the hop in wait before the cell comes, and the cell then stays in the channel).
+    async fn bytes_charged_after_a_close_with_a_held_cell(seed: u8) -> Option<usize> {
+        let from = loopback_node(seed, Duration::from_secs(30)).await;
+        let mut to = loopback_node(seed + 1, Duration::from_secs(30)).await;
+        assert!(cell_arrives(&from, &mut to).await, "the hop admits first");
+        let local = from.forwarder.underlay.id();
+        // The writer reads its queue while the hop admits. The cut puts the hop in wait on the next cell, and
+        // that cell is the one that the writer holds.
+        habilis_network_iroh_transport_util::block_ip_to(local, [ip_port_of(&to)]);
+        from.forwarder.enqueue(
+            to.hop.app_id,
+            cell(to.hop.app_id, from.hop.app_id, MAX_CELL_HOPS),
+        );
+        tokio_time::sleep(Duration::from_millis(300)).await;
+        let free_places = {
+            let writers = from
+                .forwarder
+                .pool
+                .writers
+                .lock()
+                .expect("writers mutex poisoned");
+            writers.get(&to.hop.underlay_id).map(mpsc::Sender::capacity)
+        };
+        let held = free_places == Some(super::WRITER_QUEUE);
+        if held {
+            to.forwarder.underlay.close().await;
+            let deadline = std_Instant::now() + Duration::from_secs(8);
+            while from.forwarder.pool.queued_bytes.load(Ordering::Relaxed) > 0
+                && std_Instant::now() < deadline
+            {
+                tokio_time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        let charged = from.forwarder.pool.queued_bytes.load(Ordering::Relaxed);
+        habilis_network_iroh_transport_util::block_ip_to(local, []);
+        held.then_some(charged)
+    }
+
+    /// A cell that the writer took from its queue while the hop waits is charged to the shared budget, and the
+    /// connection then dies: the bytes go back. A writer that held the cell as a local and ended on the close of
+    /// the connection kept the bytes for ever, and the budget of the node only shrank.
+    #[test]
+    fn the_cell_that_a_writer_holds_in_wait_gives_its_bytes_back_when_the_connection_closes() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            for attempt in 0..6_u8 {
+                if let Some(charged) =
+                    bytes_charged_after_a_close_with_a_held_cell(47 + 2 * attempt).await
+                {
+                    assert_eq!(
+                        charged, 0,
+                        "the writer ended with its connection: no byte stays charged"
+                    );
+                    return;
+                }
+            }
+            panic!("the writer never held a cell in wait in 6 tries");
         });
     }
 

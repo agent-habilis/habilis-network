@@ -853,6 +853,7 @@ A forwarder dials a next hop only at the address of the vector that the hop sign
 iroh names a path by the bytes of its address, so the address holds the destination only: one peer is one address and one path for the whole life of the pair.
 A relay also never dials an address that a cell carries.
 Between the death of a link and the agreement of the tables, cells that pass the node at that link are lost unless that node has another neighbor toward the destination; that node switches at once, because that neighbor admits and the other one waits.
+Known limit: a neighbor that keeps its connection alive and reads nothing stalls the writer of its hop. The hop stays in the state admit, the queue fills, and the cells for it are dropped and counted.
 Known limit: while two links to one node are down at once, cells can be turned back between two nodes that each hold a vector that names the other way. The loss is bounded by `relay_stuck_after`, each cell is counted (`turned_back`), and QUIC above sends it again.
 
 ### 9.4 Byte streams

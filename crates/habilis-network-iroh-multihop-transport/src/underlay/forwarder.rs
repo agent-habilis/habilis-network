@@ -20,8 +20,8 @@ use crate::topology::Topology;
 
 use super::delivered::Delivered;
 use super::{
-    FORWARD_QUEUE_BYTES, LOG_TARGET, MAX_WRITERS, RelayRule, WRITER_QUEUE, WriterPool, path_list,
-    paths_of, writer_task,
+    Charged, LOG_TARGET, MAX_WRITERS, RelayRule, WRITER_QUEUE, WriterPool, path_list, paths_of,
+    writer_task,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -133,8 +133,9 @@ impl Forwarder {
         };
         let mut cache = self.next_hops.lock().expect("next hop cache poisoned");
         let kept: NextHop = cache.get_or_compute(key, dst, || {
-            let stuck: HashSet<AppId> = self.pool.stuck_app_ids().into_iter().collect();
-            let waiting: HashSet<AppId> = self.pool.waiting_app_ids().into_iter().collect();
+            let (stuck, waiting) = self.pool.gate_sets();
+            let stuck: HashSet<AppId> = stuck.into_iter().collect();
+            let waiting: HashSet<AppId> = waiting.into_iter().collect();
             topology.next_hop(self.self_app_id, dst, &stuck, &waiting)
         });
         kept.unless_from(from)
@@ -212,6 +213,7 @@ impl Forwarder {
     #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn stick_hop_for_test(&self, underlay: UnderlayId, app_id: AppId) {
         self.pool.track(underlay, app_id);
+        // The first call puts the hop in wait, and the second finds the wait older than the deadline.
         self.pool.note_waiting(underlay, Duration::ZERO);
         self.pool.note_waiting(underlay, Duration::ZERO);
     }
@@ -244,7 +246,7 @@ impl Forwarder {
     /// line, for the first one and for each 256th. The counters say how many.
     fn note_normal_drop(&self, reason: &str) {
         if let Some(total) = self.count_drop() {
-            tracing::debug!(target: LOG_TARGET, total, reason, "multihop forwarder dropping cells: the tables disagree");
+            tracing::debug!(target: LOG_TARGET, total, reason, "multihop forwarder dropping cells");
         }
     }
 
@@ -275,43 +277,36 @@ impl Forwarder {
     /// Bounded: the queue of a writer holds [`WRITER_QUEUE`] cells and all the writers hold
     /// [`FORWARD_QUEUE_BYTES`] bytes. A cell that does not fit is dropped, as a full NIC queue drops a packet.
     pub(crate) fn enqueue(&self, neighbor: AppId, cell: Cell) {
-        let cost = cell.packet.len();
-        if self.pool.queued_bytes.fetch_add(cost, Ordering::Relaxed) + cost > FORWARD_QUEUE_BYTES {
-            self.pool.release(cost);
+        let Some(mut charged) = WriterPool::charge(&self.pool, cell) else {
             self.note_drop("forwarding byte budget exhausted");
             return;
-        }
+        };
         let address = {
             let topology = self.topology.read().expect("topology lock poisoned");
             topology.underlay_of(neighbor)
         };
         let Some(address) = address else {
-            self.pool.release(cost);
             self.note_drop("next hop has no vector");
             return;
         };
         let key = UnderlayId::new(address.id);
-        let mut cell = cell;
         if let Some(sender) = self.writer_for(key) {
-            match sender.try_send(cell) {
+            match sender.try_send(charged) {
                 Ok(()) => return,
                 // The queue of a hop in wait is full: the cell does not fit, as a full NIC queue drops a
                 // packet. A new writer would only replace a live one.
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    self.pool.release(cost);
                     self.note_normal_drop("writer queue full");
                     return;
                 }
-                Err(mpsc::error::TrySendError::Closed(returned)) => cell = returned,
+                Err(mpsc::error::TrySendError::Closed(returned)) => charged = returned,
             }
         }
         let Some(sender) = self.spawn_writer(address, neighbor) else {
-            self.pool.release(cost);
             return;
         };
-        if sender.try_send(cell).is_err() {
-            self.pool.release(cost);
-        }
+        // A full or closed queue drops the cell with the error, and the charge goes back with it.
+        drop(sender.try_send(charged));
     }
 
     /// A cell ended here: hand its packet to the local transport, with the address of its source as the remote.
@@ -369,7 +364,7 @@ impl Forwarder {
         }
     }
 
-    fn writer_for(&self, key: UnderlayId) -> Option<mpsc::Sender<Cell>> {
+    fn writer_for(&self, key: UnderlayId) -> Option<mpsc::Sender<Charged>> {
         let writers = self.pool.writers.lock().expect("writers mutex poisoned");
         writers.get(&key).cloned()
     }
@@ -380,7 +375,7 @@ impl Forwarder {
     /// Refusing rather than evicting is deliberate: a flood of cells for invented destinations must not walk the
     /// real neighbours out of the map. Each spawned writer gives up after `DIAL_ATTEMPTS` and removes its own
     /// entry on the way out, so a refused flood clears itself.
-    fn spawn_writer(&self, dst: EndpointAddr, app_id: AppId) -> Option<mpsc::Sender<Cell>> {
+    fn spawn_writer(&self, dst: EndpointAddr, app_id: AppId) -> Option<mpsc::Sender<Charged>> {
         let key = UnderlayId::new(dst.id);
         let (tx, rx) = mpsc::channel(WRITER_QUEUE);
         {
