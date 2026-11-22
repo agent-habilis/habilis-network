@@ -3,7 +3,10 @@
 /// A process is the daemon of a record when it has the recorded pid and the recorded start, so a later
 /// process that reuses the pid is not taken for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a caller matches every state, so a new state breaks the build of the caller and never passes in a wildcard arm"
+)]
 pub enum DaemonState {
     /// A process has the recorded pid and the recorded start.
     Live,

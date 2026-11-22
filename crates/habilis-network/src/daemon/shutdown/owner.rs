@@ -42,10 +42,11 @@ impl Owner {
     /// The owner is lost when its pid has no process, or has a process that started at another time. A
     /// failed read of the start says nothing, so it does not lose the owner.
     fn lost_given(self, now: &ProcessStart) -> bool {
-        if let ProcessStart::Live(start) = now {
-            return *start != self.start;
+        match now {
+            ProcessStart::Live(start) => *start != self.start,
+            ProcessStart::Gone => true,
+            ProcessStart::Unknown(_) => false,
         }
-        !matches!(now, ProcessStart::Unknown(_))
     }
 }
 

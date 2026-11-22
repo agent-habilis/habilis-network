@@ -326,7 +326,7 @@ Issue #29 records each decision.
 
 ### Remaining `#[expect]` attributes
 
-Sixteen `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (the C ABI of the ffi crate and its test, libc calls that have no safe wrapper, and a test hook between a fork and its exec), one that suppresses `deprecated`, five that suppress a `clippy` lint, and one that suppresses `dead_code`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
+Eighteen `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (the C ABI of the ffi crate and its test, libc calls that have no safe wrapper, and a test hook between a fork and its exec), one that suppresses `deprecated`, seven that suppress a `clippy` lint, and one that suppresses `dead_code`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
 
 | File | Lint | Reason |
 | --- | --- | --- |
@@ -341,6 +341,8 @@ Sixteen `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (the 
 | `habilis-network-ffi/src/ffi.rs` (crate) | `unsafe_code` | this module is the C ABI: raw pointers from the foreign caller, and a boxed handle it owns |
 | `habilis-network-ffi/tests/ffi_smoke.rs` (crate) | `unsafe_code` | the surface under test is `unsafe extern "C"`; calling it is the test |
 | `habilis-network/src/daemon/setup.rs` (`hold_member_key`) | `clippy::unnecessary_wraps` | the same signature as the version for a target with files |
+| `habilis-network-util/src/process_start.rs` (`ProcessStart`) | `clippy::exhaustive_enums` | a caller matches every state, so a new state breaks the build of the caller and never passes in a wildcard arm (user rule: one enum for a state) |
+| `habilis-network/src/daemon/registry/daemon_state.rs` (`DaemonState`) | `clippy::exhaustive_enums` | the same reason as `ProcessStart` |
 | `habilis-network/src/daemon/setup.rs` (test `a_restart_waits_out_a_child_that_holds_a_copy_of_the_lock_until_its_exec`) | `unsafe_code` | `CommandExt::pre_exec`: only a hook between the fork and the exec keeps a child in the gap where it holds a copy of the lock file |
 | `habilis-network/src/daemon/setup.rs` (`next_run`) | `clippy::unnecessary_wraps` | the same signature as the file-backed version, so the caller is one call |
 | `habilis-network/src/daemon/setup.rs` (`member_key`) | `clippy::unnecessary_wraps` | the same signature as the version for a target with files |

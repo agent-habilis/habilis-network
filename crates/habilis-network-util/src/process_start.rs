@@ -16,7 +16,10 @@ use std::io;
 /// assert!(matches!(start_of(std::process::id()), ProcessStart::Live(_)));
 /// ```
 #[derive(Debug)]
-#[non_exhaustive]
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a caller matches every state, so a new state breaks the build of the caller and never passes in a wildcard arm"
+)]
 pub enum ProcessStart {
     /// The process runs. The unit of the value differs by system (microseconds since the epoch on
     /// macOS, clock ticks since boot on Linux), so compare two values from one host only.

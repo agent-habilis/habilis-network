@@ -399,6 +399,8 @@ mod tests {
     fn two_live_children_differ_by_pid_and_by_start() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut first = sleeper();
+        // A Linux start counts 10 ms ticks: 100 ms put the two starts 10 ticks apart.
+        thread::sleep(Duration::from_millis(100));
         let mut second = sleeper();
 
         let starts = (start_of(first.id()), start_of(second.id()));

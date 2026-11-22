@@ -1,7 +1,7 @@
 use std::fs::File;
 
-/// The lock of a registry file, held by a caller that found no daemon for the member. While the guard
-/// lives, no daemon can start for that member. The lock goes when the guard drops.
+/// The lock of a registry file, held by a caller that waited for the daemon of the member to end. While the guard
+/// lives, no daemon can start for that member, so drop it at once. The lock goes when the guard drops.
 #[derive(Debug)]
 #[must_use = "the lock goes when the guard drops"]
 pub struct FreeGuard {

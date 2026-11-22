@@ -4444,6 +4444,10 @@ mod tests {
 
             assert!(lock.exists(), "the lock file stays in the locks folder");
             assert!(
+                !base.path().join("second.json").exists(),
+                "a start that the lock refuses creates no state file"
+            );
+            assert!(
                 kept,
                 "the second start cleared the chunk folder of the first run"
             );

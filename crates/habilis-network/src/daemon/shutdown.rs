@@ -192,14 +192,11 @@ fn owner_start(pid: u32) -> Result<u64, OwnerPidError> {
     if pid == std_process::id() {
         return Err(OwnerPidError::OwnSelf(pid));
     }
-    let start = process::start_of(pid);
-    if let ProcessStart::Live(start) = start {
-        return Ok(start);
+    match process::start_of(pid) {
+        ProcessStart::Live(start) => Ok(start),
+        ProcessStart::Gone => Err(OwnerPidError::NotRunning(pid)),
+        ProcessStart::Unknown(error) => Err(OwnerPidError::Unreadable(pid, error.kind())),
     }
-    if let ProcessStart::Unknown(error) = start {
-        return Err(OwnerPidError::Unreadable(pid, error.kind()));
-    }
-    Err(OwnerPidError::NotRunning(pid))
 }
 /// Detect orphaning by the spawning agent and route it through the same quit
 /// channel as a signal. A hard-killed parent (`kill -9`, a reinstall, an IDE

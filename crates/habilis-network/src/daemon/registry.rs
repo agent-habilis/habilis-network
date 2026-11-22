@@ -14,7 +14,7 @@ mod daemon_state;
 mod free_guard;
 
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 
 pub use daemon_record::DaemonRecord;
@@ -26,6 +26,8 @@ use crate::util;
 
 /// The folder of the lock files, under the runtime base.
 const LOCKS_FOLDER: &str = "locks";
+/// The most that is read of a lock file: a record is under 1 kB, and a wrong file is not read into memory.
+const RECORD_LIMIT: u64 = 64 * 1024;
 
 /// The lock file of the daemon of `nickname` on `mesh`: `<runtime base>/locks/<mesh folder>-<nickname>.lock`.
 /// The mesh folder is the first 16 characters of the mesh id.
@@ -87,7 +89,10 @@ fn lock_file_of(entry: io::Result<fs::DirEntry>) -> Option<io::Result<PathBuf>> 
 /// # Errors
 /// The file cannot be read. A file that does not exist is [`io::ErrorKind::NotFound`]: no such member.
 pub fn read_record(lock_path: &Path) -> io::Result<Option<DaemonRecord>> {
-    let text = fs::read_to_string(lock_path)?;
+    let mut text = String::new();
+    File::open(lock_path)?
+        .take(RECORD_LIMIT)
+        .read_to_string(&mut text)?;
     Ok(DaemonRecord::parse(&text))
 }
 
@@ -114,7 +119,9 @@ mod tests {
     use std::fs::{OpenOptions, TryLockError};
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
-    use std::{env, fs, io, process};
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use std::{env, fs, io, process, thread};
 
     use super::{DaemonRecord, read_record, registry, wait_daemon_lock};
     use crate::protocol::{Mesh, MeshConfig, MeshId, MeshName, Nickname, Seed};
@@ -256,5 +263,32 @@ mod tests {
             "no such member"
         );
         assert!(!missing.exists(), "the wait makes no lock file");
+    }
+
+    /// The wait does not return while a daemon holds the lock, and it returns when the holder is gone: the rule of
+    /// `leave`, which confirms a stop by the lock.
+    #[test]
+    fn the_wait_returns_when_the_holder_is_gone_and_not_before() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let dir = TempDir::new("registry-wait");
+        let file = dir.path().join("member.lock");
+        fs::write(&file, "").expect("a lock file");
+        let holder = wait_daemon_lock(&file).expect("the lock is free");
+        let (sender, receiver) = mpsc::channel();
+        let waiter = thread::spawn(move || {
+            let taken = wait_daemon_lock(&file);
+            sender.send(taken.is_ok()).expect("the result is sent");
+        });
+
+        let while_held = receiver.recv_timeout(Duration::from_millis(200));
+        drop(holder);
+        let after = receiver.recv_timeout(Duration::from_secs(10));
+        waiter.join().expect("the waiter ends");
+
+        assert!(
+            while_held.is_err(),
+            "the wait returned while the lock was held: {while_held:?}"
+        );
+        assert_eq!(after, Ok(true), "the wait returns when the holder is gone");
     }
 }
