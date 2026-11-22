@@ -5,8 +5,6 @@
 //! independently-sufficient reliability layers (see the lookup glossary
 //! in AGENTS.md).
 
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use iroh::Endpoint;
 use iroh::address_lookup::AddrFilter;
@@ -15,17 +13,11 @@ use iroh_mainline_address_lookup::{Builder, DhtAddressLookup};
 mod publish;
 pub(in crate::lookup) use publish::Publish;
 
-/// How long the publish task of the DHT lookup waits before it puts the record again. The task puts once, and a
-/// put that fails (no node answered yet) is the only try until this delay passes: the library default is one hour,
-/// and for the beacon of a DHT-only mesh an hour with no record is an hour in which nobody can join. The delay
-/// also keeps the record alive, which the DHT forgets.
-const REPUBLISH_AFTER: Duration = Duration::from_secs(60);
-
 /// The builder of the DHT lookup of `endpoint`. The builder publishes only with a secret key, and
 /// `Builder::into_address_lookup` is the only place that sets one: a builder that is built by hand
 /// needs the key of the endpoint, or it never publishes (the DHT-only mesh formed nobody).
 fn builder(endpoint: &Endpoint, publish: Publish) -> Builder {
-    let builder = DhtAddressLookup::builder().republish_delay(REPUBLISH_AFTER);
+    let builder = DhtAddressLookup::builder();
     let secret = endpoint.secret_key().clone();
     match publish {
         Publish::Nothing => builder.no_publish(),
@@ -129,10 +121,7 @@ mod tests {
         let id = secret.public();
         let endpoint = endpoint_with_key(secret).await;
         let dht = local_dht(&testnet);
-        // A short delay: one put that fails must not leave the record out for the whole wait of the test.
-        let building = builder(&endpoint, publish)
-            .dht_builder(dht)
-            .republish_delay(Duration::from_millis(300));
+        let building = builder(&endpoint, publish).dht_builder(dht);
         let lookup = building.build().expect("the lookup of the endpoint");
 
         lookup.publish(&endpoint_data().0);
