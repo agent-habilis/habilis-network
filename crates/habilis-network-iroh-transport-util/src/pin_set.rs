@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use iroh::EndpointId;
-use iroh::endpoint::transports::{Addr, PathSelectionData};
+use iroh::endpoint::transports::{Addr, FourTuple, PathSelectionData};
 
 use crate::rung::{MULTIHOP_TRANSPORT_ID, Rung, climb, remote_id_of};
 
@@ -183,18 +183,19 @@ pub fn pinned_in(local: EndpointId, paths: &[PathSelectionData<'_>]) -> bool {
 /// use iroh::endpoint::transports::PathSelectionData;
 ///
 /// # fn demo<'a>(local: iroh::EndpointId, paths: &'a [PathSelectionData<'a>]) -> Option<&'a PathSelectionData<'a>> {
-/// climb_pinned(local, paths, custom_rung, |_rung, _path| true)
+/// climb_pinned(local, None, paths, custom_rung, |_rung, _path| true)
 /// # }
 /// ```
 #[must_use]
 pub fn climb_pinned<'a>(
     local: EndpointId,
+    current: Option<&FourTuple>,
     paths: &'a [PathSelectionData<'a>],
     custom: impl Fn(u64) -> Rung,
     usable: impl Fn(Rung, &PathSelectionData<'_>) -> bool,
 ) -> Option<&'a PathSelectionData<'a>> {
     let pinned = pinned_in(local, paths);
-    climb(paths, custom, |rung, path| {
+    climb(current, paths, custom, |rung, path| {
         pin_allows(pinned, rung) && usable(rung, path)
     })
 }
@@ -252,7 +253,7 @@ mod tests {
             .iter()
             .map(|tuple| PathSelectionData::for_test(tuple, None))
             .collect();
-        let chosen = climb_pinned(local, &paths, custom_rung, |_rung, _path| true)?;
+        let chosen = climb_pinned(local, None, &paths, custom_rung, |_rung, _path| true)?;
         Some(crate::rung_of(chosen, custom_rung))
     }
 
