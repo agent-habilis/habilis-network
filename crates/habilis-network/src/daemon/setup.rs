@@ -901,9 +901,10 @@ async fn hold_member_key(state: Option<&Path>) -> Result<Option<sync::Arc<File>>
     let Some(state) = state else {
         return Ok(None);
     };
-    let lock = open_key_lock(state)?;
+    let lock_path = key_lock_path(state);
+    let lock = open_lock(&lock_path)?;
     let give_up = Instant::now() + KEY_LOCK_RETRY;
-    while !try_key_lock(&lock, state)? {
+    while !try_lock(&lock, &lock_path)? {
         if Instant::now() >= give_up {
             return Err(key_held_error(state));
         }
@@ -920,8 +921,9 @@ fn hold_member_key_once(state: Option<&Path>) -> Result<Option<sync::Arc<File>>>
     let Some(state) = state else {
         return Ok(None);
     };
-    let lock = open_key_lock(state)?;
-    if try_key_lock(&lock, state)? {
+    let lock_path = key_lock_path(state);
+    let lock = open_lock(&lock_path)?;
+    if try_lock(&lock, &lock_path)? {
         // shared with every clone of the keys: the lock goes when the last one drops
         Ok(Some(sync::Arc::new(lock)))
     } else {
@@ -1012,35 +1014,98 @@ fn refuse_foreign_lock_file(lock: &File, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Open the lock file of the member key of `state`, mode 0600.
+/// The lock file of the member key of `state`.
 #[cfg(all(unix, feature = "host"))]
-fn open_key_lock(state: &Path) -> Result<File> {
+fn key_lock_path(state: &Path) -> PathBuf {
+    state.with_extension("key.lock")
+}
+
+/// Open the lock file at `lock_path`, mode 0600.
+#[cfg(all(unix, feature = "host"))]
+fn open_lock(lock_path: &Path) -> Result<File> {
     use anyhow::Context as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-    refuse_shared_state_folder(state)?;
-    let lock_path = state.with_extension("key.lock");
+    refuse_shared_state_folder(lock_path)?;
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(false).mode(0o600);
     let lock: File = options
         .custom_flags(no_link_flags())
-        .open(&lock_path)
+        .open(lock_path)
         .with_context(|| format!("the lock file {} cannot be opened", lock_path.display()))?;
-    refuse_foreign_lock_file(&lock, &lock_path)?;
+    refuse_foreign_lock_file(&lock, lock_path)?;
     Ok(lock)
 }
 
 /// One try at the lock: true when it is taken, false when another holder has it.
 #[cfg(all(unix, feature = "host"))]
-fn try_key_lock(lock: &File, state: &Path) -> Result<bool> {
+fn try_lock(lock: &File, lock_path: &Path) -> Result<bool> {
     use std::fs::TryLockError;
     match lock.try_lock() {
         Ok(()) => Ok(true),
         Err(TryLockError::WouldBlock) => Ok(false),
         Err(TryLockError::Error(error)) => Err(anyhow::Error::from(error).context(format!(
             "the lock file {} cannot be locked: the file system may not support file locks, and a daemon with a member key cannot start there",
-            state.with_extension("key.lock").display()
+            lock_path.display()
         ))),
     }
+}
+
+/// The lock file of the daemon of a nickname on a mesh: `<runtime base>/<mesh folder>/<nickname>.daemon.lock`.
+#[cfg(all(unix, feature = "host"))]
+fn daemon_lock_path(base: &Path, mesh: &MeshId, author: &Nickname) -> PathBuf {
+    use crate::util;
+    util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.daemon.lock"))
+}
+
+/// Take the lock of the one live daemon of a nickname on a mesh in a runtime base, before the run opens a file
+/// of the folder. The chunk folder, the control socket and the tracing log are named by the mesh and the
+/// nickname alone, so two daemons of one pair, with two state files, would clear the files of each other.
+/// A lock on the state file does not keep them apart: each has its own. The rules of the key lock hold: an OS lock
+/// on the descriptor, so the lock goes with the process; a held lock is tried again for `KEY_LOCK_RETRY`, because a
+/// restart right after a leave meets the old daemon while it stops; after that the start fails and names the holder.
+/// The holder writes its pid into the file, for that message. No runtime base means no files to protect.
+/// # Errors
+/// The folder or the lock file cannot be used, or another daemon holds the lock.
+#[cfg(all(unix, feature = "host"))]
+pub(crate) async fn hold_daemon_lock(
+    base: Option<&Path>,
+    mesh: &MeshId,
+    author: &Nickname,
+) -> Result<Option<File>> {
+    use crate::util;
+    use std::io::Write as _;
+    use std::{fs, process};
+    let Some(base) = base else {
+        return Ok(None);
+    };
+    util::ensure_mesh_runtime_dir(base, mesh.as_str())?;
+    let lock_path = daemon_lock_path(base, mesh, author);
+    let mut lock = open_lock(&lock_path)?;
+    let give_up = Instant::now() + KEY_LOCK_RETRY;
+    while !try_lock(&lock, &lock_path)? {
+        if Instant::now() >= give_up {
+            let holder = fs::read_to_string(&lock_path).unwrap_or_default();
+            anyhow::bail!(
+                "another daemon already runs as {author} on mesh {mesh} in this runtime folder (pid {pid}): use another nickname",
+                pid = holder.trim()
+            );
+        }
+        time::sleep(KEY_LOCK_STEP).await;
+    }
+    lock.set_len(0)?;
+    write!(lock, "{}", process::id())?;
+    Ok(Some(lock))
+}
+
+/// A target with no files has no daemon files to protect, so it takes no lock.
+#[cfg(not(all(unix, feature = "host")))]
+pub(crate) fn hold_daemon_lock(
+    _base: Option<&Path>,
+    _mesh: &MeshId,
+    _author: &Nickname,
+) -> impl Future<Output = Result<Option<File>>> {
+    use std::future;
+    future::ready(Ok(None))
 }
 
 /// The error of a start that finds the member key held.
@@ -4293,6 +4358,81 @@ mod tests {
                 !folder.exists(),
                 "a clean leave left the chunk folder {} behind",
                 folder.display()
+            );
+        });
+    }
+
+    // The runtime folder keys the chunk folder, the control socket and the tracing log by mesh and
+    // nickname, so one runtime base holds one live daemon for each pair. A second start with
+    // another state file passes the lock of its state file, and it must not clear the chunk folder
+    // of the first.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_second_start_of_the_same_nickname_on_the_mesh_leaves_the_chunk_folder_of_the_first() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use std::os::unix::fs::PermissionsExt as _;
+            let base = TempDir::new("second-start-chunks");
+            fs::set_permissions(base.path(), fs::Permissions::from_mode(0o700))
+                .expect("a private runtime base");
+            let runtime_base = base.path().to_path_buf();
+            let start = |mesh: Option<String>, state: &str| {
+                let runtime_base = runtime_base.clone();
+                let state = runtime_base.join(state);
+                async move {
+                    let options = membership::JoinOptions::default().mesh(mesh);
+                    let twin = Nickname::try_new("twin").expect("a valid nickname");
+                    let (kind, author) =
+                        membership::resolve_kind(&options, Some(twin)).expect("a kind");
+                    let params: super::SetupParams =
+                        super::SetupParams::new(author, embed::SilentSink)
+                            .max_connections(8)
+                            .runtime_base(runtime_base.clone())
+                            .state_file(state);
+                    let config = super::setup_mesh(kind, params)
+                        .await
+                        .expect("a loopback mesh sets up");
+                    let folder = super::default_chunks_path(
+                        &runtime_base,
+                        &config.mesh.mesh,
+                        &config.mesh.author,
+                    );
+                    let joined = config.mesh_id().to_string();
+                    let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+                    let node = node::Node::spawn(
+                        config,
+                        membership::MembershipApp::new(inbound_tx),
+                        None,
+                        SignalHandling::Leave,
+                    );
+                    (node, folder, joined)
+                }
+            };
+
+            let (first, folder, mesh) = start(None, "first.json").await;
+            let deadline = time::Instant::now() + Duration::from_secs(10);
+            while !folder.exists() && time::Instant::now() < deadline {
+                time::sleep(Duration::from_millis(20)).await;
+            }
+            let marker = folder.join("marker");
+            fs::write(&marker, b"the first run uses this folder").expect("a file in the folder");
+
+            let (second, second_folder, _) = start(Some(mesh), "second.json").await;
+            assert_eq!(folder, second_folder, "both starts name one chunk folder");
+            let cleared_by = time::Instant::now() + Duration::from_secs(2);
+            while marker.exists() && time::Instant::now() < cleared_by {
+                time::sleep(Duration::from_millis(20)).await;
+            }
+            let kept = marker.exists();
+            let refused = second.leave().await;
+            first.leave().await.expect("the first node leaves");
+
+            assert!(
+                kept,
+                "the second start cleared the chunk folder of the first run"
+            );
+            assert!(
+                refused.is_err(),
+                "a second daemon of the same nickname on the mesh is refused"
             );
         });
     }

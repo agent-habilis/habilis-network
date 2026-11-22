@@ -8,7 +8,6 @@
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
 //! `setup`) are siblings under `super`.
 
-#[cfg(feature = "host")]
 use super::setup;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::daemon::state::TestHold;
@@ -20,6 +19,7 @@ use iroh_gossip::net;
 use n0_future::time;
 #[cfg(feature = "host")]
 use serde::de;
+use std::fs::File;
 use std::{future, path, process};
 pub(super) mod ctx_parts;
 mod event_loop_error;
@@ -147,6 +147,8 @@ async fn run_checked<Driver: NodeDriver>(
         driver_channels(runtime.driver);
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
+    let owned = OwnedEndpoints::new(endpoints.router, endpoints.endpoint_owner, &transports);
+    let (owned, _daemon_lock) = claim_daemon(owned, runtime.runtime_base.as_deref(), &mesh).await?;
     let chunks = open_chunks(runtime.runtime_base.as_deref(), &mesh.mesh, &mesh.author)?;
     let mut state: EventLoopState = initial_state(
         mesh.keys.for_mesh(&mesh.mesh),
@@ -165,13 +167,6 @@ async fn run_checked<Driver: NodeDriver>(
         chunks,
     );
     state.mint_mesh = mesh.mint_mesh.take(); // creator-only: backs the `invite` command
-    let owned = OwnedEndpoints {
-        router: endpoints.router,
-        owner: endpoints.endpoint_owner,
-        // A handle that the caller injected is the caller's; `close` skips it with the endpoint.
-        #[cfg(feature = "multihop")]
-        multihop: transports.multihop.clone(),
-    };
     let (fetch_tx, fetch_rx) = mpsc::unbounded_channel();
     state.fetches = chunk_fetch::Fetches::new(fetch_tx);
     let (direct_rx, path_rx) = wire_transports(
@@ -411,6 +406,23 @@ fn leave_label(mesh: &MeshSpec) -> String {
         || format!("#{}", mesh.name),
         |raw_topic| format!("topic {raw_topic}"),
     )
+}
+
+/// The lock of the one live daemon of this nickname on the mesh. The run holds it until it ends, after it removed
+/// its files. A start that another daemon refuses closes the endpoint that setup bound for it, so that nothing is
+/// dropped without a close.
+async fn claim_daemon(
+    owned: OwnedEndpoints,
+    runtime_base: Option<&path::Path>,
+    mesh: &MeshSpec,
+) -> Result<(OwnedEndpoints, Option<File>)> {
+    match setup::hold_daemon_lock(runtime_base, &mesh.mesh, &mesh.author).await {
+        Ok(lock) => Ok((owned, lock)),
+        Err(error) => {
+            owned.close().await;
+            Err(error)
+        }
+    }
 }
 
 /// The chunk store of this run: in the folder of the node under the runtime base, and in memory when there is no
