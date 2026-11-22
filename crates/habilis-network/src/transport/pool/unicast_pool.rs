@@ -3,9 +3,10 @@
 use super::in_flight_dial::InFlightDial;
 use super::plan_release::PlanRelease;
 use super::registration::Registration;
+use super::send_fault::SendFault;
 use super::timeouts::{
-    AT_CEILING, BUSY_AFTER_FINISH, COOLDOWN_REFUSED, DIAL_FAILURE_COOLDOWN, DIAL_TIMEOUT,
-    PATH_SELECT_TIMEOUT, PINNED_IDLE, PINNED_REDIAL, SEND_TIMED_OUT, SEND_TIMEOUT,
+    AT_CEILING, COOLDOWN_REFUSED, DIAL_FAILURE_COOLDOWN, DIAL_TIMEOUT, PATH_SELECT_TIMEOUT,
+    PINNED_IDLE, PINNED_REDIAL, SEND_TIMEOUT,
 };
 use super::warm_send::WarmSend;
 use crate::transport::admission::{BusyGuard, SignalAdmission};
@@ -19,13 +20,14 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, ReadError, ReadToEndError};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use n0_future::time::Instant as PoolInstant;
 use tokio::sync::{Mutex, watch};
 
+use crate::transport::unicast_acceptor::NOT_TAKEN;
 use crate::transport::webrtc::close_code::IDLE;
-use crate::transport::{LOG_TARGET, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
+use crate::transport::{LOG_TARGET, PendingSend, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
@@ -38,7 +40,6 @@ use std::sync::{Mutex as std_Mutex, OnceLock, OnceLock as std_OnceLock};
 use std::{fmt, result};
 #[cfg(test)]
 use tokio::sync::Notify;
-#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use tokio::sync::oneshot;
 #[derive(Clone)]
 pub(crate) struct UnicastPool {
@@ -274,7 +275,7 @@ impl UnicastPool {
         let Some(registration) = self.redial_registration(eid) else {
             bail!("{PINNED_REDIAL}");
         };
-        let outcome = self.dial_and_send(eid, bytes).await;
+        let outcome = self.dial_and_send_once(eid, &bytes).await;
         if let Registration::Dialer(in_flight) = &registration {
             in_flight.publish(match &outcome {
                 Ok(()) => Ok(()),
@@ -370,16 +371,13 @@ impl UnicastPool {
         }
     }
 
-    /// Send `bytes` over a warm connection to `eid` if one exists, returning
-    /// `true` on a fire-and-forget handoff. `false` means no warm connection —
-    /// the caller then dials inline via [`Self::dial_and_send`]. The actual
-    /// stream write is spawned so the event loop never blocks on QUIC I/O
-    /// (awaiting it wouldn't buy delivery truth anyway — QUIC buffers locally,
-    /// so a write "succeeds" before the path is proven). A write that fails on
-    /// a half-dead pooled connection evicts it and redials-and-resends once in
-    /// the background, so the detectable failure mode recovers instead of
-    /// silently losing the frame; a path that dies *after* buffering remains
-    /// at-most-once (an app-level concern: waiter timeouts, and the app's own retry).
+    /// Send `bytes` over a warm connection to `eid` if one exists. `Cold` means no warm
+    /// connection: the caller then dials via [`Self::dial_and_send`]. The send runs on a task so
+    /// the event loop never blocks on QUIC I/O, and the handle of `Sent` gives its verdict: the
+    /// peer took the frame (see [`send_one`]), or it did not. A send that ends with no
+    /// acknowledgement because the connection ended evicts the connection and redials-and-resends
+    /// once. A peer that said no ([`SendFault::NotTaken`]) and a send that passed [`SEND_TIMEOUT`]
+    /// are not sent again: the peer is there.
     pub(crate) async fn send_if_warm(&self, eid: EndpointId, bytes: Bytes) -> WarmSend {
         let Some(connection) = self.warm(eid).await else {
             return WarmSend::Cold;
@@ -388,17 +386,34 @@ impl UnicastPool {
             return WarmSend::Refused;
         }
         let pool = self.clone();
+        let (verdict, outcome) = oneshot::channel();
         task::spawn(async move {
-            let Err(error) = pool.send_marked(eid, &connection, &bytes).await else {
-                return;
-            };
-            tracing::debug!(target: LOG_TARGET, %error, "unicast send failed; dropping connection and redialing");
-            pool.evict_if_same(eid, &connection).await;
-            if let Err(redial_error) = pool.redial_and_send(eid, bytes).await {
-                tracing::debug!(target: LOG_TARGET, %redial_error, "redial after a failed warm send also failed; frame dropped");
+            let sent = pool.send_acknowledged(eid, &connection, bytes).await;
+            if let Err(error) = &sent {
+                tracing::debug!(target: LOG_TARGET, %error, "unicast frame not delivered");
             }
+            let _ = verdict.send(sent);
         });
-        WarmSend::Sent
+        WarmSend::Sent(outcome)
+    }
+
+    /// [`Self::send_marked`] on `connection`, and one more send after a redial when the first ended
+    /// because the connection was lost. A peer that said no, and a deadline, are the verdict at once.
+    async fn send_acknowledged(
+        &self,
+        eid: EndpointId,
+        connection: &Connection,
+        bytes: Bytes,
+    ) -> Result<()> {
+        let Err(error) = self.send_marked(eid, connection, &bytes).await else {
+            return Ok(());
+        };
+        if !connection_lost(&error) {
+            return Err(error);
+        }
+        tracing::debug!(target: LOG_TARGET, %error, "unicast send not acknowledged; dropping connection and redialing");
+        self.evict_if_same(eid, connection).await;
+        self.redial_and_send(eid, bytes).await
     }
 
     /// Whether UDP to `eid` is selected within [`PATH_SELECT_TIMEOUT`], on the
@@ -729,6 +744,17 @@ impl UnicastPool {
     /// A detached pool, an endpoint on failed-dial cooldown, a dial that
     /// fails/times out, or a stream write error.
     pub(crate) async fn dial_and_send(&self, eid: EndpointId, bytes: Bytes) -> Result<()> {
+        let outcome = self.dial_and_send_once(eid, &bytes).await;
+        if let Err(error) = &outcome
+            && connection_lost(error)
+        {
+            return self.redial_and_send(eid, bytes).await;
+        }
+        outcome
+    }
+
+    /// [`Self::dial_and_send`] with no second send after a lost connection.
+    async fn dial_and_send_once(&self, eid: EndpointId, bytes: &Bytes) -> Result<()> {
         self.inner.dial_attempts.fetch_add(1, Ordering::Relaxed);
         let connection = self.warm_or_dial(eid).await?;
         // A connection this call just dialed is milliseconds old: its
@@ -742,8 +768,10 @@ impl UnicastPool {
         {
             bail!("{RELAY_REFUSED}");
         }
-        if let Err(error) = self.send_marked(eid, &connection, &bytes).await {
-            self.evict_if_same(eid, &connection).await;
+        if let Err(error) = self.send_marked(eid, &connection, bytes).await {
+            if connection_lost(&error) {
+                self.evict_if_same(eid, &connection).await;
+            }
             return Err(error);
         }
         Ok(())
@@ -761,7 +789,7 @@ impl UnicastPool {
     #[cfg(test)]
     pub(crate) async fn dial_or_warm_send(&self, eid: EndpointId, bytes: Bytes) -> Result<()> {
         match self.send_if_warm(eid, bytes.clone()).await {
-            WarmSend::Sent => return Ok(()),
+            WarmSend::Sent(pending) => return verdict_of(pending).await,
             WarmSend::Refused => bail!("{RELAY_REFUSED}"),
             WarmSend::Cold => {}
         }
@@ -798,7 +826,7 @@ impl UnicastPool {
                 Registration::Waiter(outcome) => {
                     wait_for_dial(outcome).await.map_err(anyhow::Error::msg)?;
                     match self.send_if_warm(eid, bytes.clone()).await {
-                        WarmSend::Sent => return Ok(()),
+                        WarmSend::Sent(pending) => return verdict_of(pending).await,
                         WarmSend::Refused => bail!("{RELAY_REFUSED}"),
                         WarmSend::Cold => {
                             let Some(next) = self.redial_registration(eid) else {
@@ -1208,50 +1236,89 @@ async fn dial(endpoint: &Endpoint, address: EndpointAddr) -> Result<Connection> 
     }
 }
 
-/// One message per unidirectional stream: open, write the whole frame, finish.
-/// No length framing is needed — the accept side reads the stream to EOF and
-/// gets exactly one serialized `Message`. The finished stream keeps flushing
-/// after it is dropped because the connection stays pooled, so the sender does not
-/// await `stopped()` (which would block the event loop on the inline
-/// unicast-only path). Only the busy mark waits for it, in a task of its own.
+/// One message per bidirectional stream: open, write the whole frame, finish, and wait for the
+/// peer to finish its side. No length framing is needed — the accept side reads the stream to EOF
+/// and gets exactly one serialized `Message`. The peer finishes its side only after it handed the
+/// frame to its loop, so an `Ok` says that the peer took the frame. A reset of the stream, a lost
+/// connection, or an end of the stream with bytes on it is no acknowledgement and is an error. The
+/// connection is busy in the ledger until the acknowledgement or the error.
+///
+/// A send that ends with [`SendFault::TimedOut`] can have been taken by the peer, when the acknowledgement
+/// came late. The verdict "not delivered" is then wrong in the safe direction: never "ok and lost".
 pub(super) async fn send_one(
     connection: &Connection,
     bytes: &[u8],
-    busy: Option<BusyGuard>,
+    _busy: Option<BusyGuard>,
     tally: Option<&WireOutTally>,
-) -> Result<()> {
+) -> Result<(), SendFault> {
     // The open and the write share one deadline: a peer that reads nothing fills its limit of streams, and the
     // open of the next stream then waits for room that never comes. The send sits in a task of its own, so a
     // wait without a bound grows the tasks of this node.
     let deadline = PoolInstant::now() + SEND_TIMEOUT;
-    let mut stream = match time::timeout(SEND_TIMEOUT, connection.open_uni()).await {
-        Ok(opened) => opened?,
-        Err(_) => bail!("{SEND_TIMED_OUT} after {SEND_TIMEOUT:?}: no stream was opened"),
-    };
+    let (mut stream, mut acknowledgement) =
+        match time::timeout(SEND_TIMEOUT, connection.open_bi()).await {
+            Ok(opened) => opened.map_err(lost)?,
+            Err(_) => return Err(SendFault::TimedOut("no stream was opened")),
+        };
     let left: Duration = deadline.saturating_duration_since(PoolInstant::now());
     if let Ok(written) = time::timeout(left, stream.write_all(bytes)).await {
-        written?;
+        written.map_err(lost)?;
     } else {
         // The frame is cut short, so the stream is reset and not finished: dropping it finishes it, and the peer
         // would read the prefix as a whole frame. A reset also drops what is still buffered here.
         let _ = stream.reset(0u32.into());
-        bail!("{SEND_TIMED_OUT} after {SEND_TIMEOUT:?}: the peer read nothing");
+        return Err(SendFault::TimedOut("the peer read nothing"));
     }
-    stream.finish()?;
+    stream.finish().map_err(lost)?;
     if let Some(tally) = tally {
         tally.note(bytes);
     }
-    // `finish()` returns while the frame is still in flight. The busy mark moves to a task that waits
-    // until the peer has read the stream (at most `BUSY_AFTER_FINISH`), so that the ledger does not
-    // evict the connection under a slow reader. The sender does not wait: it would block the event
-    // loop on the inline path.
-    if let Some(busy) = busy {
-        task::spawn(async move {
-            let _ = time::timeout(BUSY_AFTER_FINISH, stream.stopped()).await;
-            drop(busy);
-        });
+    let left_to_acknowledge: Duration = deadline.saturating_duration_since(PoolInstant::now());
+    match time::timeout(left_to_acknowledge, acknowledgement.read_to_end(0)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(fault_of_read(&error)),
+        Err(_) => {
+            let _ = acknowledgement.stop(0u32.into());
+            Err(SendFault::TimedOut("the peer did not acknowledge"))
+        }
     }
-    Ok(())
+}
+
+/// The fault of a stream that failed on a step of the send: the connection is the cause.
+fn lost(error: impl fmt::Display) -> SendFault {
+    SendFault::ConnectionLost(error.to_string())
+}
+
+/// What the end of the acknowledgement side says: a reset with [`NOT_TAKEN`], or bytes where the
+/// end of the stream is the acknowledgement, is a peer that said no. Any other end is a lost
+/// connection.
+fn fault_of_read(error: &ReadToEndError) -> SendFault {
+    let said_no = match error {
+        ReadToEndError::TooLong => true,
+        ReadToEndError::Read(read) => {
+            matches!(read, ReadError::Reset(code) if code.into_inner() == u64::from(NOT_TAKEN))
+        }
+    };
+    if said_no {
+        SendFault::NotTaken
+    } else {
+        lost(error)
+    }
+}
+
+/// Whether the connection is the cause of a failed send, the only cause that a second send on a
+/// new connection can mend.
+fn connection_lost(error: &anyhow::Error) -> bool {
+    let fault: Option<&SendFault> = error.downcast_ref();
+    matches!(fault, Some(SendFault::ConnectionLost(_)))
+}
+
+/// The verdict of a send that runs on a task. A task that ended without a verdict is a send that
+/// was not delivered.
+pub(crate) async fn verdict_of(pending: PendingSend) -> Result<()> {
+    pending
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("the send ended without an outcome")))
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@
 mod in_flight_dial;
 mod plan_release;
 mod registration;
+mod send_fault;
 mod timeouts;
 pub(crate) use timeouts::{COOLDOWN_REFUSED, DIAL_TIMEOUT};
 mod unicast_pool;
@@ -140,16 +141,35 @@ mod tests {
         iroh::Endpoint,
     ) {
         use iroh::endpoint::Connection;
-        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+        use iroh::protocol::{AcceptError, ProtocolHandler};
 
+        /// A server that reads each frame and acknowledges it.
         #[derive(Debug, Clone, Copy)]
-        struct Hold;
-        impl ProtocolHandler for Hold {
+        struct Acknowledge;
+        impl ProtocolHandler for Acknowledge {
             async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                connection.closed().await;
+                while let Ok((mut acknowledgement, mut stream)) = connection.accept_bi().await {
+                    let _ = stream.read_to_end(64 * 1024).await;
+                    let _ = acknowledgement.finish();
+                }
                 Ok(())
             }
         }
+        pool_serving(idle, Acknowledge).await
+    }
+
+    /// [`pool_with_idle`] with the handler that the server runs.
+    async fn pool_serving<Serving: protocol::ProtocolHandler>(
+        idle: Duration,
+        handler: Serving,
+    ) -> (
+        super::UnicastPool,
+        iroh::EndpointId,
+        protocol::Router,
+        iroh::Endpoint,
+    ) {
+        use iroh::protocol::Router;
+
         let bind = || async {
             iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled)
@@ -159,7 +179,7 @@ mod tests {
         };
         let server = bind().await;
         let router = Router::builder(server.clone())
-            .accept(super::super::UNICAST_ALPN, Hold)
+            .accept(super::super::UNICAST_ALPN, handler)
             .spawn();
         let client = bind().await;
         lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
@@ -629,44 +649,39 @@ mod tests {
     }
 
     /// A send to a peer that reads nothing ends. The peer accepts the connection, never accepts a stream and keeps
-    /// the connection alive, so every finished stream stays open: once its limit of streams is full, `open_uni`
-    /// waits. Each send sits in a task of its own, so a wait without a bound grows the tasks of the node for as
-    /// long as the peer answers nothing.
+    /// the connection alive, so no stream gets its acknowledgement: the send ends with the deadline of a send, and
+    /// not with a wait without a bound. Each send sits in a task of its own, so a wait without a bound grows the
+    /// tasks of the node for as long as the peer answers nothing.
     #[test]
     fn a_send_to_a_peer_that_reads_nothing_ends_within_its_budget() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(600)).await;
+            use iroh::endpoint::Connection;
+            use iroh::protocol::{AcceptError, ProtocolHandler};
+
+            #[derive(Debug, Clone, Copy)]
+            struct Mute;
+            impl ProtocolHandler for Mute {
+                async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                    connection.closed().await;
+                    Ok(())
+                }
+            }
+            let (pool, server, router, client) = pool_serving(Duration::from_secs(600), Mute).await;
             let connection = pool.warm_or_dial(server).await.expect("dial");
 
-            let fills_the_streams_of_the_peer = async {
-                let mut sent = 0u32;
-                for _ in 0..4096u32 {
-                    match super::unicast_pool::send_one(&connection, b"frame", None, None).await {
-                        Ok(()) => sent += 1,
-                        Err(error) => return (sent, Some(error.to_string())),
-                    }
-                }
-                (sent, None)
-            };
             let ended = time::timeout(
-                super::timeouts::SEND_TIMEOUT * 3,
-                fills_the_streams_of_the_peer,
+                super::timeouts::SEND_TIMEOUT * 2,
+                super::unicast_pool::send_one(&connection, b"frame", None, None),
             )
             .await;
 
-            let (sent, refusal) = ended.expect(
-                "a send to a peer that reads nothing is still waiting, so the wait of a send has no bound",
-            );
-            let refusal: String = refusal.expect(
-                "4096 sends never filled the streams of the peer, so the wait of a send has no bound to prove",
-            );
-            assert!(
-                sent > 0,
-                "the first send already failed with \"{refusal}\", so the refusal below is not the one of a full peer"
-            );
+            let refusal: String = ended
+                .expect("a send to a peer that reads nothing is still waiting, so the wait of a send has no bound")
+                .expect_err("a peer that reads nothing acknowledges nothing")
+                .to_string();
             assert!(
                 refusal.contains(super::timeouts::SEND_TIMED_OUT),
-                "the send of the frame number {sent} ended with \"{refusal}\", which is not the deadline of a send"
+                "the send ended with \"{refusal}\", which is not the deadline of a send"
             );
             router.shutdown().await.expect("shutdown");
             client.close().await;
@@ -905,9 +920,10 @@ mod tests {
         struct Collect(mpsc::UnboundedSender<Vec<u8>>);
         impl ProtocolHandler for Collect {
             async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                while let Ok(mut stream) = connection.accept_uni().await {
+                while let Ok((mut acknowledgement, mut stream)) = connection.accept_bi().await {
                     if let Ok(frame) = stream.read_to_end(64 * 1024).await {
                         let _ = self.0.send(frame);
+                        let _ = acknowledgement.finish();
                     }
                 }
                 Ok(())
@@ -1788,12 +1804,12 @@ mod tests {
         );
     }
 
-    /// **The busy mark lasts until the peer has read the frame.** `finish()` returns while the frame
-    /// is still in flight, so a mark that ended there left a connection with a slow reader open to
-    /// eviction, with its frame in the air. The mark now ends when the peer has read the stream to the
-    /// end, or after 2 s.
+    /// **The busy mark lasts until the peer has acknowledged the frame.** `finish()` returns while
+    /// the frame is still in flight, so a mark that ended there left a connection with a slow reader
+    /// open to eviction, with its frame in the air. The send holds the mark until the peer took the
+    /// frame, and the send ends then.
     #[test]
-    fn a_send_keeps_its_connection_busy_until_the_peer_has_read_the_frame() {
+    fn a_send_keeps_its_connection_busy_until_the_peer_has_acknowledged_the_frame() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,
@@ -1809,12 +1825,13 @@ mod tests {
                         &self,
                         connection: endpoint::Connection,
                     ) -> Result<(), AcceptError> {
-                        let mut stream = connection
-                            .accept_uni()
+                        let (mut acknowledgement, mut stream) = connection
+                            .accept_bi()
                             .await
                             .map_err(AcceptError::from_err)?;
                         time::sleep(Duration::from_millis(800)).await;
                         let _ = stream.read_to_end(1 << 20).await;
+                        let _ = acknowledgement.finish();
                         connection.closed().await;
                         Ok(())
                     }
@@ -1840,23 +1857,31 @@ mod tests {
                 let pool = super::UnicastPool::new(node.clone(), true);
                 pool.set_admission(admission.clone());
 
-                pool.dial_and_send(server.id(), bytes::Bytes::from(vec![7u8; 3000]))
-                    .await
-                    .expect("the send");
-                assert!(
-                    admission.is_busy(server.id()),
-                    "the frame is in flight: the peer has not read it"
-                );
-
-                let mut idle = false;
-                for _ in 0..60 {
-                    if !admission.is_busy(server.id()) {
-                        idle = true;
-                        break;
-                    }
+                let sending = {
+                    let pool = pool.clone();
+                    let id = server.id();
+                    task::spawn(async move {
+                        pool.dial_and_send(id, bytes::Bytes::from(vec![7u8; 3000]))
+                            .await
+                    })
+                };
+                let mut busy = false;
+                for _ in 0..8 {
+                    busy |= admission.is_busy(server.id());
                     time::sleep(Duration::from_millis(50)).await;
                 }
-                assert!(idle, "the mark ends once the peer has read the frame");
+                assert!(
+                    busy,
+                    "the frame is in flight: the peer has not read it, so it has not acknowledged it"
+                );
+                sending
+                    .await
+                    .expect("the send task")
+                    .expect("the peer acknowledged the frame");
+                assert!(
+                    !admission.is_busy(server.id()),
+                    "the mark ends with the acknowledgement"
+                );
 
                 router.shutdown().await.expect("shutdown");
                 node.close().await;

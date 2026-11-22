@@ -374,9 +374,9 @@ pub(super) async fn send_unicast(
 ) -> Result<Delivered> {
     let warm = pool.send_if_warm(eid, bytes.clone().into_bytes()).await;
     match warm {
-        WarmSend::Sent => Ok(Delivered::Done),
+        WarmSend::Sent(outcome) => Ok(Delivered::Pending(outcome)),
         WarmSend::Cold | WarmSend::Refused => {
-            if warm == WarmSend::Cold && pool.is_cooling(eid).await {
+            if matches!(warm, WarmSend::Cold) && pool.is_cooling(eid).await {
                 return Err(anyhow::anyhow!("{COOLDOWN_REFUSED}")
                     .context(format!("unicast dial to {eid} failed")));
             }
@@ -441,7 +441,7 @@ async fn send_courtesy(
         .send_if_warm(eid, bytes.clone().into_bytes())
         .await
     {
-        WarmSend::Sent => true,
+        WarmSend::Sent(_) => true,
         WarmSend::Cold if dial_back || state.linked_endpoints.contains(&eid) => {
             state
                 .unicast_pool

@@ -26,6 +26,9 @@ use std::fmt;
 /// that opens a stream and never stops writing.
 const MAX_UNICAST_FRAME: usize = MAX_MESSAGE_SIZE + 256;
 
+/// The code that resets the acknowledgement side of a stream whose frame the loop did not take.
+pub(crate) const NOT_TAKEN: u8 = 1;
+
 /// One frame that a peer sent on a unidirectional stream, and the endpoint of the connection that
 /// carried it. The connection is authenticated, so `from` is the peer that opened the stream.
 #[derive(Debug, Clone)]
@@ -90,12 +93,13 @@ impl UnicastAcceptor {
 
 impl UnicastAcceptor {
     /// Forward one frame read outcome to the event loop. Split out of
-    /// `accept` so the match arms aren't nested inside its `while let`.
+    /// `accept` so the match arms aren't nested inside its `while let`. It says whether the
+    /// loop took the frame: only then does the sender get its acknowledgement.
     fn handle_frame<Error: fmt::Display>(
         &self,
         from: iroh::EndpointId,
         result: Result<Vec<u8>, Error>,
-    ) {
+    ) -> bool {
         match result {
             Ok(bytes) => {
                 // Bounded, non-blocking: a flooding peer can't back-pressure
@@ -106,12 +110,15 @@ impl UnicastAcceptor {
                 };
                 if self.tx.try_send(frame).is_err() {
                     tracing::debug!(target: LOG_TARGET, "unicast inbox full or closed; frame dropped");
+                    false
                 } else {
                     tracing::debug!(target: LOG_TARGET, "unicast frame accepted");
+                    true
                 }
             }
             Err(error) => {
                 tracing::debug!(target: LOG_TARGET, %error, "unicast frame read failed");
+                false
             }
         }
     }
@@ -131,19 +138,26 @@ impl ProtocolHandler for UnicastAcceptor {
         {
             return Ok(());
         }
-        // Each accepted uni-stream carries exactly one message; loop until the
-        // peer closes the connection (`accept_uni` errors), or nothing arrives
-        // for the idle timeout.
+        // Each accepted bidirectional stream carries exactly one message, and the acknowledgement
+        // goes back on the same stream; loop until the peer closes the connection (`accept_bi`
+        // errors), or nothing arrives for the idle timeout.
         loop {
             let idle = self.idle_for(connection.remote_id());
-            match n0future_time::timeout(idle, connection.accept_uni()).await {
-                Ok(Ok(mut recv)) => {
+            match n0future_time::timeout(idle, connection.accept_bi()).await {
+                Ok(Ok((mut acknowledgement, mut recv))) => {
                     let admission = self.admission.as_ref();
                     let _busy = admission.map(|table| table.busy(connection.remote_id()));
-                    self.handle_frame(
+                    let taken = self.handle_frame(
                         connection.remote_id(),
                         recv.read_to_end(MAX_UNICAST_FRAME).await,
                     );
+                    // The end of the stream is the acknowledgement, and only a frame that the loop
+                    // took gets one: a reset tells the sender that the frame was not taken.
+                    if taken {
+                        let _ = acknowledgement.finish();
+                    } else {
+                        let _ = acknowledgement.reset(NOT_TAKEN.into());
+                    }
                 }
                 Ok(Err(_closed)) => break,
                 Err(_idle) => {
@@ -169,9 +183,11 @@ mod tests {
     use super::{
         DIRECT_IDLE_BACKSTOP, EXTRA_IDLE, IDLE, PayloadPath, UnicastAcceptor, UnicastFrame, mpsc,
     };
+    use crate::transport::UnicastPool;
     use crate::{lookup, testing};
     use iroh::endpoint::presets;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
     use tokio::sync::Notify;
     use tokio::{task, time, time as tokio_time};
@@ -363,7 +379,7 @@ mod tests {
             tokio_time::pause();
 
             advance_secs(5).await;
-            let mut stream = connection.open_uni().await.expect("open a stream");
+            let (mut stream, _acknowledgement) = connection.open_bi().await.expect("open a stream");
             stream.write_all(b"frame").await.expect("write");
             stream.finish().expect("finish");
             // Real I/O carries the frame to the acceptor: yield until it lands.
@@ -401,5 +417,189 @@ mod tests {
             DIRECT_IDLE_BACKSTOP,
             "an idle acceptor connection is closed after the one backstop"
         );
+    }
+
+    /// A handler that runs the acceptor for every connection but the first. It holds the first
+    /// one without reading a stream until the test says that the peer evicted it, and then closes it.
+    #[derive(Debug, Clone)]
+    struct EvictFirst {
+        inner: UnicastAcceptor,
+        // Shared by every clone of the handler, one for each connection.
+        first: Arc<AtomicBool>,
+        // Shared by the test, which waits for the eviction, and the handler.
+        evict: Arc<Notify>,
+    }
+
+    impl ProtocolHandler for EvictFirst {
+        async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+            if self.first.swap(false, Ordering::SeqCst) {
+                self.evict.notified().await;
+                connection.close(0u32.into(), b"evicted");
+                return Ok(());
+            }
+            self.inner.accept(connection).await
+        }
+    }
+
+    /// The frames that the loop got, after the sends ended.
+    async fn frames_taken(frames: &mut mpsc::Receiver<UnicastFrame>) -> usize {
+        time::sleep(Duration::from_secs(1)).await;
+        let mut taken = 0;
+        while frames.try_recv().is_ok() {
+            taken += 1;
+        }
+        taken
+    }
+
+    /// Send one frame to a peer that evicts the first connection before it reads the stream, and
+    /// say how the send ended and how many frames the loop of the peer got. A warm send finds the
+    /// connection in the pool; a cold send dials it through a registration, as `deliver` does.
+    async fn send_to_a_peer_that_evicts(warm: bool) -> (anyhow::Result<()>, usize) {
+        let (tx, mut frames) = mpsc::channel(8);
+        // Shared by the test, which waits for the eviction, and the handler.
+        let evict = Arc::new(Notify::new());
+        let handler = EvictFirst {
+            inner: UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+            // Shared by every clone of the handler, one for each connection.
+            first: Arc::new(AtomicBool::new(true)),
+            evict: Arc::clone(&evict),
+        };
+        let bind = || async {
+            iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint")
+        };
+        let server = bind().await;
+        let router = Router::builder(server.clone())
+            .accept(UNICAST_ALPN, handler)
+            .spawn();
+        let client = bind().await;
+        lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
+        let pool = UnicastPool::new(client.clone(), true);
+        if warm {
+            pool.warm_or_dial(server.id())
+                .await
+                .expect("a warm connection");
+        }
+
+        let sending = {
+            let pool = pool.clone();
+            let id = server.id();
+            task::spawn(async move {
+                let frame = bytes::Bytes::from_static(b"frame");
+                if warm {
+                    pool.dial_or_warm_send(id, frame).await
+                } else {
+                    pool.send_registered(pool.register_dial(id), id, frame)
+                        .await
+                }
+            })
+        };
+        // The frame is written and finished by now, and the peer has read nothing.
+        time::sleep(Duration::from_millis(300)).await;
+        evict.notify_one();
+        // The second send takes its own registration while the first one is still held: it must not
+        // wait for the dial of the first.
+        let verdict = time::timeout(Duration::from_secs(10), sending)
+            .await
+            .expect("the send ends: it does not wait on its own dial")
+            .expect("the send task");
+
+        let taken = frames_taken(&mut frames).await;
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+        (verdict, taken)
+    }
+
+    /// **A send that answers ok was taken by the loop of the peer.** A frame is written on a warm
+    /// connection, and the peer closes the connection (an eviction at its ceiling) before it reads
+    /// the stream. The send must not answer ok with no frame at the peer: the connection is lost, the
+    /// send goes again on a new connection, and the loop gets the frame exactly 1 time.
+    #[test]
+    fn a_send_that_answers_ok_was_taken_by_the_loop_of_the_peer_also_when_the_peer_evicts_the_connection()
+     {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (verdict, taken) = send_to_a_peer_that_evicts(true).await;
+            assert!(
+                verdict.is_ok(),
+                "the peer is there, so the send on a new connection ends ok: {verdict:?}"
+            );
+            assert_eq!(
+                taken, 1,
+                "the send answered ok and the loop of the peer got {taken} frames"
+            );
+        });
+    }
+
+    /// **The same on the cold path**, which every directed send takes at the ceiling: no warm
+    /// connection, the send dials through a registration, and the peer evicts the connection that
+    /// the dial made. The send goes again through a second registration and the loop gets the frame
+    /// exactly 1 time.
+    #[test]
+    fn a_cold_send_that_answers_ok_was_taken_by_the_loop_of_the_peer_also_when_the_peer_evicts_the_connection()
+     {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (verdict, taken) = send_to_a_peer_that_evicts(false).await;
+            assert!(
+                verdict.is_ok(),
+                "the peer is there, so the send on a new connection ends ok: {verdict:?}"
+            );
+            assert_eq!(
+                taken, 1,
+                "the send answered ok and the loop of the peer got {taken} frames"
+            );
+        });
+    }
+
+    /// **A frame that the loop did not take is not acknowledged.** The inbox of the peer is full,
+    /// so the acceptor drops the frame. The send ends with an error, and never with ok.
+    #[test]
+    fn a_send_to_a_peer_whose_inbox_is_full_ends_with_an_error() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (tx, mut frames) = mpsc::channel(1);
+            tx.try_send(UnicastFrame {
+                from: testing::endpoint_id(1),
+                bytes: bytes::Bytes::from_static(b"fills the inbox"),
+            })
+            .expect("fill the inbox");
+            let handler = UnicastAcceptor::new(tx, PayloadPath::RelayAllowed);
+            let bind = || async {
+                iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind a loopback endpoint")
+            };
+            let server = bind().await;
+            let router = Router::builder(server.clone())
+                .accept(UNICAST_ALPN, handler)
+                .spawn();
+            let client = bind().await;
+            lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
+            let pool = UnicastPool::new(client.clone(), true);
+            pool.warm_or_dial(server.id())
+                .await
+                .expect("a warm connection");
+
+            let verdict = pool
+                .dial_or_warm_send(server.id(), bytes::Bytes::from_static(b"frame"))
+                .await;
+
+            let taken = frames_taken(&mut frames).await;
+            assert_eq!(taken, 1, "only the frame that filled the inbox is in it");
+            assert!(
+                verdict.is_err(),
+                "the send answered ok for a frame that the loop did not take"
+            );
+            assert!(
+                pool.connection(server.id()).is_some(),
+                "a peer that said no is there: its connection stays and no second send follows"
+            );
+
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
     }
 }

@@ -8694,6 +8694,66 @@ mod repeat_tests {
             endpoint.close().await;
         });
     }
+
+    #[test]
+    fn a_directed_frame_that_arrives_twice_by_unicast_reaches_the_app_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mesh = MeshId::from("test");
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(proto::TopicId::from_bytes([5u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let sender = MeshSender::new(gossip_sender);
+            let identity = Identity::generate();
+            let peer = Identity::generate();
+            let reader_nick = nick("reader");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &reader_nick,
+                identity: &identity,
+                our_pubkey: identity.author_key(),
+                max_connections: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let chat = Message::new_app(
+                &mesh,
+                &nick("peer"),
+                AppFrameParams::new(
+                    AppTag::try_new("app_msg").expect("a valid app tag"),
+                    Some(identity.author_key()),
+                    None,
+                    MessageBody::from("\"hello\""),
+                ),
+            )
+            .sign(&peer);
+            let bytes = chat.serialize().expect("serialize").into_bytes();
+            let mut state = fresh_state();
+            // The copy of a frame whose acknowledgement was lost comes on the unicast plane.
+            state.unicast_arrival = Some(endpoint_id(3));
+            // Shared with the app, which counts the frames it is handed.
+            let surfaced = Arc::new(Mutex::new(0));
+            let mut app = Counting(Arc::clone(&surfaced));
+            super::ingest(bytes.clone(), &mut state, &mut app, &context).await;
+            super::ingest(bytes, &mut state, &mut app, &context).await;
+            let count = *surfaced.lock().expect("the counter lock");
+            assert_eq!(
+                count, 1,
+                "a directed frame that comes twice must reach the app once, got {count}"
+            );
+            endpoint.close().await;
+        });
+    }
 }
 
 #[cfg(test)]

@@ -533,8 +533,10 @@ mod tests {
                     .expect("an incoming connection")
                     .await
                     .expect("accept the connection");
-                let mut stream = connection.accept_uni().await.expect("a uni stream");
+                let (mut acknowledgement, mut stream) =
+                    connection.accept_bi().await.expect("a stream");
                 let bytes = stream.read_to_end(64 * 1024).await.expect("read the frame");
+                acknowledgement.finish().expect("acknowledge");
                 (bytes, bob_endpoint, connection)
             });
             let connection = state
@@ -579,9 +581,10 @@ mod tests {
 
     impl ProtocolHandler for Collect {
         async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-            while let Ok(mut stream) = connection.accept_uni().await {
+            while let Ok((mut acknowledgement, mut stream)) = connection.accept_bi().await {
                 if let Ok(bytes) = stream.read_to_end(64 * 1024).await {
                     let _ = self.0.send(bytes);
+                    let _ = acknowledgement.finish();
                 }
             }
             Ok(())
