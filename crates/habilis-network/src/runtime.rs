@@ -14,6 +14,10 @@ pub use crate::daemon::params::{
     CreateParams, JoinParams, Resolved, TopicParams, derive_topic_mesh, derive_topic_mesh_config,
     derive_topic_mesh_with,
 };
+#[cfg(all(unix, feature = "host"))]
+pub use crate::daemon::registry::{
+    DaemonRecord, DaemonState, FreeGuard, daemon_lock_path, read_record, registry, wait_daemon_lock,
+};
 pub use crate::daemon::setup::{
     BROWSER_HAS_NO_PATH, BROWSER_NEEDS_RELAY_LOOKUP, InjectedEndpoint, LiveCount, SetupKind,
     SetupParams, refuse_in_browser, setup_mesh,

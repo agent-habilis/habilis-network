@@ -1050,56 +1050,66 @@ fn try_lock(lock: &File, lock_path: &Path) -> Result<bool> {
     }
 }
 
-/// The lock file of the daemon of a nickname on a mesh: `<runtime base>/locks/<mesh folder>-<nickname>.lock`. It
-/// lives in a folder of its own, outside the mesh folder, and nothing removes it: a lock file that is removed
-/// leaves a race between a start that holds the old file and a start that makes a new one, and a lock file in the
-/// mesh folder would keep the folder from a sweep of empty folders. The file stays until the runtime base goes.
-#[cfg(all(unix, feature = "host"))]
-fn daemon_lock_path(base: &Path, mesh: &MeshId, author: &Nickname) -> PathBuf {
-    use crate::util;
-    base.join("locks").join(format!(
-        "{}-{author}.lock",
-        util::mesh_prefix(mesh.as_str())
-    ))
-}
-
-/// Take the lock of the one live daemon of a nickname on a mesh in a runtime base, before the run opens a file
-/// of the mesh folder. The chunk folder, the control socket and the tracing log are named by the mesh and the
-/// nickname alone, so two daemons of one pair, with two state files, would clear the files of each other.
-/// A lock on the state file does not keep them apart: each has its own. The rules of the key lock hold: an OS lock
-/// on the descriptor, so the lock goes with the process; a held lock is tried again for `KEY_LOCK_RETRY`, because a
-/// restart right after a leave meets the old daemon while it stops; after that the start fails and names the holder.
-/// The holder writes its pid into the file, for that message. No runtime base means no files to protect.
+/// Take the lock of the one live daemon of a nickname on a mesh in a runtime base, and write the record of the
+/// daemon into the lock file (see [`registry`](super::registry)). The run takes it before it creates its state
+/// file or binds its socket, and holds it to its end. The chunk folder, the control socket and the tracing log are
+/// named by the mesh and the nickname alone, so two daemons of one pair, with two state files, would clear the files
+/// of each other; a lock on the state file does not keep them apart, as each has its own. The lock file stays in the
+/// locks folder when the run ends, and nothing removes it: a lock file that is removed leaves a race between a start
+/// that holds the old file and a start that makes a new one. An OS lock on the descriptor goes with the process, and a
+/// held lock is tried again for `KEY_LOCK_RETRY`, because a restart right after a leave meets the old daemon while it
+/// stops; after that the start fails and names the holder. `state_file` is the state file of the run, or `None`
+/// for a run with no state file of its own: the record then names the default state path of the pair. No runtime
+/// base means no files to protect.
 /// # Errors
-/// The folder or the lock file cannot be used, or another daemon holds the lock.
+/// The folder or the lock file cannot be used, the start of this process cannot be read, or another daemon holds
+/// the lock.
 #[cfg(all(unix, feature = "host"))]
 pub(crate) async fn hold_daemon_lock(
     base: Option<&Path>,
     mesh: &MeshId,
     author: &Nickname,
+    state_file: Option<&Path>,
 ) -> Result<Option<File>> {
+    use super::registry::{self, DaemonRecord};
     use crate::util;
+    use crate::util::process;
+    use crate::util::process_start::ProcessStart;
     use std::io::Write as _;
-    use std::{fs, process};
+    use std::{path, process as std_process};
     let Some(base) = base else {
         return Ok(None);
     };
-    let lock_path = daemon_lock_path(base, mesh, author);
+    let lock_path = registry::daemon_lock_path(base, mesh, author);
     util::ensure_parent_private(Some(base), &lock_path)?;
     let mut lock = open_lock(&lock_path)?;
     let give_up = Instant::now() + KEY_LOCK_RETRY;
     while !try_lock(&lock, &lock_path)? {
         if Instant::now() >= give_up {
-            let holder = fs::read_to_string(&lock_path).unwrap_or_default();
+            let holder = registry::read_record(&lock_path).ok().flatten();
+            let pid = holder.map_or_else(|| "unknown".to_owned(), |record| record.pid.to_string());
             anyhow::bail!(
-                "another daemon already runs as {author} on mesh {mesh} in this runtime folder (pid {pid}): use another nickname",
-                pid = holder.trim()
+                "another daemon already runs as {author} on mesh {mesh} in this runtime folder (pid {pid}): use another nickname"
             );
         }
         time::sleep(KEY_LOCK_STEP).await;
     }
+    let pid = std_process::id();
+    let ProcessStart::Live(start) = process::start_of(pid) else {
+        anyhow::bail!("the start of this process (pid {pid}) could not be read");
+    };
+    let state_path =
+        state_file.map_or_else(|| default_state_path(base, mesh, author), Path::to_path_buf);
+    let record = DaemonRecord::new(
+        pid,
+        start,
+        mesh.clone(),
+        author.clone(),
+        path::absolute(state_path)?,
+    );
+    // One truncate and one write under the lock. The file is never replaced: a new file would not carry the lock.
     lock.set_len(0)?;
-    write!(lock, "{}", process::id())?;
+    lock.write_all(record.to_line()?.as_bytes())?;
     Ok(Some(lock))
 }
 
@@ -1110,17 +1120,6 @@ pub(crate) async fn hold_daemon_lock(
 compile_error!(
     "the host feature needs a unix system: the lock of the one live daemon is an OS lock of a file"
 );
-
-/// A build with no host feature (the browser) has no runtime folder, so it has no daemon files to protect.
-#[cfg(not(feature = "host"))]
-pub(crate) fn hold_daemon_lock(
-    _base: Option<&Path>,
-    _mesh: &MeshId,
-    _author: &Nickname,
-) -> impl Future<Output = Result<Option<File>>> {
-    use std::future;
-    future::ready(Ok(None))
-}
 
 /// The error of a start that finds the member key held.
 #[cfg(all(unix, feature = "host"))]

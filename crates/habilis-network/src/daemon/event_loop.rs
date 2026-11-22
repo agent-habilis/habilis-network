@@ -8,6 +8,7 @@
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
 //! `setup`) are siblings under `super`.
 
+#[cfg(feature = "host")]
 use super::setup;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::daemon::state::TestHold;
@@ -19,6 +20,7 @@ use iroh_gossip::net;
 use n0_future::time;
 #[cfg(feature = "host")]
 use serde::de;
+#[cfg(feature = "host")]
 use std::fs::File;
 use std::{future, path, process};
 pub(super) mod ctx_parts;
@@ -139,16 +141,17 @@ async fn run_checked<Driver: NodeDriver>(
     // process on quit and binds the unix socket; in-process drivers
     // (in-process: library API or MCP) take typed requests on `session_rx` instead.
     let exit_on_quit = matches!(runtime.driver, DriverMode::Cli);
+    let owned = OwnedEndpoints::new(endpoints.router, endpoints.endpoint_owner, &transports);
     #[cfg(feature = "host")]
-    let state_file = host_state_file(&app, &mesh, &mut runtime, exit_on_quit);
+    let (named_path, owned, _daemon_lock) = claim_host(&mut runtime, &mesh, owned).await?;
+    #[cfg(feature = "host")]
+    let state_file = host_state_file(&app, &mesh, &mut runtime, exit_on_quit, named_path);
     #[cfg(not(feature = "host"))]
     let state_file = runtime.state_file;
     let (external_quit_rx, external_msg_tx, ipc_listener_disabled, handle_signals) =
         driver_channels(runtime.driver);
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
-    let owned = OwnedEndpoints::new(endpoints.router, endpoints.endpoint_owner, &transports);
-    let (owned, _daemon_lock) = claim_daemon(owned, runtime.runtime_base.as_deref(), &mesh).await?;
     let chunks = open_chunks(runtime.runtime_base.as_deref(), &mesh.mesh, &mesh.author)?;
     let mut state: EventLoopState = initial_state(
         mesh.keys.for_mesh(&mesh.mesh),
@@ -366,19 +369,39 @@ fn keeps_identity(explicit_state_file: bool, has_owner: bool) -> bool {
     explicit_state_file || has_owner
 }
 
-/// The state file of a host daemon, seeded by the app. `None` when there is no file to write: an
-/// in-process session that keeps no file.
+/// What a host daemon claims before it creates a file: the lock of the one live daemon of this nickname on the mesh.
+/// The run holds it until it ends, after it removed its files. Gives the state file that the caller named, if any.
+/// A start that another daemon refuses closes the endpoint that setup bound for it, so that nothing is dropped without
+/// a close.
+#[cfg(feature = "host")]
+async fn claim_host(
+    runtime: &mut RuntimeConfig,
+    mesh: &MeshSpec,
+    owned: OwnedEndpoints,
+) -> Result<(Option<path::PathBuf>, OwnedEndpoints, Option<File>)> {
+    let named_path: Option<path::PathBuf> = runtime.state_file.take();
+    let base = runtime.runtime_base.as_deref();
+    match setup::hold_daemon_lock(base, &mesh.mesh, &mesh.author, named_path.as_deref()).await {
+        Ok(lock) => Ok((named_path, owned, lock)),
+        Err(error) => {
+            owned.close().await;
+            Err(error)
+        }
+    }
+}
+
+/// The state file of a host daemon, seeded by the app: the one that the caller named, or the default path of a CLI
+/// daemon. `None` when there is no file to write: an in-process session that keeps no file.
 #[cfg(feature = "host")]
 fn host_state_file<Driver: NodeDriver>(
     app: &Driver,
     mesh: &MeshSpec,
     runtime: &mut RuntimeConfig,
     exit_on_quit: bool,
+    named_path: Option<path::PathBuf>,
 ) -> Option<StateFile> {
-    let keeps_identity = keeps_identity(runtime.state_file.is_some(), runtime.owner.is_some());
-    let state_file: Option<StateFile> = runtime
-        .state_file
-        .take()
+    let keeps_identity = keeps_identity(named_path.is_some(), runtime.owner.is_some());
+    let state_file: Option<StateFile> = named_path
         .or_else(|| {
             let base = runtime.runtime_base.as_deref()?;
             exit_on_quit.then(|| setup::default_state_path(base, &mesh.mesh, &mesh.author))
@@ -406,23 +429,6 @@ fn leave_label(mesh: &MeshSpec) -> String {
         || format!("#{}", mesh.name),
         |raw_topic| format!("topic {raw_topic}"),
     )
-}
-
-/// The lock of the one live daemon of this nickname on the mesh. The run holds it until it ends, after it removed
-/// its files. A start that another daemon refuses closes the endpoint that setup bound for it, so that nothing is
-/// dropped without a close.
-async fn claim_daemon(
-    owned: OwnedEndpoints,
-    runtime_base: Option<&path::Path>,
-    mesh: &MeshSpec,
-) -> Result<(OwnedEndpoints, Option<File>)> {
-    match setup::hold_daemon_lock(runtime_base, &mesh.mesh, &mesh.author).await {
-        Ok(lock) => Ok((owned, lock)),
-        Err(error) => {
-            owned.close().await;
-            Err(error)
-        }
-    }
 }
 
 /// The chunk store of this run: in the folder of the node under the runtime base, and in memory when there is no
