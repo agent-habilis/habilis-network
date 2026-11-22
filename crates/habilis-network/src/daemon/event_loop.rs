@@ -457,7 +457,10 @@ fn owned_files(
         return OwnedFiles::default();
     };
     let socket = bound_socket.then(|| path::PathBuf::from(ipc::socket_path(base, mesh, author)));
-    OwnedFiles::claim(socket, Some(setup::default_chunks_path(base, mesh, author)))
+    OwnedFiles {
+        socket,
+        chunks: Some(setup::default_chunks_path(base, mesh, author)),
+    }
 }
 
 /// The state file a daemon seeds its state with: a host daemon has one, and a browser keeps its path.

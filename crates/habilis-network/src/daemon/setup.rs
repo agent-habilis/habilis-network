@@ -1097,8 +1097,16 @@ pub(crate) async fn hold_daemon_lock(
     Ok(Some(lock))
 }
 
-/// A target with no files has no daemon files to protect, so it takes no lock.
-#[cfg(not(all(unix, feature = "host")))]
+/// The lock is an OS lock of a file, and the host feature builds on a unix system only (the process
+/// helpers of the util crate call `kill` and read `proc_pidinfo` or `/proc`). A host build on another system is
+/// refused here, so that a daemon with files never starts with no lock.
+#[cfg(all(feature = "host", not(unix)))]
+compile_error!(
+    "the host feature needs a unix system: the lock of the one live daemon is an OS lock of a file"
+);
+
+/// A build with no host feature (the browser) has no runtime folder, so it has no daemon files to protect.
+#[cfg(not(feature = "host"))]
 pub(crate) fn hold_daemon_lock(
     _base: Option<&Path>,
     _mesh: &MeshId,
