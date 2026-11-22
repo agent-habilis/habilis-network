@@ -15,8 +15,6 @@ use std::{time::Duration, time::Instant};
 use tokio::task;
 #[cfg(all(unix, feature = "host"))]
 use tokio::time;
-#[cfg(all(unix, feature = "host"))]
-mod dead_member;
 mod injected_endpoint;
 mod setup_kind;
 mod setup_params;
@@ -61,8 +59,6 @@ use crate::util::{consts, tuning};
 use iroh::address_lookup::memory;
 use iroh::protocol::{Router, Router as iroh_Router};
 
-#[cfg(all(unix, feature = "host"))]
-pub use dead_member::{DeadMember, take_dead_member};
 pub use injected_endpoint::InjectedEndpoint;
 pub use setup_kind::SetupKind;
 pub use setup_params::{LiveCount, SetupParams};
