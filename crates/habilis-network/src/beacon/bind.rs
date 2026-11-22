@@ -11,6 +11,20 @@ use super::{
 };
 
 use crate::{lookup, transport};
+/// The transports of the beacon of a public rendezvous. It carries a `WebRTC` handle, so the handles do not
+/// tell that it is the beacon, and the role says it: only the beacon publishes the rendezvous to the DHT.
+fn public_beacon_handles(
+    webrtc: &habilis_network_iroh_webrtc_transport::WebRtcHandle,
+    admission: &transport::SignalAdmission,
+) -> TransportHandles {
+    TransportHandles {
+        webrtc: Some(webrtc.clone()),
+        admission: Some(admission.clone()),
+        role: EndpointRole::Beacon,
+        ..TransportHandles::default()
+    }
+}
+
 /// Build the rendezvous endpoint (see module docs for the one-beacon /
 /// claim-if-free / identity-probe rationale). Public: one
 /// ephemeral-port endpoint. Private: bind the first **free** ladder
@@ -40,12 +54,7 @@ pub(crate) async fn build_rendezvous_endpoint(
         // Made before the endpoint: the endpoint reports its connections to it
         // from the first handshake on.
         let admission = transport::SignalAdmission::new(tuning::MAX_CONNECTIONS);
-        let transport_handles = TransportHandles {
-            webrtc: Some(webrtc.clone()),
-            admission: Some(admission.clone()),
-            role: EndpointRole::Beacon,
-            ..TransportHandles::default()
-        };
+        let transport_handles = public_beacon_handles(&webrtc, &admission);
         let endpoint = build_endpoint(
             &lookups,
             Some(params.secret.clone()),
@@ -137,5 +146,32 @@ pub(crate) async fn build_rendezvous_endpoint(
         Walk::Nothing
     } else {
         Walk::NoRung
+    }
+}
+
+#[cfg(all(test, feature = "host"))]
+mod tests {
+    use iroh::SecretKey;
+
+    use super::public_beacon_handles;
+    use crate::lookup::{self, EndpointRole};
+    use crate::transport;
+    use crate::util::tuning;
+
+    /// The beacon of a public rendezvous carries a `WebRTC` handle and is the beacon still: a role that
+    /// the handles do not give is lost, and then the DHT publish does not run on the public path.
+    #[test]
+    fn the_beacon_of_a_public_rendezvous_has_the_beacon_role() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let webrtc = lookup::build_webrtc_handle(SecretKey::generate().public());
+        let admission = transport::SignalAdmission::new(tuning::MAX_CONNECTIONS);
+
+        let handles = public_beacon_handles(&webrtc, &admission);
+
+        assert_eq!(handles.role, EndpointRole::Beacon);
+        assert!(
+            handles.webrtc.is_some(),
+            "it still carries the WebRTC handle"
+        );
     }
 }
