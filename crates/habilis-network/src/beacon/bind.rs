@@ -153,7 +153,6 @@ pub(crate) async fn build_rendezvous_endpoint(
 mod tests {
     use iroh::SecretKey;
 
-    use super::public_beacon_handles;
     use crate::lookup::{self, EndpointRole};
     use crate::transport;
     use crate::util::tuning;
@@ -166,9 +165,13 @@ mod tests {
         let webrtc = lookup::build_webrtc_handle(SecretKey::generate().public());
         let admission = transport::SignalAdmission::new(tuning::MAX_CONNECTIONS);
 
-        let handles = public_beacon_handles(&webrtc, &admission);
+        let handles = super::public_beacon_handles(&webrtc, &admission);
 
-        assert_eq!(handles.role, EndpointRole::Beacon);
+        assert_eq!(
+            handles.role,
+            EndpointRole::Beacon,
+            "the public beacon has the beacon role, whatever transports it carries"
+        );
         assert!(
             handles.webrtc.is_some(),
             "it still carries the WebRTC handle"
