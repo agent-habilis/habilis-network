@@ -185,9 +185,6 @@ habilis-network-protocol = { path = "../habilis-network-protocol", default-featu
 # `MultihopHandle::refuse_hop_for_test`: the event loop's test makes the gate refuse a hop.
 habilis-network-iroh-multihop-transport = { workspace = true, features = ["test-hooks"] }
 habilis-network-iroh-gossip-transport = { workspace = true, features = ["test-fixtures"] }
-# The local DHT that the test of the DHT lookup publishes to and resolves from, in place of the mainline network.
-# The same version as the one that `iroh-mainline-address-lookup` uses, so the graph holds one copy.
-n0-mainline = "=0.5.0"
 
 # The WebRTC lane is not optional: it is the browser's only way onto the mesh.
 # Only the backend differs by target — str0m natively, the platform's own
@@ -240,6 +237,9 @@ proptest.workspace = true
 insta.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 divan.workspace = true
+# The local DHT that the test of the DHT lookup publishes to and resolves from, in place of the mainline network.
+# The same version as the one that `iroh-mainline-address-lookup` uses, so the graph holds one copy.
+n0-mainline = "=0.5.0"
 # The `mesh_peer` example installs its own subscriber. The engine takes
 # tracing-subscriber only through `habilis-network-logging`, and only under `host`.
 tracing-subscriber.workspace = true
