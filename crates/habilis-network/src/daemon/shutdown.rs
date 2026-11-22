@@ -33,6 +33,8 @@ use crate::util::tuning;
 
 #[cfg(feature = "host")]
 use crate::util::process;
+#[cfg(feature = "host")]
+use crate::util::process_start::ProcessStart;
 use n0_future::time as n0future_time;
 #[cfg(feature = "host")]
 use std::process as std_process;
@@ -190,7 +192,14 @@ fn owner_start(pid: u32) -> Result<u64, OwnerPidError> {
     if pid == std_process::id() {
         return Err(OwnerPidError::OwnSelf(pid));
     }
-    process::live_start_time(pid).ok_or(OwnerPidError::NotRunning(pid))
+    let start = process::start_of(pid);
+    if let ProcessStart::Live(start) = start {
+        return Ok(start);
+    }
+    if let ProcessStart::Unknown(error) = start {
+        return Err(OwnerPidError::Unreadable(pid, error.kind()));
+    }
+    Err(OwnerPidError::NotRunning(pid))
 }
 /// Detect orphaning by the spawning agent and route it through the same quit
 /// channel as a signal. A hard-killed parent (`kill -9`, a reinstall, an IDE

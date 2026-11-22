@@ -119,6 +119,8 @@ pub mod util {
     pub use habilis_network_util::line_read;
     #[cfg(feature = "host")]
     pub use habilis_network_util::process;
+    #[cfg(feature = "host")]
+    pub use habilis_network_util::process_start;
 
     /// Deferred `tracing` sink and the pinned directive filter.
     pub mod logging {
