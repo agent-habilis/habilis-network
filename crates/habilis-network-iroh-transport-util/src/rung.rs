@@ -51,8 +51,9 @@ where
     Paths: Iterator<Item = &'a PathSelectionData<'a>> + Clone,
 {
     let best = lowest_rtt(iter.clone())?;
-    let mut rest = iter;
-    let kept = current.and_then(|current| rest.find(|path| path.network_path() == current));
+    // One network path can be listed more than once: the current path is read at its best instance.
+    let kept =
+        current.and_then(|current| lowest_rtt(iter.filter(|path| path.network_path() == current)));
     match kept {
         Some(kept) if stays(kept, best) => Some(kept),
         Some(_) | None => Some(best),
@@ -718,6 +719,27 @@ mod tests {
             kept,
             Some(&slow),
             "1 ms of gain does not move the selection"
+        );
+    }
+
+    /// One network path can appear twice in the list (two connections to the same peer, or two path ids). The
+    /// current path is read at its best instance: the slow one that comes first does not make it lose.
+    #[test]
+    fn the_current_path_is_read_at_its_best_instance() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (current, other) = (ip(1), ip(2));
+        let paths = [
+            candidate(&current, Some(30)),
+            candidate(&current, Some(10)),
+            candidate(&other, Some(9)),
+        ];
+
+        let kept = chosen(Some(&current), &paths);
+
+        assert_eq!(
+            kept,
+            Some(&current),
+            "the current path at 10 ms is 1 ms behind the other path, so it stays"
         );
     }
 
