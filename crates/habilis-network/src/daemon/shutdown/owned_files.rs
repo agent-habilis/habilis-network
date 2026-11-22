@@ -1,11 +1,13 @@
 //! The files that a run makes under the runtime base and that nobody else owns.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use std::{fs, io};
 
-/// The device and the inode of a file: what tells the file that a run made from a file that a later run
-/// made at the same path.
-type FileId = (u64, u64);
+/// The device, the inode and the creation time of a file: what tells the file that a run made from a file
+/// that a later run made at the same path. A file system can give the inode of a file that is gone to the
+/// next file in the folder, and then the creation time tells them apart.
+type FileId = (u64, u64, SystemTime);
 
 /// The control socket that a run bound and the chunk folder of its store. A clean end of the run
 /// removes both, so a run does not leave its files behind: the socket is of no use once the process is
@@ -22,8 +24,9 @@ pub(in crate::daemon) struct OwnedFiles {
 }
 
 impl OwnedFiles {
-    /// The files that this run made, with the identity that they have now. A path with no file yet has
-    /// no identity, and the run then proves no claim on it: it removes nothing there.
+    /// The files that this run made, with the identity that they have now. Both files must exist before
+    /// the claim: a path with no file yet has no identity, and the run then proves no claim on it and
+    /// removes nothing there, with no error.
     #[cfg(feature = "host")]
     pub(in crate::daemon) fn claim(socket: Option<PathBuf>, chunks: Option<PathBuf>) -> Self {
         let socket_id = socket.as_deref().and_then(file_id);
@@ -58,7 +61,9 @@ impl OwnedFiles {
 fn file_id(path: &Path) -> Option<FileId> {
     use std::os::unix::fs::MetadataExt as _;
     let metadata = fs::symlink_metadata(path).ok()?;
-    Some((metadata.dev(), metadata.ino()))
+    // Where the system gives no creation time, the run claims nothing.
+    let created = metadata.created().ok()?;
+    Some((metadata.dev(), metadata.ino(), created))
 }
 
 #[cfg(not(unix))]
@@ -84,6 +89,7 @@ fn note_failure(path: &Path, result: io::Result<()>) {
 #[cfg(all(test, unix))]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
     use std::{env, fs, process};
 
     use super::OwnedFiles;
@@ -179,6 +185,26 @@ mod tests {
             chunks.join("cd").exists(),
             "the chunk folder of the later run stays"
         );
+    }
+
+    /// A file system can give the inode of a file that is gone to the next file in the folder, so the
+    /// device and the inode alone can name a later run's file as this run's. The creation time is part of
+    /// the identity too: a file with the same inode and another creation time is another file.
+    #[test]
+    fn a_file_with_the_same_inode_and_another_creation_time_is_another_file() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let dir = TempDir::new("owned-files-same-inode");
+        let socket = dir.path().join("swift-cedar.ipc.sock");
+        fs::write(&socket, b"later").expect("the socket of the later run");
+        let mut run = OwnedFiles::claim(Some(socket.clone()), None);
+        // The run recorded the creation time of another file that had this inode before.
+        run.socket_id = run
+            .socket_id
+            .map(|(device, inode, created)| (device, inode, created - Duration::from_secs(60)));
+
+        run.remove();
+
+        assert!(socket.exists(), "a file with another creation time stays");
     }
 
     /// A run that bound no socket and opened no folder owns nothing, and a second removal of the
