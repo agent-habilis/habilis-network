@@ -62,6 +62,7 @@ mod link_metric;
 mod multihop_ladder;
 mod multihop_lookup;
 mod multihop_transport;
+mod next_hop;
 mod preset;
 mod route;
 #[cfg(test)]
@@ -69,6 +70,7 @@ mod test_support;
 mod topology;
 mod underlay;
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -113,6 +115,7 @@ pub use topology::{LinkVector, Topology, TopologyEdge, TopologyView};
 use crate::multihop_ladder::MultihopLadder;
 use crate::multihop_lookup::{MultihopLookup, RouteChooser};
 use crate::multihop_transport::{MultihopTransport, Shared};
+use crate::next_hop::NextHop;
 use crate::route::Route as RouteInner;
 use crate::underlay::{ForwardAcceptor, Forwarder};
 use tokio::sync::Notify;
@@ -434,6 +437,19 @@ impl MultihopHandle {
         let chosen = self.inner.chooser.choose(dst)?;
         tracing::debug!(target: "habilis_lookup", me = %self.inner.self_id.fmt_short(), remote = %dst.fmt_short(), first_hop_skipped = chosen.skipped, hops = %chosen.route.describe(), "multihop route chosen (route_addr)");
         Some(chosen.route.encode())
+    }
+
+    /// Whether the table of this node has a way to `dst`: a neighbor of this node that has a path to `dst` in the
+    /// vectors that it holds. It reads the table only. The gate is not read: a hop is refused for a moment at the
+    /// start of each writer, and a pinned connection must live through that moment.
+    ///
+    /// # Panics
+    /// If the routing-table lock is poisoned by a panic in another thread.
+    #[must_use]
+    pub fn has_route_in_table(&self, dst: AppId) -> bool {
+        let topology = self.inner.topology.read().expect("topology lock poisoned");
+        let next = topology.next_hop(self.inner.self_id, dst, &HashSet::new());
+        matches!(next, NextHop::Forward(_))
     }
 
     /// The application ids of the hops of the route that [`route_addr`](Self::route_addr) gives for
@@ -1060,6 +1076,43 @@ mod tests {
                 first_hop_of(&handle, dst),
                 short,
                 "the shorter route is chosen while its first hop is not refused"
+            );
+        });
+    }
+
+    /// The table has a way to a destination that a neighbor reaches, and has none for an unknown destination. The
+    /// gate is not read: a pinned connection lives through the moment at which a new writer is refused.
+    #[test]
+    fn the_table_has_a_way_also_while_the_gate_refuses_every_hop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (
+                handle,
+                [
+                    (short, short_underlay),
+                    (long_a, long_underlay),
+                    _,
+                    (dst, _),
+                ],
+            ) = handle_with_two_routes().await;
+            let unknown = AppId::new(SecretKey::from_bytes(&[99; 32]).public());
+
+            assert!(handle.has_route_in_table(dst), "a neighbor reaches dst");
+            assert!(
+                !handle.has_route_in_table(unknown),
+                "no vector names an unknown destination"
+            );
+
+            handle
+                .inner
+                .forwarder
+                .refuse_hop_for_test(short_underlay, short);
+            handle
+                .inner
+                .forwarder
+                .refuse_hop_for_test(long_underlay, long_a);
+            assert!(
+                handle.has_route_in_table(dst),
+                "the gate refuses both neighbors now, and the table still has the way"
             );
         });
     }

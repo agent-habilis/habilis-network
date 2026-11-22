@@ -215,7 +215,7 @@ fn close_pinned_without_route(state: &EventLoopState) {
     let peers = state.webrtc_admission.pinned_peers();
     let pinned = peers
         .into_iter()
-        .map(|peer| (peer, route_to(state, peer).is_some()));
+        .map(|peer| (peer, has_route_in_table(state, peer)));
     for peer in pair_to_climb::lost_pinned(pinned) {
         let pool = state.unicast_pool.clone();
         task::spawn(async move {
@@ -248,6 +248,19 @@ pub(crate) fn route_to(state: &EventLoopState, peer: EndpointId) -> Option<iroh:
             handle.route_addr(habilis_network_iroh_multihop_transport::AppId::new(peer))
         })
         .map(iroh::TransportAddr::Custom)
+}
+
+/// Whether this node has a next hop for a cell to `peer` now. `false` off a host.
+#[cfg(feature = "multihop")]
+pub(crate) fn has_route_in_table(state: &EventLoopState, peer: EndpointId) -> bool {
+    state.multihop.as_ref().is_some_and(|handle| {
+        handle.has_route_in_table(habilis_network_iroh_multihop_transport::AppId::new(peer))
+    })
+}
+
+#[cfg(not(feature = "multihop"))]
+pub(crate) fn has_route_in_table(_state: &EventLoopState, _peer: EndpointId) -> bool {
+    false
 }
 
 #[cfg(not(feature = "multihop"))]

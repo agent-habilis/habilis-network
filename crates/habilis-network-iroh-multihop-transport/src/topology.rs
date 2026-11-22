@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::app_id::{AppId, UnderlayId};
 use crate::graph::{Graph, Leg, Link};
 use crate::link_metric::LinkMetric;
+use crate::next_hop;
+use crate::next_hop::NextHop;
 use crate::route::{Route, RouteHop};
 
 use crate::graph;
@@ -369,6 +371,19 @@ impl Topology {
             })
             .collect();
         Route::try_new(hops?)
+    }
+
+    /// The next hop of a cell at `node` for `dst`, from the vectors that we hold and without the hops that
+    /// `refused` names: see [`next_hop::next_hop`]. No cell came from anywhere here (`from` is applied by the
+    /// caller).
+    pub(crate) fn next_hop(&self, node: AppId, dst: AppId, refused: &HashSet<AppId>) -> NextHop {
+        let graph = self.graph();
+        next_hop::next_hop(
+            graph.links_of(node),
+            &graph.distances_to(dst),
+            refused,
+            None,
+        )
     }
 
     /// A JSON-serializable snapshot of the routing graph from `self_id`'s point
