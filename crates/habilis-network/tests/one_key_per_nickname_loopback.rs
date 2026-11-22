@@ -9,7 +9,12 @@
 //! A gossip holds no log, and a message that is sent before the links exist is lost. So the observer
 //! sends again, up to `ROUNDS` times, until one message reaches both holders: the proof that the mesh is up and that
 //! each holder hears the observer. The messages of the two holders must reach nobody under the other
-//! one's name.
+//! one's name. The 2 holder-to-holder asserts hold with the gate off too, because another layer drops the frames of
+//! an unproven session: they pin the end result between the holders. The observer hears exactly 1 of the 2
+//! holders: the end result of the binding of a nickname to its first key. Turning off the 2 sites of the gate
+//! (the binding of the first proof, and the claim of our own nickname) does not change what the observer
+//! hears, because another layer keeps the second key out as well; the held event is the assert that fails when
+//! those 2 sites are off.
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
@@ -111,6 +116,25 @@ async fn arrives(member: &mut Member, text: &str) -> bool {
     false
 }
 
+/// How many of the 2 holders the observer hears: both holders send in each round, and the observer
+/// counts the distinct texts of the first round that reaches it, after `WAIT` more for the other.
+async fn heard_from_holders(alpha: &mut Member, beta: &mut Member, observer: &mut Member) -> usize {
+    for round in 0..ROUNDS {
+        let (from_alpha, from_beta) = (
+            format!("holder-alpha-{round}"),
+            format!("holder-beta-{round}"),
+        );
+        alpha.broadcast(&from_alpha).await;
+        beta.broadcast(&from_beta).await;
+        let first = arrives(observer, &from_alpha).await;
+        let second = arrives(observer, &from_beta).await;
+        if first || second {
+            return usize::from(first) + usize::from(second);
+        }
+    }
+    0
+}
+
 #[test]
 fn a_second_key_under_a_nickname_is_not_admitted_and_the_two_holders_do_not_see_each_other() {
     let guard = habilis_network_test_tracing::init();
@@ -122,7 +146,7 @@ fn a_second_key_under_a_nickname_is_not_admitted_and_the_two_holders_do_not_see_
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let mut alpha = Member::create("dup", &relay).await;
         let mut beta = Member::join("dup", &alpha).await;
-        let observer = Member::join("samenick-obs", &alpha).await;
+        let mut observer = Member::join("samenick-obs", &alpha).await;
 
         alpha.broadcast("from-alpha").await;
         beta.broadcast("from-beta").await;
@@ -137,6 +161,7 @@ fn a_second_key_under_a_nickname_is_not_admitted_and_the_two_holders_do_not_see_
                 break;
             }
         }
+        let heard = heard_from_holders(&mut alpha, &mut beta, &mut observer).await;
         let beta_saw_alpha = arrives(&mut beta, "from-alpha").await;
         let alpha_saw_beta = arrives(&mut alpha, "from-beta").await;
         // The error event comes from the node that sees the claim of the other key.
@@ -163,6 +188,10 @@ fn a_second_key_under_a_nickname_is_not_admitted_and_the_two_holders_do_not_see_
         assert!(
             !alpha_saw_beta,
             "the gate admitted a second key under the nickname: alpha got from-beta"
+        );
+        assert_eq!(
+            heard, 1,
+            "the observer must hear exactly 1 of the 2 holders of the nickname: 1 key for each nickname"
         );
         assert!(
             held_events >= 1,
