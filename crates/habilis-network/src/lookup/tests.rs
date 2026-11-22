@@ -557,27 +557,6 @@ fn loopback_all_off_binds() {
     });
 }
 
-// A handles value with only gossip is a member endpoint: it must not read as a beacon.
-#[test]
-fn a_handles_value_with_only_gossip_is_not_empty() {
-    let _guard = ::habilis_network_test_tracing::init();
-    let handle = habilis_network_iroh_gossip_transport::GossipHandle::new(
-        iroh::SecretKey::from_bytes(&[51; 32]).public(),
-    );
-    assert!(
-        super::TransportHandles::default().is_empty(),
-        "a default handles value is empty"
-    );
-    let only_gossip = super::TransportHandles {
-        gossip: Some(handle),
-        ..super::TransportHandles::default()
-    };
-    assert!(
-        !only_gossip.is_empty(),
-        "a handles value with only gossip is not empty"
-    );
-}
-
 // Gossip is a choice of the mesh: the opts follow the policy, and it needs a direct path.
 #[test]
 fn the_mesh_policy_decides_gossip_for_the_opts() {

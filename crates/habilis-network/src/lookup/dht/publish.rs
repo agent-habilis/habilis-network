@@ -19,10 +19,14 @@ impl Publish {
     /// What an endpoint publishes. The beacon publishes under its own key, which is the key of the
     /// rendezvous. A mesh with a relay lookup keeps the IP addresses of the beacon out of the DHT.
     pub(in crate::lookup) fn of(is_beacon: bool, relay_lookup: &RelayChoice) -> Self {
-        match (is_beacon, relay_lookup) {
-            (false, _) => Self::Nothing,
-            (true, RelayChoice::Disabled) => Self::WithAddresses,
-            (true, _) => Self::RelayOnly,
+        if !is_beacon {
+            return Self::Nothing;
+        }
+        // `RelayChoice` is non-exhaustive: a relay lookup of any other kind keeps the addresses private.
+        if let RelayChoice::Disabled = relay_lookup {
+            Self::WithAddresses
+        } else {
+            Self::RelayOnly
         }
     }
 }

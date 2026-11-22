@@ -58,19 +58,11 @@ pub struct TransportHandles {
     /// The endpoint is a multi-hop underlay, an internal forwarding endpoint
     /// and not a peer or a beacon. Changes only the role a log line names.
     pub underlay: bool,
+    /// The endpoint serves the rendezvous: it is the beacon, whatever transports it carries (the
+    /// beacon of a public rendezvous carries a `WebRTC` handle). Only the beacon publishes the
+    /// rendezvous to the DHT. Set by the code that builds the beacon, and by nothing else.
+    pub beacon: bool,
     /// Which transports this instance may carry data on. Lives here rather than
     /// as another positional argument for the same reason the handles do.
     pub options: TransportOpts,
-}
-
-impl TransportHandles {
-    /// True when no custom transport is registered.
-    #[must_use]
-    pub(super) fn is_empty(&self) -> bool {
-        #[cfg(feature = "multihop")]
-        if self.multihop.is_some() {
-            return false;
-        }
-        self.webrtc.is_none() && self.gossip.is_none()
-    }
 }

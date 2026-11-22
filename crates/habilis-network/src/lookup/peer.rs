@@ -222,6 +222,7 @@ pub(crate) async fn build_peer_webrtc_with(
             gossip,
             admission: admission.cloned(),
             underlay: false,
+            beacon: false,
             options,
         },
     )
@@ -434,6 +435,7 @@ pub(crate) async fn build_peer_multihop_with(
             gossip,
             admission: admission.cloned(),
             underlay: false,
+            beacon: false,
             options,
         },
     )

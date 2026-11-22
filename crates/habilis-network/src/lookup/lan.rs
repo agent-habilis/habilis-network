@@ -75,6 +75,13 @@ pub(crate) fn tag_as_member(endpoint: &Endpoint, topic: &proto::TopicId) -> Resu
     Ok(())
 }
 
+/// Whether an endpoint is the beacon. A peer endpoint that carries a custom transport pins a key too, so
+/// the key does not tell: the code that builds the beacon says so, in its transport handles. The beacon
+/// of a public rendezvous carries a `WebRTC` handle, so the handles do not tell it either.
+fn is_beacon(has_secret_key: bool, transports: &super::TransportHandles) -> bool {
+    has_secret_key && transports.beacon && !transports.underlay
+}
+
 /// `build_endpoint`, and the mDNS handle when the endpoint has one.
 /// # Errors
 /// As `build_endpoint`.
@@ -92,9 +99,7 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     alpns: Vec<Vec<u8>>,
     transports: super::TransportHandles,
 ) -> Result<(Endpoint, Option<super::MdnsHandle>)> {
-    // A peer endpoint carrying a custom transport also pins a key, so it is
-    // *not* a beacon; the presence of a handle disambiguates.
-    let is_beacon = secret_key.is_some() && transports.is_empty() && !transports.underlay;
+    let is_beacon = is_beacon(secret_key.is_some(), &transports);
     let underlay = transports.underlay;
     let network = lookups.network_label();
     let mut homing = None;
@@ -261,4 +266,54 @@ pub(crate) async fn build_endpoint_keeping_mdns(
         "endpoint bound"
     );
     Ok((endpoint, mdns_handle))
+}
+
+#[cfg(all(test, feature = "host"))]
+mod tests {
+    use iroh::SecretKey;
+
+    use crate::lookup::{self, TransportHandles};
+
+    /// The beacon of a public rendezvous carries a `WebRTC` handle and is the beacon still. A peer that
+    /// pins a key and carries a handle is none, and neither is an underlay or an endpoint with no key.
+    #[test]
+    fn the_beacon_is_what_the_builder_says_whatever_transports_it_carries() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let key = SecretKey::generate().public();
+        let public_beacon = TransportHandles {
+            webrtc: Some(lookup::build_webrtc_handle(key)),
+            beacon: true,
+            ..TransportHandles::default()
+        };
+        let ladder_beacon = TransportHandles {
+            beacon: true,
+            ..TransportHandles::default()
+        };
+        let peer = TransportHandles {
+            webrtc: Some(lookup::build_webrtc_handle(key)),
+            ..TransportHandles::default()
+        };
+        let underlay = TransportHandles {
+            underlay: true,
+            ..TransportHandles::default()
+        };
+
+        assert!(
+            lookup::lan::is_beacon(true, &public_beacon),
+            "the public beacon"
+        );
+        assert!(
+            lookup::lan::is_beacon(true, &ladder_beacon),
+            "the beacon of the ladder"
+        );
+        assert!(
+            !lookup::lan::is_beacon(true, &peer),
+            "a peer with a pinned key"
+        );
+        assert!(!lookup::lan::is_beacon(true, &underlay), "an underlay");
+        assert!(
+            !lookup::lan::is_beacon(false, &public_beacon),
+            "no key, no beacon"
+        );
+    }
 }

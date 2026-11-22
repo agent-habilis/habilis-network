@@ -43,6 +43,7 @@ pub(crate) async fn build_rendezvous_endpoint(
         let transport_handles = TransportHandles {
             webrtc: Some(webrtc.clone()),
             admission: Some(admission.clone()),
+            beacon: true,
             ..TransportHandles::default()
         };
         let endpoint = build_endpoint(
@@ -76,7 +77,10 @@ pub(crate) async fn build_rendezvous_endpoint(
             Some(params.secret.clone()),
             Some(port),
             Vec::new(),
-            TransportHandles::default(),
+            TransportHandles {
+                beacon: true,
+                ..TransportHandles::default()
+            },
         )
         .await
         {
