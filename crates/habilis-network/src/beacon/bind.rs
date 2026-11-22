@@ -4,7 +4,7 @@ use iroh::address_lookup::memory;
 use crate::util::clock::Instant;
 use crate::util::tuning;
 
-use crate::lookup::{TransportHandles, build_endpoint};
+use crate::lookup::{EndpointRole, TransportHandles, build_endpoint};
 
 use super::{
     RendezvousParams, RungRead, RungWatch, Walk, beacon_lookups, rung_is_busy, rung_ladder,
@@ -43,7 +43,7 @@ pub(crate) async fn build_rendezvous_endpoint(
         let transport_handles = TransportHandles {
             webrtc: Some(webrtc.clone()),
             admission: Some(admission.clone()),
-            beacon: true,
+            role: EndpointRole::Beacon,
             ..TransportHandles::default()
         };
         let endpoint = build_endpoint(
@@ -78,7 +78,7 @@ pub(crate) async fn build_rendezvous_endpoint(
             Some(port),
             Vec::new(),
             TransportHandles {
-                beacon: true,
+                role: EndpointRole::Beacon,
                 ..TransportHandles::default()
             },
         )

@@ -26,6 +26,7 @@ mod endpoint;
 mod capability;
 #[cfg(all(feature = "host", feature = "dht"))]
 mod dht;
+mod endpoint_role;
 mod error;
 #[cfg(all(feature = "host", feature = "mdns"))]
 mod mdns;
@@ -54,6 +55,7 @@ pub mod test_relay;
 
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
+pub use endpoint_role::EndpointRole;
 pub use error::EndpointError;
 pub use relay::{DefaultRung, RENDEZVOUS_RELAY_LADDER, RungPath, probe_ladder, relay_ladder};
 pub(crate) use relay::{

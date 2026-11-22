@@ -1,3 +1,4 @@
+use super::endpoint_role::EndpointRole;
 use super::transport_opts::TransportOpts;
 
 use crate::transport;
@@ -55,13 +56,8 @@ pub struct TransportHandles {
     /// endpoint reports every connection to it, so that it can drop the ones
     /// that are gone.
     pub admission: Option<transport::SignalAdmission>,
-    /// The endpoint is a multi-hop underlay, an internal forwarding endpoint
-    /// and not a peer or a beacon. Changes only the role a log line names.
-    pub underlay: bool,
-    /// The endpoint serves the rendezvous: it is the beacon, whatever transports it carries (the
-    /// beacon of a public rendezvous carries a `WebRTC` handle). Only the beacon publishes the
-    /// rendezvous to the DHT. Set by the code that builds the beacon, and by nothing else.
-    pub beacon: bool,
+    /// What the endpoint is for. Set by the code that builds the endpoint, and by nothing else.
+    pub role: EndpointRole,
     /// Which transports this instance may carry data on. Lives here rather than
     /// as another positional argument for the same reason the handles do.
     pub options: TransportOpts,

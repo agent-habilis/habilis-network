@@ -221,8 +221,7 @@ pub(crate) async fn build_peer_webrtc_with(
             webrtc: Some(handle.clone()),
             gossip,
             admission: admission.cloned(),
-            underlay: false,
-            beacon: false,
+            role: super::EndpointRole::Peer,
             options,
         },
     )
@@ -371,7 +370,7 @@ pub(crate) async fn build_peer_multihop_with(
         None,
         Vec::new(),
         super::TransportHandles {
-            underlay: true,
+            role: super::EndpointRole::Underlay,
             webrtc: webrtc_leg,
             admission: admission_leg,
             // The underlay has IP sockets only when the node does: a node run without `udp`
@@ -434,8 +433,7 @@ pub(crate) async fn build_peer_multihop_with(
             webrtc: Some(webrtc.clone()),
             gossip,
             admission: admission.cloned(),
-            underlay: false,
-            beacon: false,
+            role: super::EndpointRole::Peer,
             options,
         },
     )
