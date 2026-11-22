@@ -22,6 +22,8 @@ mod lane;
 pub use lane::Lane;
 mod pending_send;
 pub use pending_send::PendingSend;
+mod send_verdict;
+pub use send_verdict::SendVerdict;
 mod send_error;
 pub use send_error::SendError;
 #[cfg(test)]
@@ -49,7 +51,7 @@ mod tests {
     use crate::daemon::state::DirectState;
     use crate::lookup::test_relay;
     use crate::protocol::messages::WireFrame;
-    use crate::transport::{PayloadPath, payload_path};
+    use crate::transport::{PayloadPath, SendVerdict, payload_path, unicast_acceptor};
     use crate::util::clock;
     use crate::{lookup, transport};
     use iroh::endpoint::{Connection, presets};
@@ -533,10 +535,10 @@ mod tests {
                     .expect("an incoming connection")
                     .await
                     .expect("accept the connection");
-                let (mut acknowledgement, mut stream) =
-                    connection.accept_bi().await.expect("a stream");
-                let bytes = stream.read_to_end(64 * 1024).await.expect("read the frame");
-                acknowledgement.finish().expect("acknowledge");
+                let (acknowledgement, stream) = connection.accept_bi().await.expect("a stream");
+                let bytes = unicast_acceptor::receive_for_test(acknowledgement, stream)
+                    .await
+                    .expect("read the frame");
                 (bytes, bob_endpoint, connection)
             });
             let connection = state
@@ -581,10 +583,11 @@ mod tests {
 
     impl ProtocolHandler for Collect {
         async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-            while let Ok((mut acknowledgement, mut stream)) = connection.accept_bi().await {
-                if let Ok(bytes) = stream.read_to_end(64 * 1024).await {
+            while let Ok((acknowledgement, stream)) = connection.accept_bi().await {
+                if let Some(bytes) =
+                    unicast_acceptor::receive_for_test(acknowledgement, stream).await
+                {
                     let _ = self.0.send(bytes);
-                    let _ = acknowledgement.finish();
                 }
             }
             Ok(())
@@ -663,10 +666,9 @@ mod tests {
                 tokio_time::timeout(std_Duration::from_secs(6), async {
                     for handle in handles {
                         let ended = handle.await.expect("the task reports");
-                        let error = ended.expect_err("no direct path comes");
                         assert!(
-                            format!("{error:#}").contains(transport::RELAY_REFUSED),
-                            "the refusal names the relay: {error:#}"
+                            matches!(&ended, SendVerdict::NotDelivered(reason) if reason.contains(transport::RELAY_REFUSED)),
+                            "the refusal names the relay, and it is certain: {ended}"
                         );
                     }
                 })
@@ -743,10 +745,9 @@ mod tests {
                     .await
                     .expect("the send ends within one path budget");
                 let ended = waited.expect("the task reports");
-                let error = ended.expect_err("no direct path comes");
                 assert!(
-                    format!("{error:#}").contains(transport::RELAY_REFUSED),
-                    "the refusal names the relay: {error:#}"
+                    matches!(&ended, SendVerdict::NotDelivered(reason) if reason.contains(transport::RELAY_REFUSED)),
+                    "the refusal names the relay, and it is certain: {ended}"
                 );
 
                 router.shutdown().await.expect("shutdown");

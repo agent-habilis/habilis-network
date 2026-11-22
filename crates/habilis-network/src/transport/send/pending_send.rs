@@ -1,7 +1,8 @@
 //! A send that has not yet been delivered.
 
-use anyhow::Result;
 use tokio::sync::oneshot;
+
+use super::SendVerdict;
 
 /// The outcome of a send that runs on a task. A caller that needs the verdict awaits it off its
 /// event loop. Dropping it does not cancel the send: a failure is then only logged.
@@ -17,4 +18,4 @@ use tokio::sync::oneshot;
 /// drop(pending);
 /// # }
 /// ```
-pub type PendingSend = oneshot::Receiver<Result<()>>;
+pub type PendingSend = oneshot::Receiver<SendVerdict>;

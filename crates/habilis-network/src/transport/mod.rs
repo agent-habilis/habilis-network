@@ -20,6 +20,7 @@
 //! cross-transport dedup are identical on both planes.
 
 use tokio::sync::oneshot;
+mod acknowledgement;
 mod admission;
 pub(crate) mod ceiling;
 mod chunk_acceptor;
@@ -70,8 +71,8 @@ pub(crate) use pool::UnicastPool;
 #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
 pub(crate) use send::resolve;
 pub use send::{
-    Delivered, Lane, PendingSend, SendError, deliver, deliver_in_background, deliver_to,
-    deliver_to_in_background,
+    Delivered, Lane, PendingSend, SendError, SendVerdict, deliver, deliver_in_background,
+    deliver_to, deliver_to_in_background,
 };
 pub(crate) use send::{
     can_unicast, directed_endpoint, lane_for, note_held, note_unproven, send_best_effort,
@@ -81,9 +82,11 @@ pub(crate) use unicast_acceptor::{UnicastAcceptor, UnicastFrame};
 pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, UdpTransport, WebRtcSignalAcceptor};
 
 /// ALPN for the unicast channel, with its own protocol identity, distinct from `GOSSIP_ALPN` and
-/// the application's own bridge ALPN. Version 2 sends each frame on one bidirectional QUIC stream
-/// and the receiver ends its side of the stream when its loop took the frame: that end is the
-/// acknowledgement. Version 1 used one unidirectional stream and no acknowledgement.
+/// the application's own bridge ALPN. Version 2 sends each frame on one bidirectional QUIC stream,
+/// in two steps: the length and the frame, `HELD` from the receiver, the commit (the finish of the
+/// stream of the sender), and the end of the stream of the receiver when its loop took the frame.
+/// That end is the acknowledgement. Version 1 used one unidirectional stream and no
+/// acknowledgement. Version 2 is not released, so its format changed in place.
 /// Wire-load-bearing: a node of another version cannot exchange unicast frames with this one, so
 /// it moves only with a deliberate protocol break.
 pub(crate) const UNICAST_ALPN: &[u8] = b"habilis-mesh/unicast/2";

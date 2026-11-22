@@ -499,7 +499,7 @@ flowchart LR
     M["outbound message"] --> D{"sole addressee?"}
     D -->|no| B["Broadcast: iroh-gossip"]
     D -->|yes| K{"endpoint known?"}
-    K -->|yes| UC["Unicast: QUIC stream on habilis-mesh/unicast/1"]
+    K -->|yes| UC["Unicast: QUIC stream on habilis-mesh/unicast/2"]
     K -->|no| UN["Undeliverable"]
 ```
 

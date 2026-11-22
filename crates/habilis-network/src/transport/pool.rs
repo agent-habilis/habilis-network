@@ -4,10 +4,14 @@
 //! and with a short dial budget so a send to an unreachable peer fails fast
 //! rather than stalling the event loop.
 
+mod committed;
 mod in_flight_dial;
+mod outgoing_frame;
 mod plan_release;
 mod registration;
 mod send_fault;
+mod uncommitted_stream;
+pub(crate) use send_fault::SendFault;
 mod timeouts;
 pub(crate) use timeouts::{COOLDOWN_REFUSED, DIAL_TIMEOUT};
 mod unicast_pool;
@@ -148,9 +152,10 @@ mod tests {
         struct Acknowledge;
         impl ProtocolHandler for Acknowledge {
             async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                while let Ok((mut acknowledgement, mut stream)) = connection.accept_bi().await {
-                    let _ = stream.read_to_end(64 * 1024).await;
-                    let _ = acknowledgement.finish();
+                while let Ok((acknowledgement, stream)) = connection.accept_bi().await {
+                    let _ =
+                        super::super::unicast_acceptor::receive_for_test(acknowledgement, stream)
+                            .await;
                 }
                 Ok(())
             }
@@ -920,10 +925,12 @@ mod tests {
         struct Collect(mpsc::UnboundedSender<Vec<u8>>);
         impl ProtocolHandler for Collect {
             async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                while let Ok((mut acknowledgement, mut stream)) = connection.accept_bi().await {
-                    if let Ok(frame) = stream.read_to_end(64 * 1024).await {
+                while let Ok((acknowledgement, stream)) = connection.accept_bi().await {
+                    if let Some(frame) =
+                        super::super::unicast_acceptor::receive_for_test(acknowledgement, stream)
+                            .await
+                    {
                         let _ = self.0.send(frame);
-                        let _ = acknowledgement.finish();
                     }
                 }
                 Ok(())
@@ -1804,6 +1811,34 @@ mod tests {
         );
     }
 
+    /// **A frame that the sender drops before the commit is reset, never finished.** A stream that is
+    /// dropped finishes by itself, and the finish is the commit: any early return of a send, or a
+    /// send task that is cancelled, would have told the peer to take a frame that the user was told
+    /// had failed. The peer reads a reset, and takes nothing.
+    #[test]
+    fn a_frame_that_is_dropped_before_the_commit_is_reset_and_the_peer_takes_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client, mut frames) = pool_with_collecting_server().await;
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            let (stream, held) = connection.open_bi().await.expect("open a stream");
+            let mut frame = super::outgoing_frame::OutgoingFrame::new(stream, held);
+            frame.write(b"frame").await.expect("write");
+            frame.held().await.expect("the peer holds the frame");
+
+            drop(frame);
+
+            // The commit of a frame crosses loopback in well under a millisecond: a second is
+            // thousands of round trips, so a frame that the peer meant to take is in by then.
+            time::sleep(Duration::from_secs(1)).await;
+            assert!(
+                frames.try_recv().is_err(),
+                "the peer took a frame that the sender dropped before the commit"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
     /// **The busy mark lasts until the peer has acknowledged the frame.** `finish()` returns while
     /// the frame is still in flight, so a mark that ended there left a connection with a slow reader
     /// open to eviction, with its frame in the air. The send holds the mark until the peer took the
@@ -1825,13 +1860,16 @@ mod tests {
                         &self,
                         connection: endpoint::Connection,
                     ) -> Result<(), AcceptError> {
-                        let (mut acknowledgement, mut stream) = connection
+                        let (acknowledgement, stream) = connection
                             .accept_bi()
                             .await
                             .map_err(AcceptError::from_err)?;
                         time::sleep(Duration::from_millis(800)).await;
-                        let _ = stream.read_to_end(1 << 20).await;
-                        let _ = acknowledgement.finish();
+                        let _ = super::super::unicast_acceptor::receive_for_test(
+                            acknowledgement,
+                            stream,
+                        )
+                        .await;
                         connection.closed().await;
                         Ok(())
                     }

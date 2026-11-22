@@ -16,7 +16,7 @@ use crate::transport::{MeshSender, webrtc};
 
 use crate::util::clock;
 
-use crate::transport::{Delivered, Lane, SendError};
+use crate::transport::{Delivered, Lane, SendError, SendVerdict};
 
 use n0_future::task;
 /// Route one already-signed, already-serialized message. `bytes` MUST be
@@ -390,8 +390,8 @@ pub(super) async fn send_unicast(
                     .send_registered(registration, eid, bytes.into_bytes())
                     .await
                     .with_context(|| format!("unicast dial to {eid} failed"));
-                if let Err(Err(error)) = outcome_tx.send(sent) {
-                    tracing::debug!(target: "habilis_network::gossip", %eid, %error, "background send not delivered");
+                if let Err(verdict) = outcome_tx.send(SendVerdict::of(sent)) {
+                    tracing::debug!(target: "habilis_network::gossip", %eid, %verdict, "background send not delivered");
                 }
             });
             Ok(Delivered::Pending(outcome))

@@ -9,7 +9,7 @@ pub use crate::gossip::{
     seal_broadcast_body, sealed_body_len_bound, send_app, start_ping_round, unicast_farewell,
 };
 pub use crate::transport::{
-    Delivered, MeshSender, PendingSend, deliver, deliver_in_background, deliver_to,
+    Delivered, MeshSender, PendingSend, SendVerdict, deliver, deliver_in_background, deliver_to,
     deliver_to_in_background,
 };
 

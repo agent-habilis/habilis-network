@@ -33,7 +33,6 @@ use crate::daemon::state::DirectState;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::ops;
 use crate::transport;
-use crate::transport::Delivered;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::transport::Resend;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -46,6 +45,7 @@ use crate::transport::payload_path;
 use crate::transport::underlay_webrtc;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::transport::webrtc;
+use crate::transport::{Delivered, SendVerdict};
 #[cfg(all(
     feature = "iroh-test-utils",
     feature = "host",
@@ -952,10 +952,16 @@ impl MembershipApp {
                 // The dial runs on a task, and so does the wait for its outcome: the loop
                 // serves the next request meanwhile.
                 task::spawn(async move {
-                    let outcome = handle.await.unwrap_or_else(|_| {
-                        Err(anyhow::anyhow!("the send ended without an outcome"))
+                    let verdict = handle.await.unwrap_or_else(|_| {
+                        SendVerdict::Unconfirmed("the send ended without an outcome".to_owned())
                     });
-                    let _ = reply.send(outcome.map_err(|error| reply_text(&error)));
+                    // The text of a failed verdict says which kind it is: "not delivered" or "not confirmed".
+                    let _ = reply.send(match verdict {
+                        SendVerdict::Delivered => Ok(()),
+                        failed @ (SendVerdict::NotDelivered(_) | SendVerdict::Unconfirmed(_)) => {
+                            Err(reply_text(&failed))
+                        }
+                    });
                 });
             }
             Err(error) => {

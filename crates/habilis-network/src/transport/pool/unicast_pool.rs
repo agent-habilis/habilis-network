@@ -1,6 +1,7 @@
 //! The dial side of the unicast plane: the per-peer connection pool.
 
 use super::in_flight_dial::InFlightDial;
+use super::outgoing_frame::OutgoingFrame;
 use super::plan_release::PlanRelease;
 use super::registration::Registration;
 use super::send_fault::SendFault;
@@ -20,14 +21,16 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
-use iroh::endpoint::{Connection, ReadError, ReadToEndError};
+use iroh::endpoint::{Connection, ReadError, ReadExactError};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use n0_future::time::Instant as PoolInstant;
 use tokio::sync::{Mutex, watch};
 
 use crate::transport::unicast_acceptor::NOT_TAKEN;
 use crate::transport::webrtc::close_code::IDLE;
-use crate::transport::{LOG_TARGET, PendingSend, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
+use crate::transport::{
+    LOG_TARGET, PendingSend, RELAY_REFUSED, SendVerdict, UNICAST_ALPN, payload_allowed_on,
+};
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
@@ -271,18 +274,36 @@ impl UnicastPool {
     /// again here: only the loop holds a fresh route to it, so the next send plans the dial, and the
     /// frame of this one is dropped as the frame of any write that fails after QUIC buffered it. A
     /// waiter has the dial of another caller to wait for, and the dial turn serializes the two.
-    async fn redial_and_send(&self, eid: EndpointId, bytes: Bytes) -> Result<()> {
-        let Some(registration) = self.redial_registration(eid) else {
-            bail!("{PINNED_REDIAL}");
+    ///
+    /// This joins the two results of one send. `first` is the error of the first send. If that send
+    /// had committed the frame, the peer can have taken it, so whatever the second send says, the
+    /// result is [`SendVerdict::Unconfirmed`] unless the second send delivered. Only a first fault
+    /// before the commit lets the result of the second send stand as it is.
+    async fn redial_and_send(
+        &self,
+        eid: EndpointId,
+        bytes: Bytes,
+        first: &anyhow::Error,
+    ) -> Result<()> {
+        let outcome = match self.redial_registration(eid) {
+            None => Err(anyhow::anyhow!("{PINNED_REDIAL}")),
+            Some(registration) => {
+                let outcome = self.dial_and_send_once(eid, &bytes).await;
+                if let Registration::Dialer(in_flight) = &registration {
+                    in_flight.publish(match &outcome {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(error.to_string()),
+                    });
+                }
+                outcome
+            }
         };
-        let outcome = self.dial_and_send_once(eid, &bytes).await;
-        if let Registration::Dialer(in_flight) = &registration {
-            in_flight.publish(match &outcome {
-                Ok(()) => Ok(()),
-                Err(error) => Err(error.to_string()),
-            });
+        match outcome {
+            Err(error) if committed(first) => {
+                SendVerdict::Unconfirmed(format!("{error:#}")).into_result()
+            }
+            other => other,
         }
-        outcome
     }
 
     /// The place of a dial that comes again, planned with no route, or `None` for a pinned peer:
@@ -322,6 +343,16 @@ impl UnicastPool {
             tap.push(bytes.to_vec());
         }
         Ok(())
+    }
+
+    /// Tests only: one send on the warm connection to `eid`, with no second send after a lost
+    /// connection, so that a test reads the fault of the first.
+    #[cfg(test)]
+    pub(crate) async fn send_without_redial(&self, eid: EndpointId, bytes: Bytes) -> Result<()> {
+        let Some(connection) = self.warm(eid).await else {
+            bail!("no warm connection");
+        };
+        self.send_marked(eid, &connection, &bytes).await
     }
 
     /// The frames written to pooled connections so far, as they went on the wire.
@@ -392,7 +423,7 @@ impl UnicastPool {
             if let Err(error) = &sent {
                 tracing::debug!(target: LOG_TARGET, %error, "unicast frame not delivered");
             }
-            let _ = verdict.send(sent);
+            let _ = verdict.send(SendVerdict::of(sent));
         });
         WarmSend::Sent(outcome)
     }
@@ -413,7 +444,7 @@ impl UnicastPool {
         }
         tracing::debug!(target: LOG_TARGET, %error, "unicast send not acknowledged; dropping connection and redialing");
         self.evict_if_same(eid, connection).await;
-        self.redial_and_send(eid, bytes).await
+        self.redial_and_send(eid, bytes, &error).await
     }
 
     /// Whether UDP to `eid` is selected within [`PATH_SELECT_TIMEOUT`], on the
@@ -748,7 +779,7 @@ impl UnicastPool {
         if let Err(error) = &outcome
             && connection_lost(error)
         {
-            return self.redial_and_send(eid, bytes).await;
+            return self.redial_and_send(eid, bytes, error).await;
         }
         outcome
     }
@@ -1236,73 +1267,73 @@ async fn dial(endpoint: &Endpoint, address: EndpointAddr) -> Result<Connection> 
     }
 }
 
-/// One message per bidirectional stream: open, write the whole frame, finish, and wait for the
-/// peer to finish its side. No length framing is needed — the accept side reads the stream to EOF
-/// and gets exactly one serialized `Message`. The peer finishes its side only after it handed the
-/// frame to its loop, so an `Ok` says that the peer took the frame. A reset of the stream, a lost
-/// connection, or an end of the stream with bytes on it is no acknowledgement and is an error. The
-/// connection is busy in the ledger until the acknowledgement or the error.
+/// One frame per bidirectional stream, in two steps. The sender writes the length and the frame and
+/// does not finish. The peer takes a place in its inbox for the frame, and says `HELD`. The sender
+/// then commits by finishing its side, and the peer hands the frame to its loop only after it.
+/// Last, the peer ends its side, and the end is the acknowledgement. An `Ok` says that the peer took
+/// the frame.
 ///
-/// A send that ends with [`SendFault::TimedOut`] can have been taken by the peer, when the acknowledgement
-/// came late. The verdict "not delivered" is then wrong in the safe direction: never "ok and lost".
+/// The phase is the phase of the sender. A fault before the commit is certain: the peer never takes
+/// the frame, because the stream goes away uncommitted (see [`OutgoingFrame`]), and a second send
+/// is safe. A fault after the commit is not: the peer can have taken the frame, and the sender did
+/// not hear it. An error then means "not confirmed". The connection is busy in the ledger until the
+/// end or the error.
 pub(super) async fn send_one(
     connection: &Connection,
     bytes: &[u8],
     _busy: Option<BusyGuard>,
     tally: Option<&WireOutTally>,
 ) -> Result<(), SendFault> {
-    // The open and the write share one deadline: a peer that reads nothing fills its limit of streams, and the
-    // open of the next stream then waits for room that never comes. The send sits in a task of its own, so a
-    // wait without a bound grows the tasks of this node.
+    // The open, the write and both waits share one deadline: a peer that reads nothing fills its limit of
+    // streams, and the open of the next stream then waits for room that never comes. The send sits in a
+    // task of its own, so a wait without a bound grows the tasks of this node.
     let deadline = PoolInstant::now() + SEND_TIMEOUT;
-    let (mut stream, mut acknowledgement) =
-        match time::timeout(SEND_TIMEOUT, connection.open_bi()).await {
-            Ok(opened) => opened.map_err(lost)?,
-            Err(_) => return Err(SendFault::TimedOut("no stream was opened")),
-        };
-    let left: Duration = deadline.saturating_duration_since(PoolInstant::now());
-    if let Ok(written) = time::timeout(left, stream.write_all(bytes)).await {
-        written.map_err(lost)?;
-    } else {
-        // The frame is cut short, so the stream is reset and not finished: dropping it finishes it, and the peer
-        // would read the prefix as a whole frame. A reset also drops what is still buffered here.
-        let _ = stream.reset(0u32.into());
-        return Err(SendFault::TimedOut("the peer read nothing"));
+    let (stream, held) = match time::timeout(SEND_TIMEOUT, connection.open_bi()).await {
+        Ok(opened) => opened.map_err(|error| SendFault::LostBeforeCommit(error.to_string()))?,
+        Err(_) => return Err(SendFault::TimedOutBeforeCommit("no stream was opened")),
+    };
+    let mut frame = OutgoingFrame::new(stream, held);
+    let left_to_write: Duration = deadline.saturating_duration_since(PoolInstant::now());
+    match time::timeout(left_to_write, frame.write(bytes)).await {
+        Ok(written) => written?,
+        Err(_) => return Err(SendFault::TimedOutBeforeCommit("the peer read nothing")),
     }
-    stream.finish().map_err(lost)?;
     if let Some(tally) = tally {
         tally.note(bytes);
     }
-    let left_to_acknowledge: Duration = deadline.saturating_duration_since(PoolInstant::now());
-    match time::timeout(left_to_acknowledge, acknowledgement.read_to_end(0)).await {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(error)) => Err(fault_of_read(&error)),
+    let left_to_hold: Duration = deadline.saturating_duration_since(PoolInstant::now());
+    match time::timeout(left_to_hold, frame.held()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(fault_of_held(&error)),
         Err(_) => {
-            let _ = acknowledgement.stop(0u32.into());
-            Err(SendFault::TimedOut("the peer did not acknowledge"))
+            return Err(SendFault::TimedOutBeforeCommit(
+                "the peer did not hold the frame",
+            ));
+        }
+    }
+    let mut committed = frame.commit()?;
+    let left_to_end: Duration = deadline.saturating_duration_since(PoolInstant::now());
+    match time::timeout(left_to_end, committed.delivered()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(SendFault::LostAfterCommit(error.to_string())),
+        Err(_) => {
+            committed.stop();
+            Err(SendFault::TimedOutAfterCommit)
         }
     }
 }
 
-/// The fault of a stream that failed on a step of the send: the connection is the cause.
-fn lost(error: impl fmt::Display) -> SendFault {
-    SendFault::ConnectionLost(error.to_string())
-}
-
-/// What the end of the acknowledgement side says: a reset with [`NOT_TAKEN`], or bytes where the
-/// end of the stream is the acknowledgement, is a peer that said no. Any other end is a lost
-/// connection.
-fn fault_of_read(error: &ReadToEndError) -> SendFault {
-    let said_no = match error {
-        ReadToEndError::TooLong => true,
-        ReadToEndError::Read(read) => {
-            matches!(read, ReadError::Reset(code) if code.into_inner() == u64::from(NOT_TAKEN))
-        }
-    };
+/// What the end of the side of the peer says before it held the frame: a reset with [`NOT_TAKEN`] is
+/// a peer that said no. Any other end is a lost connection.
+fn fault_of_held(error: &ReadExactError) -> SendFault {
+    let said_no = matches!(
+        error,
+        ReadExactError::ReadError(ReadError::Reset(code)) if code.into_inner() == u64::from(NOT_TAKEN)
+    );
     if said_no {
         SendFault::NotTaken
     } else {
-        lost(error)
+        SendFault::LostBeforeCommit(error.to_string())
     }
 }
 
@@ -1310,7 +1341,13 @@ fn fault_of_read(error: &ReadToEndError) -> SendFault {
 /// new connection can mend.
 fn connection_lost(error: &anyhow::Error) -> bool {
     let fault: Option<&SendFault> = error.downcast_ref();
-    matches!(fault, Some(SendFault::ConnectionLost(_)))
+    fault.is_some_and(SendFault::connection_lost)
+}
+
+/// Whether the sender had committed the frame when the send failed with `error`.
+fn committed(error: &anyhow::Error) -> bool {
+    let fault: Option<&SendFault> = error.downcast_ref();
+    fault.is_some_and(SendFault::committed)
 }
 
 /// The verdict of a send that runs on a task. A task that ended without a verdict is a send that
@@ -1318,7 +1355,10 @@ fn connection_lost(error: &anyhow::Error) -> bool {
 pub(crate) async fn verdict_of(pending: PendingSend) -> Result<()> {
     pending
         .await
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("the send ended without an outcome")))
+        .unwrap_or_else(|_| {
+            SendVerdict::Unconfirmed("the send ended without an outcome".to_owned())
+        })
+        .into_result()
 }
 
 #[cfg(test)]
