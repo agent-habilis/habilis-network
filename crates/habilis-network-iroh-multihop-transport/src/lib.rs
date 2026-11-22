@@ -452,20 +452,30 @@ impl MultihopHandle {
     #[must_use]
     pub fn has_route_in_table(&self, dst: AppId) -> bool {
         let topology = self.inner.topology.read().expect("topology lock poisoned");
-        let next = topology.next_hop(self.inner.self_id, dst, &HashSet::new());
+        let next = topology.next_hop(self.inner.self_id, dst, &HashSet::new(), &HashSet::new());
         matches!(next, NextHop::Forward(_))
     }
 
-    /// Mark the hop `hop` (an application id) as refused by the gate now, without
-    /// the stuck deadline having passed: for a test of a holder that chooses a
-    /// route again when the gate refuses a hop. A hop whose underlay is unknown is
-    /// left alone.
+    /// Put the hop `hop` (an application id) in wait now, as if the gate did not admit it and the deadline had
+    /// not passed: for a test of a holder that takes another hop first. A hop whose underlay is unknown is left
+    /// alone.
     #[cfg(feature = "test-hooks")]
-    pub fn refuse_hop_for_test(&self, hop: AppId) {
+    pub fn hold_hop_for_test(&self, hop: AppId) {
         if let Some(underlay) = self.underlay_addr_of(hop) {
             self.inner
                 .forwarder
-                .refuse_hop_for_test(UnderlayId::new(underlay.id), hop);
+                .hold_hop_for_test(UnderlayId::new(underlay.id), hop);
+        }
+    }
+
+    /// Make the hop `hop` (an application id) stuck now, without the deadline having passed: it is no
+    /// candidate for a next hop. A hop whose underlay is unknown is left alone.
+    #[cfg(feature = "test-hooks")]
+    pub fn stick_hop_for_test(&self, hop: AppId) {
+        if let Some(underlay) = self.underlay_addr_of(hop) {
+            self.inner
+                .forwarder
+                .stick_hop_for_test(UnderlayId::new(underlay.id), hop);
         }
     }
 
@@ -1105,11 +1115,11 @@ mod tests {
             handle
                 .inner
                 .forwarder
-                .refuse_hop_for_test(short_underlay, short);
+                .hold_hop_for_test(short_underlay, short);
             handle
                 .inner
                 .forwarder
-                .refuse_hop_for_test(long_underlay, long_a);
+                .hold_hop_for_test(long_underlay, long_a);
             assert!(
                 handle.has_route_in_table(dst),
                 "the gate refuses both neighbors now, and the table still has the way"
@@ -1125,7 +1135,7 @@ mod tests {
             handle
                 .inner
                 .forwarder
-                .refuse_hop_for_test(short_underlay, short);
+                .hold_hop_for_test(short_underlay, short);
             assert!(
                 handle.stuck_hops().next().is_none(),
                 "refused now, not past the deadline: the link vector still names the hop"
@@ -1172,7 +1182,7 @@ mod tests {
             let dst_id = AppId::new(dst.public());
             assert_eq!(first_hop_of(&handle, dst_id), dst_id, "direct");
 
-            handle.inner.forwarder.refuse_hop_for_test(
+            handle.inner.forwarder.hold_hop_for_test(
                 UnderlayId::new(underlay_secret(&dst).public()),
                 AppId::new(dst.public()),
             );
@@ -1255,7 +1265,7 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (handle, [(a1, a1_underlay), _, (tab, _), (dst, _)]) =
                 handle_with_a_native_and_a_browser_route().await;
-            handle.inner.forwarder.refuse_hop_for_test(a1_underlay, a1);
+            handle.inner.forwarder.hold_hop_for_test(a1_underlay, a1);
             assert_eq!(
                 first_hop_of(&handle, dst),
                 tab,
@@ -1269,10 +1279,7 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (handle, [(a1, _), _, (tab, tab_underlay), (dst, _)]) =
                 handle_with_a_native_and_a_browser_route().await;
-            handle
-                .inner
-                .forwarder
-                .refuse_hop_for_test(tab_underlay, tab);
+            handle.inner.forwarder.hold_hop_for_test(tab_underlay, tab);
             assert_eq!(
                 first_hop_of(&handle, dst),
                 a1,
@@ -1286,6 +1293,10 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use iroh::address_lookup::AddressLookup as _;
             use n0_future::StreamExt as _;
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop underlay stays on the relay: this hop is not advertised as a link",
+            );
             let (
                 handle,
                 [
@@ -1321,7 +1332,7 @@ mod tests {
             handle
                 .inner
                 .forwarder
-                .refuse_hop_for_test(short_underlay, short);
+                .hold_hop_for_test(short_underlay, short);
             assert_eq!(
                 first_hop_resolved().await,
                 dst,
@@ -1330,10 +1341,22 @@ mod tests {
             handle
                 .inner
                 .forwarder
-                .refuse_hop_for_test(long_underlay, long_a);
+                .hold_hop_for_test(long_underlay, long_a);
+            assert!(
+                handle.address_lookup().resolve(dst.get()).is_some(),
+                "a node whose neighbors all wait for a path has a next hop: the lookup answers"
+            );
+            handle
+                .inner
+                .forwarder
+                .stick_hop_for_test(short_underlay, short);
+            handle
+                .inner
+                .forwarder
+                .stick_hop_for_test(long_underlay, long_a);
             assert!(
                 handle.address_lookup().resolve(dst.get()).is_none(),
-                "the lookup answers nothing while every neighbor on a way is refused"
+                "the lookup answers nothing while every neighbor on a way is stuck"
             );
         });
     }
@@ -1445,12 +1468,18 @@ mod tests {
         });
     }
 
-    /// The next hop of a node follows its own table and its own gate: the shorter way while its first hop is not
-    /// refused, the longer way as soon as the gate refuses it (no wait for the deadline, no new address), and no
-    /// next hop when every neighbor on a way is refused.
+    /// The next hop of a node follows its own table and its own gate: the shorter way while its first hop admits,
+    /// the longer way as soon as the first hop waits for a path (no wait for the deadline, no new address), the
+    /// shorter way again when every neighbor waits (the cells wait in the queue), and no next hop when every
+    /// neighbor on a way is stuck.
     #[test]
-    fn the_next_hop_switches_when_the_gate_refuses_a_hop_and_has_none_when_every_hop_is_refused() {
+    fn the_next_hop_switches_when_a_hop_waits_holds_when_all_wait_and_has_none_when_all_are_stuck()
+    {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop underlay stays on the relay: this hop is not advertised as a link",
+            );
             let (
                 handle,
                 [
@@ -1472,22 +1501,32 @@ mod tests {
             handle
                 .inner
                 .forwarder
-                .refuse_hop_for_test(short_underlay, short);
+                .hold_hop_for_test(short_underlay, short);
             assert_eq!(
                 next(None),
                 NextHop::Forward(long_a),
-                "the gate refuses the shorter way now"
+                "the shorter way waits for a path now, and the longer way admits"
             );
 
             handle
                 .inner
                 .forwarder
-                .refuse_hop_for_test(long_underlay, long_a);
+                .hold_hop_for_test(long_underlay, long_a);
             assert_eq!(
                 next(None),
-                NextHop::Unreachable,
-                "both neighbors are refused"
+                NextHop::Forward(short),
+                "both neighbors wait: the node holds its cells for the shorter way, it does not refuse them"
             );
+
+            handle
+                .inner
+                .forwarder
+                .stick_hop_for_test(short_underlay, short);
+            handle
+                .inner
+                .forwarder
+                .stick_hop_for_test(long_underlay, long_a);
+            assert_eq!(next(None), NextHop::Unreachable, "both neighbors are stuck");
             assert!(
                 handle.route_addr(dst).is_none(),
                 "no address while no way is open"

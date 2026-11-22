@@ -336,17 +336,28 @@ impl Topology {
             .map(|(origin, _)| *origin)
     }
 
-    /// The next hop of a cell at `node` for `dst`, from the vectors that we hold and without the hops that
-    /// `refused` names: see [`next_hop::next_hop`]. No cell came from anywhere here (`from` is applied by the
-    /// caller).
-    pub(crate) fn next_hop(&self, node: AppId, dst: AppId, refused: &HashSet<AppId>) -> NextHop {
+    /// The next hop of a cell at `node` for `dst`, from the vectors that we hold, with the hops that are stuck
+    /// removed and the hops in wait behind the others: see [`next_hop::next_hop`]. No cell came from anywhere
+    /// here (`from` is applied by the caller).
+    pub(crate) fn next_hop(
+        &self,
+        node: AppId,
+        dst: AppId,
+        stuck: &HashSet<AppId>,
+        waiting: &HashSet<AppId>,
+    ) -> NextHop {
         let graph = self.graph();
         // A neighbor with no vector has no underlay address: this node cannot dial it, so it is no candidate
         // until its vector is here.
         let links = graph.links_of(node).iter();
         let known = links.filter(|(neighbor, _)| self.vectors.contains_key(neighbor));
         let dialable: Vec<(AppId, LinkMetric)> = known.copied().collect();
-        next_hop::next_hop(&dialable, &graph.distances_to(dst), refused, None)
+        next_hop::next_hop(
+            &dialable,
+            &graph.distances_to(dst),
+            next_hop::GateView { waiting, stuck },
+            None,
+        )
     }
 
     /// A JSON-serializable snapshot of the routing graph from `self_id`'s point
@@ -653,7 +664,7 @@ mod tests {
             "no edge of the crashed peer is left"
         );
         assert_eq!(
-            store.next_hop(na, nb, &HashSet::new()),
+            store.next_hop(na, nb, &HashSet::new(), &HashSet::new()),
             NextHop::Unreachable,
             "its underlay is gone too, so it is no next hop"
         );
@@ -839,17 +850,17 @@ mod tests {
         ingest(&mut store, vector(nd, 1, &[]));
         let none = HashSet::new();
         assert_eq!(
-            store.next_hop(na, nd, &none),
+            store.next_hop(na, nd, &none, &HashSet::new()),
             NextHop::Forward(nb),
             "na reaches nd through nb"
         );
         assert_eq!(
-            store.next_hop(nb, nd, &none),
+            store.next_hop(nb, nd, &none, &HashSet::new()),
             NextHop::Forward(nc),
             "nb reaches nd through nc"
         );
         assert_eq!(
-            store.next_hop(nc, nd, &none),
+            store.next_hop(nc, nd, &none, &HashSet::new()),
             NextHop::Forward(nd),
             "nc is next to nd"
         );
@@ -904,14 +915,14 @@ mod tests {
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         // nc never advertised its own vector, so its underlay addr is unknown.
         assert_eq!(
-            store.next_hop(na, nc, &HashSet::new()),
+            store.next_hop(na, nc, &HashSet::new(), &HashSet::new()),
             NextHop::Forward(nb),
             "the destination needs no vector: nb is a neighbor with one"
         );
         let mut alone = Topology::default();
         ingest(&mut alone, vector(na, 1, &[(nb, 1)]));
         assert_eq!(
-            alone.next_hop(na, nb, &HashSet::new()),
+            alone.next_hop(na, nb, &HashSet::new(), &HashSet::new()),
             NextHop::Unreachable,
             "a neighbor with no vector cannot be dialed, so it is no next hop"
         );
@@ -927,7 +938,7 @@ mod tests {
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
         assert_eq!(
-            store.next_hop(na, nd, &HashSet::new()),
+            store.next_hop(na, nd, &HashSet::new(), &HashSet::new()),
             NextHop::Forward(nd),
             "the cheaper direct hop wins over the chain"
         );
@@ -946,12 +957,12 @@ mod tests {
         ingest(&mut store, vector(nd, 1, &[]));
 
         assert_eq!(
-            store.next_hop(na, nd, &HashSet::new()),
+            store.next_hop(na, nd, &HashSet::new(), &HashSet::new()),
             NextHop::Forward(nx),
             "control: with nothing refused the direct neighbor is the best"
         );
         assert_eq!(
-            store.next_hop(na, nd, &HashSet::from([nx])),
+            store.next_hop(na, nd, &HashSet::from([nx]), &HashSet::new()),
             NextHop::Forward(nh),
             "a refused x is no next hop of a, and it is still on the way of h"
         );
@@ -973,13 +984,13 @@ mod tests {
         ingest(&mut store, vector(nb, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
-        let first = store.next_hop(na, nd, &HashSet::new());
+        let first = store.next_hop(na, nd, &HashSet::new(), &HashSet::new());
         let NextHop::Forward(arm) = first else {
             panic!("a way exists: {first:?}");
         };
         let other = if arm == nb { nc } else { nb };
         assert_eq!(
-            store.next_hop(na, nd, &HashSet::from([arm])),
+            store.next_hop(na, nd, &HashSet::from([arm]), &HashSet::new()),
             NextHop::Forward(other),
             "the other arm of the diamond takes over"
         );
@@ -995,7 +1006,7 @@ mod tests {
 
     /// The neighbor that `src` picks as the next hop of a cell for `dst`, with no neighbor refused.
     fn first_hop(store: &Topology, src: AppId, dst: AppId) -> Option<AppId> {
-        match store.next_hop(src, dst, &HashSet::new()) {
+        match store.next_hop(src, dst, &HashSet::new(), &HashSet::new()) {
             NextHop::Forward(neighbor) => Some(neighbor),
             NextHop::TurnedBack | NextHop::Unreachable => None,
         }
@@ -1042,7 +1053,7 @@ mod tests {
             "the best cost is the native path's cost"
         );
         assert_eq!(
-            store.next_hop(src, dst, &HashSet::from([n1])),
+            store.next_hop(src, dst, &HashSet::from([n1]), &HashSet::new()),
             NextHop::Forward(tab),
             "the browser way is still a way: it takes over when the native neighbor is refused"
         );

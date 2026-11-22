@@ -23,6 +23,7 @@ use habilis_network_iroh_transport_util::{Rung, custom_rung, is_blocked_to, remo
 use iroh::endpoint::Connection;
 use iroh::endpoint::transports::Addr;
 use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
+use n0_future::StreamExt;
 use n0_future::time::{Duration, Instant, MissedTickBehavior};
 use tokio::sync::mpsc;
 
@@ -186,6 +187,11 @@ impl RelayGate {
         }
     }
 
+    /// The next call reads the paths of the connection again: a path event says that they changed.
+    fn forget_reading(&mut self) {
+        self.reading = None;
+    }
+
     /// Whether a cell may cross `connection` now.
     fn admits(&mut self, connection: &Connection) -> bool {
         self.admits_paths(|| paths_of(connection))
@@ -234,20 +240,41 @@ impl RelayGate {
     }
 }
 
+/// How the gate of this node sees the connection to one next hop.
+///
+/// The hop is in one of three states, and only the third leaves the candidates of a cell:
+///
+/// - `Admit`: a selected path that is not the relay, and the gate may read it. Cells go out.
+/// - `Wait`: no such path now, whatever the history of the connection: a path came and was lost, or none
+///   came yet. The hop stays a candidate, behind every hop that admits. Its cells wait in the bounded queue of
+///   its writer, and the wait ends when a path is selected, when the connection closes, or at the deadline.
+/// - `Stuck`: the wait lasted the deadline. The hop is no candidate and is not advertised as a link, and the
+///   cells that waited are dropped and counted.
+#[derive(Debug, Clone, Copy)]
+enum HopState {
+    Admit,
+    Wait { since: Instant },
+    Stuck,
+}
+
+impl HopState {
+    /// Whether two states are the same state, the time of a wait aside.
+    fn same_kind(self, other: Self) -> bool {
+        mem::discriminant(&self) == mem::discriminant(&other)
+    }
+}
+
 /// How one next hop's underlay is doing under the relay rule.
 ///
 /// The entry lives as long as the hop's writer: a retiring writer calls
 /// `forget`, which clears a stuck mark too. A hop that is still on the relay is
-/// then advertised again until its next writer has been refused for the
+/// then advertised again until its next writer has waited for the
 /// deadline: one retry each time a writer dies, not a loop.
 #[derive(Debug, Clone, Copy)]
 struct HopHealth {
     /// The hop's application id: what a link-vector names.
     app_id: AppId,
-    /// Since when the gate has refused this hop without a break.
-    refused_since: Option<Instant>,
-    /// Refused for longer than the deadline: not advertised as a link.
-    stuck: bool,
+    state: HopState,
 }
 
 /// The outbound writer set and its shared byte budget.
@@ -268,9 +295,9 @@ struct WriterPool {
     /// Woken when the gate starts to refuse a hop, and when it admits one that it
     /// refused: the moments at which the best first hop to a peer can change.
     route_wake: Arc<sync::Notify>,
-    /// Raised each time the set of hops that the gate refuses changes, so a next hop that was computed from that
-    /// set can tell that it is stale.
-    refusing_generation: AtomicU64,
+    /// Raised each time a hop changes its state (admit, wait, stuck), so a next hop that was computed from the
+    /// states can tell that it is stale.
+    gate_generation: AtomicU64,
     /// The connection of each live writer, keyed like `writers`, for a test that reads its paths.
     #[cfg(feature = "test-hooks")]
     connections: Mutex<HashMap<UnderlayId, Connection>>,
@@ -290,9 +317,9 @@ impl WriterPool {
         }
     }
 
-    /// The number of changes that the set of refused hops has had.
-    fn refusing_generation(&self) -> u64 {
-        self.refusing_generation.load(Ordering::Relaxed)
+    /// The number of changes of state that the hops have had.
+    fn gate_generation(&self) -> u64 {
+        self.gate_generation.load(Ordering::Relaxed)
     }
 
     fn release(&self, cost: usize) {
@@ -304,12 +331,11 @@ impl WriterPool {
             underlay,
             HopHealth {
                 app_id,
-                refused_since: None,
-                stuck: false,
+                state: HopState::Admit,
             },
         );
-        if replaced.is_some_and(|hop| hop.refused_since.is_some()) {
-            self.refusing_generation.fetch_add(1, Ordering::Relaxed);
+        if replaced.is_some_and(|hop| !hop.state.same_kind(HopState::Admit)) {
+            self.gate_generation.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -319,8 +345,8 @@ impl WriterPool {
             .lock()
             .expect("health mutex poisoned")
             .remove(&underlay);
-        if removed.is_some_and(|hop| hop.refused_since.is_some()) {
-            self.refusing_generation.fetch_add(1, Ordering::Relaxed);
+        if removed.is_some_and(|hop| !hop.state.same_kind(HopState::Admit)) {
+            self.gate_generation.fetch_add(1, Ordering::Relaxed);
         }
         #[cfg(feature = "test-hooks")]
         self.connections
@@ -329,26 +355,35 @@ impl WriterPool {
             .remove(&underlay);
     }
 
-    /// The gate refused this hop just now. Past the deadline the hop is stuck,
-    /// said once in the log.
-    fn note_refused(&self, underlay: UnderlayId, stuck_after: Duration) {
+    /// The gate does not admit this hop just now. A hop that admitted goes into wait. A hop that has waited
+    /// for the deadline is stuck, said once in the log. Gives the state of the hop after the call.
+    fn note_waiting(&self, underlay: UnderlayId, stuck_after: Duration) -> HopState {
         let mut health = self.health.lock().expect("health mutex poisoned");
         let Some(hop) = health.get_mut(&underlay) else {
-            return;
+            return HopState::Wait {
+                since: Instant::now(),
+            };
         };
-        if hop.refused_since.is_none() {
-            self.refusing_generation.fetch_add(1, Ordering::Relaxed);
-            self.route_wake.notify_one();
+        match hop.state {
+            HopState::Admit => {
+                hop.state = HopState::Wait {
+                    since: Instant::now(),
+                };
+                self.gate_generation.fetch_add(1, Ordering::Relaxed);
+                self.route_wake.notify_one();
+            }
+            HopState::Wait { since } if since.elapsed() >= stuck_after => {
+                hop.state = HopState::Stuck;
+                self.gate_generation.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    hop = %underlay.fmt_short(),
+                    app_id = %hop.app_id.fmt_short(),
+                    "multihop underlay stays on the relay: this hop is not advertised as a link"
+                );
+            }
+            HopState::Wait { .. } | HopState::Stuck => {}
         }
-        let since = *hop.refused_since.get_or_insert_with(Instant::now);
-        if !hop.stuck && since.elapsed() >= stuck_after {
-            hop.stuck = true;
-            tracing::warn!(
-                hop = %underlay.fmt_short(),
-                app_id = %hop.app_id.fmt_short(),
-                "multihop underlay stays on the relay: this hop is not advertised as a link"
-            );
-        }
+        hop.state
     }
 
     /// The gate admitted this hop: it is a link again.
@@ -357,11 +392,12 @@ impl WriterPool {
         let Some(hop) = health.get_mut(&underlay) else {
             return;
         };
-        if hop.refused_since.take().is_some() {
-            self.refusing_generation.fetch_add(1, Ordering::Relaxed);
+        let before = mem::replace(&mut hop.state, HopState::Admit);
+        if !before.same_kind(HopState::Admit) {
+            self.gate_generation.fetch_add(1, Ordering::Relaxed);
             self.route_wake.notify_one();
         }
-        if mem::take(&mut hop.stuck) {
+        if matches!(before, HopState::Stuck) {
             tracing::info!(
                 hop = %underlay.fmt_short(),
                 app_id = %hop.app_id.fmt_short(),
@@ -370,17 +406,44 @@ impl WriterPool {
         }
     }
 
-    /// The hops that the gate refuses now, stuck or not.
-    fn refusing_app_ids(&self) -> Vec<AppId> {
+    /// The hops that wait for a direct path now: candidates, behind the hops that admit.
+    fn waiting_app_ids(&self) -> Vec<AppId> {
         let health = self.health.lock().expect("health mutex poisoned");
-        let refusing = health.values().filter(|hop| hop.refused_since.is_some());
-        refusing.map(|hop| hop.app_id).collect()
+        let waiting = health
+            .values()
+            .filter(|hop| matches!(hop.state, HopState::Wait { .. }));
+        waiting.map(|hop| hop.app_id).collect()
     }
 
+    /// The hops that waited for the whole deadline: no candidates, and not advertised as links.
     fn stuck_app_ids(&self) -> Vec<AppId> {
         let health = self.health.lock().expect("health mutex poisoned");
-        let stuck = health.values().filter(|hop| hop.stuck);
+        let stuck = health
+            .values()
+            .filter(|hop| matches!(hop.state, HopState::Stuck));
         stuck.map(|hop| hop.app_id).collect()
+    }
+}
+
+/// A cell that this node does not send: counted, and its bytes go back to the budget.
+fn drop_cell(pool: &WriterPool, cell: &Cell) {
+    pool.release(cell.packet.len());
+    pool.refused_on_relay.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Ask the gate about the connection of `key` and tell the pool: the state of the hop after the call.
+fn settle(
+    gate: &mut RelayGate,
+    connection: &Connection,
+    pool: &WriterPool,
+    key: UnderlayId,
+    rule: RelayRule,
+) -> HopState {
+    if gate.admits(connection) {
+        pool.note_admitted(key);
+        HopState::Admit
+    } else {
+        pool.note_waiting(key, rule.stuck_after)
     }
 }
 
@@ -431,12 +494,21 @@ async fn drain_to_hop(
         .await
         .context("open underlay uni-stream")?;
     let mut gate = RelayGate::new(rule.allow_relay, underlay.id(), GateRole::Writer);
-    // Looks at the path once a second even when no cell comes, so a hop that was
-    // withdrawn for staying on the relay (and so carries no cells) is a link
-    // again once a direct path opens.
+    let key = UnderlayId::new(dst.id);
+    // Looks at the path once a second even when no cell comes, so a hop that waits for a direct path is a
+    // link again once one is selected, and a hop that waited for the deadline is stuck.
     let mut recheck = n0future_time::interval(Duration::from_secs(1));
     recheck.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // A path event says at once that the paths changed, so a wait ends when the path is selected and not up to
+    // a second later.
+    let mut path_events = connection.path_events();
+    let mut events_open = true;
+    // A cell that the writer took from its queue while the hop was in wait. It goes first when the wait ends.
+    let mut held: Option<Cell> = None;
+    let mut state = settle(&mut gate, &connection, pool, key, rule);
     loop {
+        // While the hop waits, the queue is not read: the cells stay in its bounded channel.
+        let reading = !matches!(state, HopState::Wait { .. });
         tokio::select! {
             // A connection that ended under us ends the writer. Without this arm a
             // dead connection with no cell in flight is read by the tick below as
@@ -445,31 +517,53 @@ async fn drain_to_hop(
             reason = connection.closed() => {
                 anyhow::bail!("underlay connection closed: {reason}");
             }
-            next = rx.recv() => {
+            next = rx.recv(), if reading => {
                 let Some(cell) = next else { break };
-                let cost = cell.packet.len();
-                if gate.admits(&connection) {
-                    pool.note_admitted(UnderlayId::new(dst.id));
-                } else {
-                    // Dropped like any other loss: QUIC above retransmits, and a
-                    // direct path takes over once one opens.
-                    pool.release(cost);
-                    pool.refused_on_relay.fetch_add(1, Ordering::Relaxed);
-                    pool.note_refused(UnderlayId::new(dst.id), rule.stuck_after);
-                    continue;
+                state = settle(&mut gate, &connection, pool, key, rule);
+                match state {
+                    HopState::Admit => {
+                        let cost = cell.packet.len();
+                        let written = write_cell(&mut send, &cell).await;
+                        pool.release(cost);
+                        written.context("underlay write failed")?;
+                    }
+                    HopState::Wait { .. } => held = Some(cell),
+                    // Dropped like any other loss: QUIC above retransmits, and a direct path takes over
+                    // once one opens.
+                    HopState::Stuck => drop_cell(pool, &cell),
                 }
-                let written = write_cell(&mut send, &cell).await;
-                pool.release(cost);
-                written.context("underlay write failed")?;
+            }
+            event = path_events.next(), if events_open && !rule.allow_relay => {
+                events_open = event.is_some();
+                gate.forget_reading();
+                state = settle(&mut gate, &connection, pool, key, rule);
             }
             _ = recheck.tick(), if !rule.allow_relay => {
-                if gate.admits(&connection) {
-                    pool.note_admitted(UnderlayId::new(dst.id));
-                } else {
-                    pool.note_refused(UnderlayId::new(dst.id), rule.stuck_after);
+                state = settle(&mut gate, &connection, pool, key, rule);
+            }
+        }
+        match state {
+            HopState::Admit => {
+                if let Some(cell) = held.take() {
+                    let cost = cell.packet.len();
+                    let written = write_cell(&mut send, &cell).await;
+                    pool.release(cost);
+                    written.context("underlay write failed")?;
+                }
+            }
+            HopState::Wait { .. } => {}
+            HopState::Stuck => {
+                if let Some(cell) = held.take() {
+                    drop_cell(pool, &cell);
+                }
+                while let Ok(cell) = rx.try_recv() {
+                    drop_cell(pool, &cell);
                 }
             }
         }
+    }
+    if let Some(cell) = held.take() {
+        drop_cell(pool, &cell);
     }
     let _ = send.finish();
     Ok(())
@@ -788,7 +882,7 @@ mod tests {
             );
             learn_vector(&forwarder, 2, &underlay_of(2), &[]);
             learn_vector(&forwarder, 3, &underlay_of(3), &[(destination.app_id, 1)]);
-            forwarder.refuse_hop_for_test(destination_key, destination.app_id);
+            forwarder.hold_hop_for_test(destination_key, destination.app_id);
 
             forwarder.handle_cell(
                 cell(destination.app_id, source.app_id, MAX_CELL_HOPS),
@@ -1202,6 +1296,200 @@ mod tests {
         });
     }
 
+    /// The port of the IP address that `node` advertises, which a test blocks to cut the direct path to it.
+    fn ip_port_of(node: &RelayNode) -> u16 {
+        node.underlay_addr
+            .ip_addrs()
+            .next()
+            .expect("a loopback address")
+            .port()
+    }
+
+    /// The writer of a node that has no direct path to its hop keeps the cells of that hop. The hop waits, a cell
+    /// is neither dropped nor counted as refused, and the cell goes out when a path is admitted. Before the wait
+    /// state the writer dropped the cell at once, and QUIC above had to send it again.
+    #[test]
+    fn a_cell_for_a_hop_in_wait_stays_in_the_queue_and_arrives_when_a_path_is_admitted() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let from = loopback_node(41, Duration::from_secs(30)).await;
+            let mut to = loopback_node(42, Duration::from_secs(30)).await;
+            from.learns(&to);
+            let local = from.forwarder.underlay.id();
+            habilis_network_iroh_transport_util::block_ip_to(local, [ip_port_of(&to)]);
+
+            from.forwarder.enqueue(
+                to.hop.app_id,
+                cell(to.hop.app_id, from.hop.app_id, MAX_CELL_HOPS),
+            );
+            let early = tokio_time::timeout(Duration::from_millis(1500), to.received.recv()).await;
+            assert!(
+                early.is_err(),
+                "no path is admitted: the cell does not cross"
+            );
+            assert_eq!(
+                from.forwarder.pool.refused_on_relay.load(Ordering::Relaxed),
+                0,
+                "and it was not dropped: it waits"
+            );
+            assert_eq!(
+                from.forwarder.pool.waiting_app_ids(),
+                vec![to.hop.app_id],
+                "the hop is in wait, and not stuck"
+            );
+            assert!(
+                from.forwarder.stuck_hops().is_empty(),
+                "before the deadline"
+            );
+
+            habilis_network_iroh_transport_util::block_ip_to(local, []);
+            let late = tokio_time::timeout(Duration::from_secs(5), to.received.recv()).await;
+            assert!(
+                late.is_ok_and(|delivered| delivered.is_some()),
+                "the path is admitted: the cell that waited goes out"
+            );
+            assert!(
+                from.forwarder.pool.waiting_app_ids().is_empty(),
+                "the hop admits again"
+            );
+        });
+    }
+
+    /// A wait that lasts the deadline makes the hop stuck: it leaves the candidates, and the cells that waited
+    /// are dropped, counted, and give their bytes back to the budget.
+    #[test]
+    fn a_wait_that_lasts_the_deadline_makes_the_hop_stuck_and_drops_its_queue() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop underlay stays on the relay: this hop is not advertised as a link",
+            );
+            let from = loopback_node(43, Duration::from_secs(2)).await;
+            let to = loopback_node(44, Duration::from_secs(2)).await;
+            from.learns(&to);
+            let local = from.forwarder.underlay.id();
+            habilis_network_iroh_transport_util::block_ip_to(local, [ip_port_of(&to)]);
+
+            for _ in 0..2 {
+                from.forwarder.enqueue(
+                    to.hop.app_id,
+                    cell(to.hop.app_id, from.hop.app_id, MAX_CELL_HOPS),
+                );
+            }
+            tokio_time::sleep(Duration::from_millis(500)).await;
+            assert_eq!(
+                from.forwarder.pool.refused_on_relay.load(Ordering::Relaxed),
+                0,
+                "before the deadline nothing is dropped"
+            );
+            assert_eq!(
+                from.forwarder.pool.queued_bytes.load(Ordering::Relaxed),
+                6,
+                "the 2 cells wait, 3 bytes each"
+            );
+
+            let deadline = std_Instant::now() + Duration::from_secs(8);
+            while from.forwarder.stuck_hops().is_empty() && std_Instant::now() < deadline {
+                tokio_time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(
+                from.forwarder.stuck_hops(),
+                vec![to.hop.app_id],
+                "the hop is stuck at the deadline"
+            );
+            assert_eq!(
+                from.forwarder.pool.refused_on_relay.load(Ordering::Relaxed),
+                2,
+                "the cells that waited are dropped and counted"
+            );
+            assert_eq!(
+                from.forwarder.pool.queued_bytes.load(Ordering::Relaxed),
+                0,
+                "and their bytes are back in the budget"
+            );
+            habilis_network_iroh_transport_util::block_ip_to(local, []);
+        });
+    }
+
+    /// The queue of a hop in wait is bounded: a cell past the bound is dropped and counted, and the live writer
+    /// is not replaced by a new one.
+    #[test]
+    fn the_queue_of_a_hop_in_wait_is_bounded_and_its_writer_stays() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let from = loopback_node(45, Duration::from_secs(30)).await;
+            let to = loopback_node(46, Duration::from_secs(30)).await;
+            from.learns(&to);
+            let local = from.forwarder.underlay.id();
+            habilis_network_iroh_transport_util::block_ip_to(local, [ip_port_of(&to)]);
+            from.forwarder.enqueue(
+                to.hop.app_id,
+                cell(to.hop.app_id, from.hop.app_id, MAX_CELL_HOPS),
+            );
+            // The writer does not read its queue while the hop waits, so the first cell is in the channel too.
+            tokio_time::sleep(Duration::from_millis(1500)).await;
+
+            let extra = 20;
+            for _ in 0..(super::WRITER_QUEUE + extra) {
+                from.forwarder.enqueue(
+                    to.hop.app_id,
+                    cell(to.hop.app_id, from.hop.app_id, MAX_CELL_HOPS),
+                );
+            }
+            assert_eq!(
+                from.forwarder.dropped.load(Ordering::Relaxed),
+                u64::try_from(extra + 1).expect("small"),
+                "the cells past the bound are dropped and counted: the first cell takes one place"
+            );
+            assert_eq!(live_writers(&from.forwarder), 1, "one writer, not replaced");
+            assert_eq!(
+                from.forwarder.pool.refused_on_relay.load(Ordering::Relaxed),
+                0,
+                "the cells inside the bound still wait"
+            );
+            habilis_network_iroh_transport_util::block_ip_to(local, []);
+        });
+    }
+
+    /// A node whose only neighbor waits for a path has a next hop: the origin sends, it does not refuse. A stuck
+    /// neighbor is no next hop.
+    #[test]
+    fn the_origin_sends_toward_a_hop_in_wait_and_refuses_toward_a_stuck_hop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::expect_warn(
+                "habilis_network_iroh_multihop_transport::underlay",
+                "multihop underlay stays on the relay: this hop is not advertised as a link",
+            );
+            let (forwarder, _app, _received) = forwarder().await;
+            let neighbor = stranger(2);
+            learn_vector(
+                &forwarder,
+                99,
+                &forwarder.underlay.addr(),
+                &[(neighbor.app_id, 1)],
+            );
+            learn_vector(&forwarder, 2, &underlay_of(2), &[]);
+            let key = UnderlayId::new(underlay_of(2).id);
+
+            forwarder.hold_hop_for_test(key, neighbor.app_id);
+            assert!(
+                forwarder.originate(neighbor.app_id, vec![1]).is_ok(),
+                "the only neighbor waits for a path: the origin sends"
+            );
+            assert_eq!(
+                forwarder.counters().no_next_hop,
+                0,
+                "and it counts no missing next hop"
+            );
+
+            forwarder.stick_hop_for_test(key, neighbor.app_id);
+            assert!(
+                forwarder.originate(neighbor.app_id, vec![1]).is_err(),
+                "a stuck neighbor is no next hop"
+            );
+            assert_eq!(forwarder.counters().no_next_hop, 1, "counted once");
+            forwarder.underlay.close().await;
+        });
+    }
+
     #[test]
     fn the_path_list_marks_the_selected_path_with_a_star() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -1361,10 +1649,10 @@ mod tests {
             pool.note_admitted(hop);
             assert!(!woke(&wake).await, "an admitted hop that was not refused");
 
-            pool.note_refused(hop, Duration::from_mins(1));
+            pool.note_waiting(hop, Duration::from_mins(1));
             assert!(woke(&wake).await, "the first refusal");
-            pool.note_refused(hop, Duration::from_mins(1));
-            pool.note_refused(hop, Duration::from_mins(1));
+            pool.note_waiting(hop, Duration::from_mins(1));
+            pool.note_waiting(hop, Duration::from_mins(1));
             assert!(!woke(&wake).await, "a refusal that goes on is not news");
 
             pool.note_admitted(hop);
@@ -1381,9 +1669,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (hop, app) = (stranger(21).underlay_id, stranger(22).app_id);
         let pool = super::WriterPool::default();
-        let mut seen = pool.refusing_generation();
+        let mut seen = pool.gate_generation();
         let mut moved = |watched: &super::WriterPool| {
-            let now = watched.refusing_generation();
+            let now = watched.gate_generation();
             let moved = now != seen;
             seen = now;
             moved
@@ -1393,13 +1681,13 @@ mod tests {
         assert!(!moved(&pool), "a hop that was tracked and never refused");
         pool.note_admitted(hop);
         assert!(!moved(&pool), "an admitted hop that was not refused");
-        pool.note_refused(hop, Duration::from_mins(1));
+        pool.note_waiting(hop, Duration::from_mins(1));
         assert!(moved(&pool), "the first refusal");
-        pool.note_refused(hop, Duration::from_mins(1));
+        pool.note_waiting(hop, Duration::from_mins(1));
         assert!(!moved(&pool), "a refusal that goes on");
         pool.note_admitted(hop);
         assert!(moved(&pool), "the recovery");
-        pool.note_refused(hop, Duration::from_mins(1));
+        pool.note_waiting(hop, Duration::from_mins(1));
         assert!(moved(&pool), "a second first refusal");
         pool.forget(hop);
         assert!(
@@ -1407,7 +1695,7 @@ mod tests {
             "a refused hop that is forgotten leaves the set"
         );
         pool.track(hop, app);
-        pool.note_refused(hop, Duration::from_mins(1));
+        pool.note_waiting(hop, Duration::from_mins(1));
         assert!(moved(&pool), "refused again");
         pool.track(hop, app);
         assert!(
@@ -1426,11 +1714,16 @@ mod tests {
         let (hop, app) = (stranger(11).underlay_id, stranger(12).app_id);
         let pool = super::WriterPool::default();
         pool.track(hop, app);
-        pool.note_refused(hop, Duration::ZERO);
-        assert_eq!(pool.stuck_app_ids(), vec![app], "refused past the deadline");
+        pool.note_waiting(hop, Duration::ZERO);
+        assert!(
+            pool.stuck_app_ids().is_empty(),
+            "the first call only starts the wait"
+        );
+        pool.note_waiting(hop, Duration::ZERO);
+        assert_eq!(pool.stuck_app_ids(), vec![app], "waited for the deadline");
         pool.note_admitted(hop);
         assert!(pool.stuck_app_ids().is_empty(), "admitted: a link again");
-        pool.note_refused(hop, Duration::from_mins(1));
+        pool.note_waiting(hop, Duration::from_mins(1));
         assert!(
             pool.stuck_app_ids().is_empty(),
             "a fresh refusal is not yet stuck"

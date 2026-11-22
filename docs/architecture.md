@@ -819,7 +819,8 @@ Without the custom selector, the connection settles on the relay for its whole l
 `habilis-network-iroh-multihop-transport` reaches peers through relaying peers when no direct path exists.
 Each node broadcasts a link vector, and every node folds the freshest vectors into one metric-weighted graph.
 The next hop of a cell is computed by each node from its own table: one Dijkstra from the destination over the reversed links gives the distance of each neighbor, and the cost of a neighbor is its link plus its distance.
-A neighbor that the gate of the node refuses now is removed before the choice, an equal cost goes to the lowest app id, and a cell never goes back to the hop that it came from.
+The gate of the node puts each neighbor in one of three states. A neighbor that admits cells is taken before a neighbor that waits for a direct path, whatever the cost. A neighbor that waited for the whole deadline (`relay_stuck_after`, 20 s) is stuck: it is no candidate and it leaves the link vector. An equal cost goes to the lowest app id, and a cell never goes back to the hop that it came from.
+The cells for a neighbor in wait stay in the bounded queue of its writer and go out when a direct path is selected. At the deadline they are dropped and counted. A queue that is full drops the cell and counts it, with a debug line.
 The address of a peer is its application id and nothing more: no route is stored in iroh, so none can go stale.
 
 Every node advertises one cost for the links that leave it, `HandleConfig::link_cost`: 10 for a native node.
@@ -851,7 +852,8 @@ A reply goes to the source of the cell, by the table of each node on the way: th
 A forwarder dials a next hop only at the address of the vector that the hop signed, and a neighbor that has no vector yet is no candidate.
 iroh names a path by the bytes of its address, so the address holds the destination only: one peer is one address and one path for the whole life of the pair.
 A relay also never dials an address that a cell carries.
-Between the death of a link and the agreement of the tables, cells that pass the node at that link are lost unless that node has another neighbor toward the destination; that node switches at once, because its own gate refuses the hop.
+Between the death of a link and the agreement of the tables, cells that pass the node at that link are lost unless that node has another neighbor toward the destination; that node switches at once, because that neighbor admits and the other one waits.
+Known limit: while two links to one node are down at once, cells can be turned back between two nodes that each hold a vector that names the other way. The loss is bounded by `relay_stuck_after`, each cell is counted (`turned_back`), and QUIC above sends it again.
 
 ### 9.4 Byte streams
 

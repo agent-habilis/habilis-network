@@ -2770,7 +2770,7 @@ mod route_wake_tests {
                     .cloned()
                     .expect("the direct route is dialed");
 
-                me.refuse_hop_for_test(dst.app_id());
+                me.hold_hop_for_test(dst.app_id());
                 route_wake_arm(&mut state, &context);
 
                 let dialed: TransportAddr = state

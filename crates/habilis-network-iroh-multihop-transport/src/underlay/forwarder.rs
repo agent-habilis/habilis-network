@@ -129,13 +129,13 @@ impl Forwarder {
         let topology = self.topology.read().expect("topology lock poisoned");
         let key = CacheKey {
             topology: topology.generation(),
-            refusing: self.pool.refusing_generation(),
+            gate: self.pool.gate_generation(),
         };
         let mut cache = self.next_hops.lock().expect("next hop cache poisoned");
-        let kept = cache.get_or_compute(key, dst, || {
-            let refusing = self.pool.refusing_app_ids();
-            let refused: HashSet<AppId> = refusing.into_iter().collect();
-            topology.next_hop(self.self_app_id, dst, &refused)
+        let kept: NextHop = cache.get_or_compute(key, dst, || {
+            let stuck: HashSet<AppId> = self.pool.stuck_app_ids().into_iter().collect();
+            let waiting: HashSet<AppId> = self.pool.waiting_app_ids().into_iter().collect();
+            topology.next_hop(self.self_app_id, dst, &stuck, &waiting)
         });
         kept.unless_from(from)
     }
@@ -201,12 +201,19 @@ impl Forwarder {
         Arc::clone(&self.pool.route_wake)
     }
 
-    /// Mark a hop as refused now, without the deadline having passed, as a test of
-    /// the choice of a next hop needs it.
+    /// Put a hop in wait now, as if the gate did not admit it, as a test of the choice of a next hop needs it.
     #[cfg(any(test, feature = "test-hooks"))]
-    pub(crate) fn refuse_hop_for_test(&self, underlay: UnderlayId, app_id: AppId) {
+    pub(crate) fn hold_hop_for_test(&self, underlay: UnderlayId, app_id: AppId) {
         self.pool.track(underlay, app_id);
-        self.pool.note_refused(underlay, Duration::from_mins(1));
+        self.pool.note_waiting(underlay, Duration::from_mins(1));
+    }
+
+    /// Make a hop stuck now, without the deadline having passed, as a test of the choice of a next hop needs it.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn stick_hop_for_test(&self, underlay: UnderlayId, app_id: AppId) {
+        self.pool.track(underlay, app_id);
+        self.pool.note_waiting(underlay, Duration::ZERO);
+        self.pool.note_waiting(underlay, Duration::ZERO);
     }
 
     /// The open paths of the connection that our writer holds toward the underlay `hop`, now,
@@ -231,10 +238,11 @@ impl Forwarder {
         }
     }
 
-    /// Count a cell that this node dropped because its table and the tables around it do not agree (no next hop, a
-    /// cell sent back, no forward left): normal while the vectors travel after a link came or went, so the line is
-    /// a debug line, for the first one and for each 256th. The counters say how many.
-    fn note_disagreement(&self, reason: &str) {
+    /// Count a cell that this node dropped in a state that is normal in this design: its table and the tables
+    /// around it do not agree (no next hop, a cell sent back, no forward left) while the vectors travel, or the
+    /// queue of a hop that waits for a path is full. A person has nothing to do about it, so the line is a debug
+    /// line, for the first one and for each 256th. The counters say how many.
+    fn note_normal_drop(&self, reason: &str) {
         if let Some(total) = self.count_drop() {
             tracing::debug!(target: LOG_TARGET, total, reason, "multihop forwarder dropping cells: the tables disagree");
         }
@@ -283,10 +291,19 @@ impl Forwarder {
             return;
         };
         let key = UnderlayId::new(address.id);
-        if let Some(sender) = self.writer_for(key)
-            && sender.try_send(cell.clone()).is_ok()
-        {
-            return;
+        let mut cell = cell;
+        if let Some(sender) = self.writer_for(key) {
+            match sender.try_send(cell) {
+                Ok(()) => return,
+                // The queue of a hop in wait is full: the cell does not fit, as a full NIC queue drops a
+                // packet. A new writer would only replace a live one.
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    self.pool.release(cost);
+                    self.note_normal_drop("writer queue full");
+                    return;
+                }
+                Err(mpsc::error::TrySendError::Closed(returned)) => cell = returned,
+            }
         }
         let Some(sender) = self.spawn_writer(address, neighbor) else {
             self.pool.release(cost);
@@ -320,7 +337,7 @@ impl Forwarder {
     pub(crate) fn handle_cell(&self, cell: Cell, from: UnderlayId) {
         if cell.hops_left > MAX_CELL_HOPS {
             self.hop_limit.fetch_add(1, Ordering::Relaxed);
-            self.note_disagreement("cell claims more forwards than the limit");
+            self.note_normal_drop("cell claims more forwards than the limit");
             return;
         }
         if cell.dst == self.self_app_id {
@@ -329,7 +346,7 @@ impl Forwarder {
         }
         if cell.hops_left == 0 {
             self.hop_limit.fetch_add(1, Ordering::Relaxed);
-            self.note_disagreement("cell has no forward left");
+            self.note_normal_drop("cell has no forward left");
             return;
         }
         let from_app = {
@@ -343,11 +360,11 @@ impl Forwarder {
             }
             NextHop::TurnedBack => {
                 self.turned_back.fetch_add(1, Ordering::Relaxed);
-                self.note_disagreement("the best next hop is the hop that the cell came from");
+                self.note_normal_drop("the best next hop is the hop that the cell came from");
             }
             NextHop::Unreachable => {
                 self.no_next_hop.fetch_add(1, Ordering::Relaxed);
-                self.note_disagreement("no neighbor reaches the destination");
+                self.note_normal_drop("no neighbor reaches the destination");
             }
         }
     }

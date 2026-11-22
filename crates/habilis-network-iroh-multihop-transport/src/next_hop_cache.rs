@@ -5,12 +5,12 @@ use std::collections::HashMap;
 use crate::app_id::AppId;
 use crate::next_hop::NextHop;
 
-/// What a cached next hop was computed from: the generation of the topology, and the generation of the set of
-/// hops that the gate refuses. A value is current only while both are the same.
+/// What a cached next hop was computed from: the generation of the topology, and the generation of the states of
+/// the hops under the gate. A value is current only while both are the same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct CacheKey {
     pub(crate) topology: u64,
-    pub(crate) refusing: u64,
+    pub(crate) gate: u64,
 }
 
 /// One map from destination to its next hop, valid for one [`CacheKey`]. A different key clears the map, so no
@@ -72,7 +72,7 @@ mod tests {
         let (first, second, hop) = (id(1), id(2), id(3));
         let key = CacheKey {
             topology: 1,
-            refusing: 1,
+            gate: 1,
         };
         let calls = Cell::new(0);
         let mut cache = NextHopCache::default();
@@ -104,13 +104,13 @@ mod tests {
         let mut cache = NextHopCache::default();
         let before = CacheKey {
             topology: 1,
-            refusing: 1,
+            gate: 1,
         };
         ask(&mut cache, before, dst, NextHop::Forward(hop), &calls);
 
         let after = CacheKey {
             topology: 2,
-            refusing: 1,
+            gate: 1,
         };
         let answer = ask(&mut cache, after, dst, NextHop::Unreachable, &calls);
 
@@ -127,13 +127,13 @@ mod tests {
         let mut cache = NextHopCache::default();
         let before = CacheKey {
             topology: 1,
-            refusing: 1,
+            gate: 1,
         };
         ask(&mut cache, before, dst, NextHop::Forward(hop), &calls);
 
         let after = CacheKey {
             topology: 1,
-            refusing: 2,
+            gate: 2,
         };
         let answer = ask(&mut cache, after, dst, NextHop::Unreachable, &calls);
 
