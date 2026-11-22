@@ -126,8 +126,11 @@ async fn heard_from_holders(alpha: &mut Member, beta: &mut Member, observer: &mu
         );
         alpha.broadcast(&from_alpha).await;
         beta.broadcast(&from_beta).await;
-        let first = arrives(observer, &from_alpha).await;
-        let second = arrives(observer, &from_beta).await;
+        arrives(observer, &from_alpha).await;
+        arrives(observer, &from_beta).await;
+        // Both are read again after both waits: the first can have come while the second was awaited.
+        let first = observer.saw(&from_alpha);
+        let second = observer.saw(&from_beta);
         if first || second {
             return usize::from(first) + usize::from(second);
         }
@@ -148,19 +151,22 @@ fn a_second_key_under_a_nickname_is_not_admitted_and_the_two_holders_do_not_see_
         let mut beta = Member::join("dup", &alpha).await;
         let mut observer = Member::join("samenick-obs", &alpha).await;
 
-        alpha.broadcast("from-alpha").await;
-        beta.broadcast("from-beta").await;
         let mut meshed = false;
         for round in 0..ROUNDS {
             let text = format!("from-observer-{round}");
             observer.broadcast(&text).await;
-            let at_alpha = arrives(&mut alpha, &text).await;
-            let at_beta = arrives(&mut beta, &text).await;
-            if at_alpha && at_beta {
+            arrives(&mut alpha, &text).await;
+            arrives(&mut beta, &text).await;
+            // Both are read again after both waits: the first can have come while the second was awaited.
+            if alpha.saw(&text) && beta.saw(&text) {
                 meshed = true;
                 break;
             }
         }
+        // The isolation probes go once the mesh is up: a probe sent before the links exist is lost, and its
+        // absence would prove nothing.
+        alpha.broadcast("from-alpha").await;
+        beta.broadcast("from-beta").await;
         let heard = heard_from_holders(&mut alpha, &mut beta, &mut observer).await;
         let beta_saw_alpha = arrives(&mut beta, "from-alpha").await;
         let alpha_saw_beta = arrives(&mut alpha, "from-beta").await;
