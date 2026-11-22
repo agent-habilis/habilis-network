@@ -128,12 +128,17 @@ async fn direct(args: &Args, open: &mut Open) -> Result<Measured, String> {
     let run = async {
         let alice = node(open, secret(1)).await?;
         let bob = node(open, secret(2)).await?;
-        let _ = alice
-            .handle
-            .feed_topology(alice.handle.link_vector(vec![(AppId::new(bob.id), COST)]));
-        let _ = alice
-            .handle
-            .feed_topology(bob.handle.link_vector(vec![(AppId::new(alice.id), COST)]));
+        // Every member learns the vector of every other, as gossip does in a mesh: each node picks the next hop of
+        // a cell from its own table, and the reply of bob needs the vector of alice in the table of bob.
+        let vectors = [
+            alice.handle.link_vector(vec![(AppId::new(bob.id), COST)]),
+            bob.handle.link_vector(vec![(AppId::new(alice.id), COST)]),
+        ];
+        for handle in [&alice.handle, &bob.handle] {
+            for vector in &vectors {
+                let _ = handle.feed_topology(vector.clone());
+            }
+        }
         open.routers.push(
             Router::builder(bob.app.clone())
                 .accept(BENCH_ALPN, Bench::new())
