@@ -933,6 +933,36 @@ mod tests {
         );
     }
 
+    /// The refused set removes only the neighbors of this node from the choice. A neighbor that this node refuses
+    /// still counts as a node on the way of another neighbor: A refuses X, and A > H > X > D is still a way.
+    #[test]
+    fn a_refused_neighbor_is_still_a_node_on_the_way_of_another_neighbor() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (na, nx, nh, nd) = (eid(1), eid(2), eid(3), eid(4));
+        let mut store = Topology::default();
+        ingest(&mut store, vector(na, 1, &[(nx, 1), (nh, 1)]));
+        ingest(&mut store, vector(nh, 1, &[(nx, 1)]));
+        ingest(&mut store, vector(nx, 1, &[(nd, 1)]));
+        ingest(&mut store, vector(nd, 1, &[]));
+
+        assert_eq!(
+            store.next_hop(na, nd, &HashSet::new()),
+            NextHop::Forward(nx),
+            "control: with nothing refused the direct neighbor is the best"
+        );
+        assert_eq!(
+            store.next_hop(na, nd, &HashSet::from([nx])),
+            NextHop::Forward(nh),
+            "a refused x is no next hop of a, and it is still on the way of h"
+        );
+        let distances = store.graph().distances_to(nd);
+        assert_eq!(
+            distances.get(&nh).map(|cost| cost.get()),
+            Some(2),
+            "the distance of h reads the table, which the refused set does not change"
+        );
+    }
+
     /// A refused neighbor is removed before the choice: the other arm of a diamond takes over at once.
     #[test]
     fn a_refused_arm_of_a_diamond_gives_way_to_the_other() {

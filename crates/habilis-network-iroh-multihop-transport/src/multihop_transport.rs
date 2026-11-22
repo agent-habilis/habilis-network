@@ -157,6 +157,11 @@ impl CustomSender for MultihopSender {
         Destination::decode(address).is_some()
     }
 
+    /// An error from this method is harmless for the path. iroh logs it at debug level ("dropped transmit", in
+    /// `socket/transports.rs` of the pinned fork, in `poll_send` of `Transport`), answers `Ok` to QUIC, and QUIC then
+    /// treats the packet as lost and sends it again. iroh does not close the path, does not mark the transport as
+    /// broken, and does not log once for each packet above debug level. So this method answers an error when the
+    /// node has no next hop for the destination now, which is normal for a moment after a link came or went.
     fn poll_send(
         &self,
         _cx: &mut Context<'_>,
