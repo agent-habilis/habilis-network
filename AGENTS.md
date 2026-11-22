@@ -326,7 +326,7 @@ Issue #29 records each decision.
 
 ### Remaining `#[expect]` attributes
 
-Seventeen `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (the C ABI of the ffi crate and its test, libc calls that have no safe wrapper, and a test hook between a fork and its exec), one that suppresses `deprecated`, six that suppress a `clippy` lint, and one that suppresses `dead_code`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
+Sixteen `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (the C ABI of the ffi crate and its test, libc calls that have no safe wrapper, and a test hook between a fork and its exec), one that suppresses `deprecated`, five that suppress a `clippy` lint, and one that suppresses `dead_code`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
 
 | File | Lint | Reason |
 | --- | --- | --- |
@@ -340,8 +340,7 @@ Seventeen `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (th
 | `habilis-network/src/daemon/state/event_loop_state.rs` (constructor `EventLoopState::new`) | `clippy::too_many_lines` | the proof and the member-key lock are four fields over the limit; the constructor is split later |
 | `habilis-network-ffi/src/ffi.rs` (crate) | `unsafe_code` | this module is the C ABI: raw pointers from the foreign caller, and a boxed handle it owns |
 | `habilis-network-ffi/tests/ffi_smoke.rs` (crate) | `unsafe_code` | the surface under test is `unsafe extern "C"`; calling it is the test |
-| `habilis-network/src/daemon/setup.rs` (`hold_member_key`) | `clippy::unused_async` | the same signature as the version for a target with files |
-| `habilis-network/src/daemon/setup.rs` (`hold_member_key_once`) | `clippy::unnecessary_wraps` | the same signature as the version for a target with files |
+| `habilis-network/src/daemon/setup.rs` (`hold_member_key`) | `clippy::unnecessary_wraps` | the same signature as the version for a target with files |
 | `habilis-network/src/daemon/setup.rs` (test `a_restart_waits_out_a_child_that_holds_a_copy_of_the_lock_until_its_exec`) | `unsafe_code` | `CommandExt::pre_exec`: only a hook between the fork and the exec keeps a child in the gap where it holds a copy of the lock file |
 | `habilis-network/src/daemon/setup.rs` (`next_run`) | `clippy::unnecessary_wraps` | the same signature as the file-backed version, so the caller is one call |
 | `habilis-network/src/daemon/setup.rs` (`member_key`) | `clippy::unnecessary_wraps` | the same signature as the version for a target with files |

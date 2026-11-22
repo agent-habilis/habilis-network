@@ -381,7 +381,7 @@ async fn claim_host(
 ) -> Result<(Option<path::PathBuf>, OwnedEndpoints, Option<File>)> {
     let named_path: Option<path::PathBuf> = runtime.state_file.take();
     let base = runtime.runtime_base.as_deref();
-    match setup::hold_daemon_lock(base, &mesh.mesh, &mesh.author, named_path.as_deref()).await {
+    match setup::hold_daemon_lock(base, &mesh.mesh, &mesh.author, named_path.as_deref()) {
         Ok(lock) => Ok((named_path, owned, lock)),
         Err(error) => {
             owned.close().await;
