@@ -121,7 +121,7 @@ The engine depends on `habilis-network-iroh-webrtc-transport` on both targets: t
 | `habilis-network-wasm` | The browser peer: `habilis_network::membership` and `habilis-network-stream` as wasm-bindgen classes. Runs only on wasm32. |
 | `habilis-network-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `habilis-network-blobs`. The engine keeps the chunked values of the shared state in it (section 8.3). |
 | `habilis-network-iroh-webrtc-transport` | An iroh custom transport: QUIC datagrams over a WebRTC data channel. |
-| `habilis-network-iroh-multihop-transport` | An iroh custom transport: source-routed relaying through peers. |
+| `habilis-network-iroh-multihop-transport` | An iroh custom transport: hop-by-hop relaying through peers. |
 
 The measurement that drove the split was a consumer binary where the engine cost 39.4 MiB of 40.7 MiB.
 
@@ -818,8 +818,9 @@ Without the custom selector, the connection settles on the relay for its whole l
 
 `habilis-network-iroh-multihop-transport` reaches peers through relaying peers when no direct path exists.
 Each node broadcasts a link vector, and every node folds the freshest vectors into one metric-weighted graph.
-Route computation is a local Dijkstra run.
-A route is a **source route**: the sender packs the full hop list into the address.
+The next hop of a cell is computed by each node from its own table: one Dijkstra from the destination over the reversed links gives the distance of each neighbor, and the cost of a neighbor is its link plus its distance.
+A neighbor that the gate of the node refuses now is removed before the choice, an equal cost goes to the lowest app id, and a cell never goes back to the hop that it came from.
+The address of a peer is its application id and nothing more: no route is stored in iroh, so none can go stale.
 
 Every node advertises one cost for the links that leave it, `HandleConfig::link_cost`: 10 for a native node.
 A browser advertises ten times more (`HandleConfig::for_browser`, 100), so a route avoids a browser as a hop.
@@ -833,21 +834,24 @@ With measured costs that differ, the guard becomes a relation on the measured fl
 
 ```mermaid
 flowchart LR
-    A["A (source)"] -->|"cell: path=[B,C], pos=0"| B["B (relay)"]
-    B -->|"cell: pos=1"| C["C (destination)"]
-    C -->|"reverse route"| B
+    A["A (source)"] -->|"cell: dst=C, src=A, hops_left=8"| B["B (relay)"]
+    B -->|"cell: hops_left=7"| C["C (destination)"]
+    C -->|"cell: dst=A, src=C"| B
     B --> A
 ```
 
-The unit of forwarding is a cell: a length prefix and a postcard body with the path, the position, and the packet.
-The only decision a relay makes is "forward to the next hop" or "deliver".
+The unit of forwarding is a cell: a length prefix and a postcard body with the destination, the source, the forwards left, and the packet.
+A node that holds a cell delivers it if it is for the node, drops it if no forward is left, and else sends it to the next hop that its own table gives.
+A cell is dropped, and counted, when no neighbor reaches the destination (`no_next_hop`), when the best neighbor is the hop it came from (`turned_back`), or when it has no forward left or claims more than the limit of 8 (`hop_limit`).
+The source of a cell is a claim, and QUIC protects the connection: a forged source costs a dropped packet.
+The underlay endpoint accepts a connection from any peer that can dial it and speaks the forward protocol, and the limit of forwards bounds the work that a stranger can make.
 QUIC runs end to end, so relays forward opaque, already-encrypted packets.
 The transport owns a dedicated underlay endpoint, because the application endpoint cannot recursively carry itself.
-The reverse route derives from the forward route, so a reply needs no fresh lookup.
-A hop in a route is two ids, the application endpoint and its underlay endpoint, and no address.
-A forwarder dials a hop only at the address of the vector that the hop signed.
-iroh names a path by the bytes of its address, so an address inside the route would make one route two paths as soon as the two ends hold different versions of it.
+A reply goes to the source of the cell, by the table of each node on the way: the destination needs the vector of the sender, which a node sends at once when a link comes up.
+A forwarder dials a next hop only at the address of the vector that the hop signed, and a neighbor that has no vector yet is no candidate.
+iroh names a path by the bytes of its address, so the address holds the destination only: one peer is one address and one path for the whole life of the pair.
 A relay also never dials an address that a cell carries.
+Between the death of a link and the agreement of the tables, cells that pass the node at that link are lost unless that node has another neighbor toward the destination; that node switches at once, because its own gate refuses the hop.
 
 ### 9.4 Byte streams
 

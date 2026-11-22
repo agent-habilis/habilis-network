@@ -40,7 +40,7 @@ use crate::transport;
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct TransportHandles {
-    /// Source-routed multi-hop: reach a peer with no direct path by relaying
+    /// Hop-by-hop multi-hop: reach a peer with no direct path by relaying
     /// through intermediate peers. Built with the `multihop` feature; the native
     /// underlay builder, `build_peer_multihop_with`, is host-only.
     #[cfg(feature = "multihop")]

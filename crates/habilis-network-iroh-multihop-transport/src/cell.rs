@@ -1,70 +1,55 @@
-//! The forwarding **cell** — one opaque QUIC packet plus the source route it is
-//! travelling — and its length-delimited framing over an underlay uni-stream.
+//! The forwarding **cell** — one opaque QUIC packet, the node it is for, the node that made it, and how many
+//! more times it may be forwarded — and its length-delimited framing over an underlay uni-stream.
 //!
-//! A cell carries the whole immutable forward `path` and a `pos` index marking
-//! which hop should receive it, so a relay's only decision is "forward to
-//! `path[pos + 1]`" or "deliver, I am the destination". `source` rides along so
-//! the destination can build the return route without a fresh lookup.
+//! A cell carries no route. Each node that holds a cell picks the next hop from its own table (see
+//! [`next_hop`](crate::next_hop)), so a link that left the graph costs no more cells than the time that the
+//! tables need to agree.
 //!
-//! Every field here is written by whoever sent the cell, so none of it is
-//! trusted on arrival. `path` is a [`Route`], which validates itself while
-//! deserializing, and [`read_cell`] settles `pos` against it; whether this node
-//! may act on the result at all is
-//! [`Forwarder::handle_cell`](crate::underlay::Forwarder::handle_cell)'s
-//! decision, since only it knows who this node is and who sent the cell.
+//! Every field here is written by whoever sent the cell, so none of it is trusted on arrival. `src` is a claim:
+//! a neighbor can write any value, and QUIC protects the connection that the packet belongs to, so a forged
+//! `src` costs a dropped packet and nothing else. `hops_left` is checked against [`MAX_CELL_HOPS`] by
+//! [`Forwarder::handle_cell`](crate::underlay::Forwarder::handle_cell), which also decides whether this node may
+//! act on the cell at all, since only it knows who this node is and who sent the cell.
 
 use anyhow::{Context, Result, bail};
 use iroh::endpoint::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
 
-use crate::route::{Route, RouteHop};
+use crate::app_id::AppId;
 
 /// A cell exceeding this many bytes is refused — a corrupt/hostile length prefix
 /// must never drive an unbounded allocation. A QUIC datagram is a few kilobytes
-/// and a bounded route header under one, so this is still ample headroom.
+/// and the header of a cell is under a hundred bytes, so this is still ample headroom.
 const MAX_CELL_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// How many times a cell may be forwarded: the bound on a loop between nodes whose tables disagree, and on the
+/// work that one cell can make. A cell made here starts with this value, and a node that gets a cell with a
+/// larger value refuses it.
+pub(crate) const MAX_CELL_HOPS: u8 = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Cell {
-    /// The immutable forward route, `[first_hop, …, destination]`. Typed as a
-    /// [`Route`] rather than a bare `Vec` so a cell off the wire inherits every
-    /// route invariant — non-empty, bounded, loop-free — during deserialization.
-    pub(crate) path: Route,
-    /// Index into `path` of the hop that should receive this cell.
-    #[serde(rename = "pos")]
-    pub(crate) position: u16,
-    /// The original sender, so the destination can reverse the route to reply.
-    pub(crate) source: RouteHop,
+    /// The node that this cell is for.
+    pub(crate) dst: AppId,
+    /// The node that made the cell, which is where the packet reports that it came from.
+    pub(crate) src: AppId,
+    /// How many more times a node may forward this cell.
+    pub(crate) hops_left: u8,
     /// The opaque QUIC packet being relayed.
     pub(crate) packet: Vec<u8>,
 }
 
 impl Cell {
-    /// The hop this cell is addressed to right now. The receiver must *be* it;
-    /// anything else is a sender trying to use us as a reflector.
-    pub(crate) fn current_hop(&self) -> Option<&RouteHop> {
-        self.path.hop_at(self.position as usize)
-    }
-
-    /// The next hop to forward to, or `None` when this hop is the destination.
-    /// [`read_cell`] has established that `pos` is in range, so `None` can no
-    /// longer also mean "`pos` ran off the end".
-    pub(crate) fn next_hop(&self) -> Option<&RouteHop> {
-        self.path.hop_at(self.position as usize + 1)
-    }
-
-    /// Advance to the successor hop. Caller must have checked `next_hop` first.
-    pub(crate) fn advanced(self) -> Cell {
-        Cell {
-            path: self.path,
-            position: self.position + 1,
-            source: self.source,
-            packet: self.packet,
+    /// The cell as it leaves a node that forwards it: one forward fewer left.
+    pub(crate) fn forwarded(self) -> Self {
+        Self {
+            hops_left: self.hops_left.saturating_sub(1),
+            ..self
         }
     }
 }
 
-/// Write one length-delimited cell: `[u32 big-endian len][postcard bytes]`.
+/// Write `cell` as a 4-byte big-endian length followed by its postcard body.
 pub(crate) async fn write_cell(send: &mut SendStream, cell: &Cell) -> Result<()> {
     let bytes = postcard::to_allocvec(cell).context("serialize cell")?;
     let len = u32::try_from(bytes.len()).context("cell too large to frame")?;
@@ -75,7 +60,8 @@ pub(crate) async fn write_cell(send: &mut SendStream, cell: &Cell) -> Result<()>
     Ok(())
 }
 
-/// Read one length-delimited cell, refusing an oversized frame.
+/// Read one framed cell. A length above [`MAX_CELL_BYTES`] is refused before any allocation. The value of
+/// `hops_left` is not judged here: a node counts a cell above the limit and drops it, and keeps the connection.
 pub(crate) async fn read_cell(recv: &mut RecvStream) -> Result<Cell> {
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf)
@@ -89,104 +75,71 @@ pub(crate) async fn read_cell(recv: &mut RecvStream) -> Result<Cell> {
     recv.read_exact(&mut buffer)
         .await
         .context("read cell body")?;
-    let cell: Cell = postcard::from_bytes(&buffer).context("deserialize cell")?;
-    // `path` validated itself while deserializing; `pos` is the one field whose
-    // legality is relative to it. Settling that here is what lets `next_hop()`
-    // mean "I am the destination" and nothing else.
-    if cell.current_hop().is_none() {
-        bail!("cell pos {} is past the end of its route", cell.position);
-    }
-    Ok(cell)
+    postcard::from_bytes(&buffer).context("deserialize cell")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Cell;
-    use crate::app_id::{AppId, UnderlayId};
-    use crate::route::{MAX_ROUTE_HOPS, Route, RouteHop};
-    use iroh::{EndpointId, SecretKey};
+    use std::fmt::Write as _;
 
-    fn hop(seed: u8) -> RouteHop {
-        let id: EndpointId = SecretKey::from_bytes(&[seed; 32]).public();
-        RouteHop {
-            app_id: AppId::new(id),
-            underlay_id: UnderlayId::new(id),
-        }
+    use iroh::SecretKey;
+
+    use super::{Cell, MAX_CELL_HOPS};
+    use crate::app_id::AppId;
+
+    fn app(seed: u8) -> AppId {
+        AppId::new(SecretKey::from_bytes(&[seed; 32]).public())
     }
 
-    fn cell(hops: Vec<RouteHop>, position: u16) -> Cell {
+    fn cell(hops_left: u8) -> Cell {
         Cell {
-            path: Route::try_new(hops).expect("legal route"),
-            position,
-            source: hop(200),
-            packet: Vec::new(),
+            dst: app(1),
+            src: app(2),
+            hops_left,
+            packet: vec![7, 8, 9],
         }
     }
 
-    /// A cell's wire shape, built from a raw hop vector so a test can mint the
-    /// hostile routes `Route::try_new` would refuse.
-    fn forged_bytes(hops: Vec<RouteHop>, position: u16) -> Vec<u8> {
-        let packet: Vec<u8> = Vec::new();
-        postcard::to_allocvec(&(hops, position, hop(200), packet)).expect("serializes")
-    }
-
+    /// A cell survives its wire form, and the wire form is fixed: the destination, the source, the forwards left
+    /// and the packet. A change of it is a wire break, and it is named as one.
     #[test]
-    fn a_cyclic_route_does_not_deserialize_into_a_cell() {
+    fn a_cell_has_a_fixed_wire_form() {
         let _guard = ::habilis_network_test_tracing::init();
-        // The linchpin of the design: `Cell.path` is a `Route`, so a hostile
-        // route is refused by the codec and never reaches the forwarder.
-        let bytes = forged_bytes(vec![hop(1), hop(2), hop(1)], 0);
-        let decoded: Result<Cell, postcard::Error> = postcard::from_bytes(&bytes);
-        assert!(
-            decoded.is_err(),
-            "a cyclic route does not deserialize into a cell"
-        );
-    }
+        let bytes = postcard::to_allocvec(&cell(MAX_CELL_HOPS)).expect("a cell serializes");
+        let mut hex = String::new();
+        for byte in &bytes {
+            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+        }
 
-    #[test]
-    fn an_oversized_route_does_not_deserialize_into_a_cell() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let hops: Vec<RouteHop> = (0..=MAX_ROUTE_HOPS)
-            .map(|seed| hop(u8::try_from(seed).expect("seed fits")))
-            .collect();
-        let decoded: Result<Cell, postcard::Error> = postcard::from_bytes(&forged_bytes(hops, 0));
-        assert!(
-            decoded.is_err(),
-            "an oversized route does not deserialize into a cell"
-        );
-    }
-
-    #[test]
-    fn a_legal_route_still_deserializes_into_a_cell() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let bytes = forged_bytes(vec![hop(1), hop(2)], 0);
-        let decoded: Result<Cell, postcard::Error> = postcard::from_bytes(&bytes);
-        assert!(decoded.is_ok(), "a legal route deserializes into a cell");
-    }
-
-    #[test]
-    fn current_hop_is_none_when_pos_is_past_the_end() {
-        let _guard = ::habilis_network_test_tracing::init();
-        // Today this falls through `next_hop()`'s `None` arm and delivers an
-        // attacker's packet locally as though we were the destination.
-        assert!(
-            cell(vec![hop(1), hop(2)], 2).current_hop().is_none(),
-            "the current hop is none past the end of the route"
-        );
-    }
-
-    #[test]
-    fn current_hop_is_the_addressed_hop() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let subject = cell(vec![hop(1), hop(2)], 1);
         assert_eq!(
-            subject.current_hop(),
-            Some(&hop(2)),
-            "the current hop is the addressed hop"
+            hex,
+            concat!(
+                "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+                "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+                "08",
+                "03070809"
+            ),
+            "dst, src, hops_left, then the packet with its length"
         );
-        assert!(
-            subject.next_hop().is_none(),
-            "the subject cell has no next hop"
+        let decoded: Cell = postcard::from_bytes(&bytes).expect("a cell deserializes");
+        assert_eq!(
+            decoded,
+            cell(MAX_CELL_HOPS),
+            "the cell survives its wire form"
+        );
+    }
+
+    /// A node that forwards a cell leaves one forward fewer, and the count stops at zero.
+    #[test]
+    fn a_forwarded_cell_has_one_forward_fewer_and_the_count_stops_at_zero() {
+        let _guard = ::habilis_network_test_tracing::init();
+
+        assert_eq!(cell(5).forwarded().hops_left, 4, "one fewer");
+        assert_eq!(cell(0).forwarded().hops_left, 0, "the count stops at zero");
+        assert_eq!(
+            cell(5).forwarded().packet,
+            vec![7, 8, 9],
+            "the packet is not touched"
         );
     }
 }

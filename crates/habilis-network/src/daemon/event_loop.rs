@@ -2729,12 +2729,11 @@ mod route_wake_tests {
         );
     }
 
-    /// A pair on the relay has the direct route dialed. The gate then refuses the
-    /// destination as a first hop: the wake makes the pass dial the route through a
-    /// third member within the same turn, without waiting for the stuck deadline and a
-    /// link-state tick.
+    /// A pair on the relay has the address of its destination dialed. The gate then refuses the destination as
+    /// a first hop: the address does not change, because it holds no route. The way through a third member is
+    /// taken by the next hop of each node, with no new dial and no wait for the stuck deadline.
     #[test]
-    fn a_refused_first_hop_moves_the_dial_of_a_pair_on_the_relay_to_a_route_through_a_third() {
+    fn a_refused_first_hop_does_not_change_the_address_that_a_pair_on_the_relay_is_dialed_with() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,
@@ -2749,7 +2748,7 @@ mod route_wake_tests {
                 );
                 assert!(
                     me.feed_topology(via.link_vector(vec![(dst.app_id(), 1)])),
-                    "a refused first hop moves the relay dial to a route through a third peer"
+                    "the route through the third peer is fed to the topology"
                 );
                 assert!(
                     me.feed_topology(dst.link_vector(vec![])),
@@ -2779,11 +2778,16 @@ mod route_wake_tests {
                     .get(&dst_key)
                     .cloned()
                     .expect("a route is dialed");
-                assert_ne!(dialed, direct, "the route through the third is dialed");
+                assert_eq!(dialed, direct, "the address of the destination is the same");
                 assert_eq!(
                     Some(dialed),
                     me.route_addr(dst.app_id()).map(TransportAddr::Custom),
-                    "and it is the route that the handle chooses now"
+                    "and it is the address that the handle gives now: a way through the third exists"
+                );
+                assert_eq!(
+                    me.next_hop_of(dst.app_id()),
+                    Some(via.app_id()),
+                    "the node takes the way through the third peer at once"
                 );
                 state.webrtc_admission.close();
                 me.close().await;

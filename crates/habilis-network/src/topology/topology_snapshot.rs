@@ -111,14 +111,13 @@ impl EventLoopState {
         None
     }
 
-    /// The first hop of the multihop route that the topology gives for `peer` now, in hex. It is
-    /// the route a send would take, not a reading of the path in use. Without multihop there is
-    /// none.
+    /// The next hop that this node picks now for a cell to `peer`, in hex. It is where a send would
+    /// go first, not a reading of the path in use. Without multihop there is none.
     fn first_hop(&self, peer: EndpointId) -> Option<String> {
         #[cfg(feature = "multihop")]
         {
-            let mut hops = self.multihop()?.route_hops(AppId::new(peer))?;
-            hops.next().map(|hop| hop.get().to_string())
+            let next = self.multihop()?.next_hop_of(AppId::new(peer))?;
+            Some(next.get().to_string())
         }
         #[cfg(not(feature = "multihop"))]
         {
