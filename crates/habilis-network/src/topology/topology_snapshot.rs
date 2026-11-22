@@ -167,7 +167,9 @@ mod tests {
     use crate::transport::probe::PathKind;
     use crate::util::tuning::MAX_CONNECTIONS;
     #[cfg(feature = "multihop")]
-    use habilis_network_iroh_multihop_transport::{HandleConfig, MultihopHandle, underlay_secret};
+    use habilis_network_iroh_multihop_transport::{
+        AppId, HandleConfig, MultihopHandle, underlay_secret,
+    };
     #[cfg(feature = "multihop")]
     use iroh::endpoint::presets;
     #[cfg(feature = "multihop")]
@@ -198,6 +200,17 @@ mod tests {
                 (graph.turned_back, graph.no_next_hop, graph.hop_limit),
                 (0, 0, 0),
                 "a node that dropped nothing"
+            );
+            let stranger = AppId::new(SecretKey::generate().public());
+            assert!(
+                !handle.originate_for_test(stranger, vec![1]),
+                "no neighbor reaches a node that no vector names"
+            );
+            let moved = state.topology_snapshot().graph.expect("multihop is on");
+            assert_eq!(
+                (moved.turned_back, moved.no_next_hop, moved.hop_limit),
+                (0, 1, 0),
+                "the one cell with no next hop is counted as no_next_hop in the snapshot"
             );
             for name in ["turned_back", "no_next_hop", "hop_limit"] {
                 assert!(

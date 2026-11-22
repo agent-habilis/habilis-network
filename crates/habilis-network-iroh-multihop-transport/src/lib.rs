@@ -469,6 +469,14 @@ impl MultihopHandle {
         }
     }
 
+    /// Send one cell for `dst` from this node, as a packet of QUIC does: for a test of the counters that a drop
+    /// moves. `true` when a next hop took the cell.
+    #[cfg(feature = "test-hooks")]
+    #[must_use]
+    pub fn originate_for_test(&self, dst: AppId, packet: Vec<u8>) -> bool {
+        self.inner.forwarder.originate(dst, packet).is_ok()
+    }
+
     /// The open paths of the connection that this node's writer holds toward the
     /// underlay `underlay_id`, now, each with whether it is the selected one: the
     /// reading that the relay gate takes before it admits a cell. `None` when no
