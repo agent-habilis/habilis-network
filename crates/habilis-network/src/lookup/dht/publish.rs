@@ -1,6 +1,6 @@
 //! What the DHT lookup of an endpoint puts in the DHT.
 
-use crate::protocol::meshes::RelayChoice;
+use crate::lookup::EndpointRole;
 
 /// What the DHT lookup of an endpoint puts in the DHT. Every endpoint resolves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,17 +16,14 @@ pub(in crate::lookup) enum Publish {
 }
 
 impl Publish {
-    /// What an endpoint publishes. The beacon publishes under its own key, which is the key of the
-    /// rendezvous. A mesh with a relay lookup keeps the IP addresses of the beacon out of the DHT.
-    pub(in crate::lookup) fn of(is_beacon: bool, relay_lookup: &RelayChoice) -> Self {
-        if !is_beacon {
-            return Self::Nothing;
-        }
-        // `RelayChoice` is non-exhaustive: a relay lookup of any other kind keeps the addresses private.
-        if let RelayChoice::Disabled = relay_lookup {
-            Self::WithAddresses
-        } else {
-            Self::RelayOnly
+    /// What an endpoint of this role publishes. The beacon publishes under its own key, which is the key of the
+    /// rendezvous. The role says if the mesh is configured with a relay lookup, so the decision is made once, from
+    /// the configuration, and not from the relay that the beacon homes on at the moment.
+    pub(in crate::lookup) fn of(role: EndpointRole) -> Self {
+        match role {
+            EndpointRole::Peer | EndpointRole::Underlay => Self::Nothing,
+            EndpointRole::Beacon => Self::RelayOnly,
+            EndpointRole::BeaconWithoutRelay => Self::WithAddresses,
         }
     }
 }
@@ -34,27 +31,26 @@ impl Publish {
 #[cfg(test)]
 mod tests {
     use super::Publish;
-    use crate::protocol::meshes::RelayChoice;
+    use crate::lookup::EndpointRole;
 
-    /// Only the beacon publishes, and a mesh with no relay lookup is the one that puts the IP addresses
-    /// of the beacon in the DHT.
+    /// Only the beacon publishes, and only the beacon of a mesh with no relay lookup puts the IP addresses of the host
+    /// in the DHT.
     #[test]
     fn only_the_beacon_publishes_and_only_a_mesh_with_no_relay_lookup_publishes_addresses() {
         let _guard = ::habilis_network_test_tracing::init();
-        for relay in [RelayChoice::Disabled, RelayChoice::Pinned] {
-            assert_eq!(
-                Publish::of(false, &relay),
-                Publish::Nothing,
-                "a peer publishes nothing ({relay:?})"
-            );
-        }
+        assert_eq!(Publish::of(EndpointRole::Peer), Publish::Nothing, "a peer");
         assert_eq!(
-            Publish::of(true, &RelayChoice::Disabled),
+            Publish::of(EndpointRole::Underlay),
+            Publish::Nothing,
+            "an underlay"
+        );
+        assert_eq!(
+            Publish::of(EndpointRole::BeaconWithoutRelay),
             Publish::WithAddresses,
             "the beacon of a mesh with no relay lookup has no relay URL to publish"
         );
         assert_eq!(
-            Publish::of(true, &RelayChoice::Pinned),
+            Publish::of(EndpointRole::Beacon),
             Publish::RelayOnly,
             "the beacon of a mesh with a relay lookup keeps its IP addresses out of the DHT"
         );

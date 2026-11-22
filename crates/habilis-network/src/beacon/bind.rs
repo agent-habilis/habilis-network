@@ -5,22 +5,36 @@ use crate::util::clock::Instant;
 use crate::util::tuning;
 
 use crate::lookup::{EndpointRole, TransportHandles, build_endpoint};
+use crate::protocol::meshes::{LookupOpts, RelayChoice};
 
 use super::{
     RendezvousParams, RungRead, RungWatch, Walk, beacon_lookups, rung_is_busy, rung_ladder,
 };
 
 use crate::{lookup, transport};
+/// The role of the beacon of a mesh that is configured with `lookups`. The relay lookup that the mesh is configured
+/// with decides what the beacon publishes to the DHT, and not the rung that it homes on at the moment: with every
+/// probe of the startup failed there is no rung, and a beacon that read that as "no relay lookup" would publish the
+/// private addresses of its host on a mesh that has a relay lookup.
+fn beacon_role(lookups: &LookupOpts) -> EndpointRole {
+    if let RelayChoice::Disabled = lookups.relay_lookup {
+        EndpointRole::BeaconWithoutRelay
+    } else {
+        EndpointRole::Beacon
+    }
+}
+
 /// The transports of the beacon of a public rendezvous. It carries a `WebRTC` handle, so the handles do not
 /// tell that it is the beacon, and the role says it: only the beacon publishes the rendezvous to the DHT.
 fn public_beacon_handles(
+    configured: &LookupOpts,
     webrtc: &habilis_network_iroh_webrtc_transport::WebRtcHandle,
     admission: &transport::SignalAdmission,
 ) -> TransportHandles {
     TransportHandles {
         webrtc: Some(webrtc.clone()),
         admission: Some(admission.clone()),
-        role: EndpointRole::Beacon,
+        role: beacon_role(configured),
         ..TransportHandles::default()
     }
 }
@@ -54,7 +68,7 @@ pub(crate) async fn build_rendezvous_endpoint(
         // Made before the endpoint: the endpoint reports its connections to it
         // from the first handshake on.
         let admission = transport::SignalAdmission::new(tuning::MAX_CONNECTIONS);
-        let transport_handles = public_beacon_handles(&webrtc, &admission);
+        let transport_handles = public_beacon_handles(&params.lookups, &webrtc, &admission);
         let endpoint = build_endpoint(
             &lookups,
             Some(params.secret.clone()),
@@ -87,7 +101,7 @@ pub(crate) async fn build_rendezvous_endpoint(
             Some(port),
             Vec::new(),
             TransportHandles {
-                role: EndpointRole::Beacon,
+                role: beacon_role(&params.lookups),
                 ..TransportHandles::default()
             },
         )
@@ -154,6 +168,7 @@ mod tests {
     use iroh::SecretKey;
 
     use crate::lookup::{self, EndpointRole};
+    use crate::protocol::meshes::{LookupOpts, RelayChoice};
     use crate::transport;
     use crate::util::tuning;
 
@@ -164,8 +179,9 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let webrtc = lookup::build_webrtc_handle(SecretKey::generate().public());
         let admission = transport::SignalAdmission::new(tuning::MAX_CONNECTIONS);
+        let configured = LookupOpts::new(RelayChoice::Pinned).dht(true);
 
-        let handles = super::public_beacon_handles(&webrtc, &admission);
+        let handles = super::public_beacon_handles(&configured, &webrtc, &admission);
 
         assert_eq!(
             handles.role,
@@ -176,5 +192,24 @@ mod tests {
             handles.webrtc.is_some(),
             "it still carries the WebRTC handle"
         );
+    }
+
+    /// The role follows the relay lookup that the mesh is configured with. The beacon of a mesh with a relay
+    /// lookup that has no rung at the moment (every probe of the startup failed) is still the beacon of a mesh
+    /// with a relay lookup: it does not publish the addresses of its host.
+    #[test]
+    fn the_role_of_the_beacon_follows_the_configured_relay_lookup_and_not_its_current_rung() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let url: iroh::RelayUrl = "https://relay.example/".parse().expect("a relay URL");
+        let configured = [
+            (RelayChoice::Pinned, EndpointRole::Beacon),
+            (RelayChoice::Custom(vec![url]), EndpointRole::Beacon),
+            (RelayChoice::Disabled, EndpointRole::BeaconWithoutRelay),
+        ];
+
+        for (relay, role) in configured {
+            let lookups = LookupOpts::new(relay.clone()).dht(true);
+            assert_eq!(super::beacon_role(&lookups), role, "{relay:?}");
+        }
     }
 }
