@@ -46,7 +46,9 @@ impl DeadMember {
 /// Take the member of `state` when its owner is gone. The key file names the start time of the process
 /// that the member was bound to, and `owner_pid` is the pid of that process, which the caller knows from
 /// its own naming (the engine does not record it). The member is dead when no process has `owner_pid`
-/// with that start time. The answer is `None` when there is no key file, when the key file records no
+/// with that start time. **The caller must pass the pid that the member was bound to.** A wrong pid
+/// reads as an owner that is gone and gives the guard, and the removal then loses a member key that a
+/// live node uses. The answer is `None` when there is no key file, when the key file records no
 /// owner, when the owner is alive, and when a live daemon holds the lock of the key.
 ///
 /// # Errors

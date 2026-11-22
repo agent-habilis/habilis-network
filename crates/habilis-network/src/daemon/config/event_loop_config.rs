@@ -258,24 +258,6 @@ impl EventLoopConfig {
         Ok(self)
     }
 
-    /// Bind the pair of files that holds the identity of this member to the process `pid`, and nothing
-    /// else: the daemon does not live for `pid`, and the state file does not name it. The same owner
-    /// that restarts keeps its member key and the run goes on, and another process with another start
-    /// time that names the same state file starts as a new member at run 1. For a caller that knows the
-    /// process that a state file belongs to and keeps the lifetime of the daemon as it is.
-    ///
-    /// # Errors
-    /// `pid` is 0 or 1, the daemon's own pid, or no live process has it. The message is one line.
-    #[cfg(feature = "host")]
-    pub fn bind_keys_to_owner(mut self, pid: u32) -> Result<Self, OwnerPidError> {
-        // Only the check: the owner of the lifetime is not set.
-        Owner::try_new(pid)?;
-        let start = process::live_start_time(pid);
-        let keys = self.mesh.keys.clone();
-        self.mesh.keys = super::super::setup::bind_keys_to_owner(keys, start);
-        Ok(self)
-    }
-
     /// The member key that this node shows on this mesh, before the loop starts: the key that its
     /// proofs are signed with. `None` where there is no file to keep a key in.
     #[must_use]

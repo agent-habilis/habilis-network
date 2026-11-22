@@ -73,7 +73,8 @@ impl Identity {
 
     /// The member identity of this node on `mesh`: the identity that the seed names, derived with the mesh id.
     /// A node keeps one seed in its state file, and it shows another member key on each mesh, so no two
-    /// meshes are linked by the key. The key of the seed itself is never shown.
+    /// meshes are linked by the key. The key of the seed itself is never shown. The mesh id is hashed as
+    /// input and not given as the label of `SymmetricKey::derive`, whose label is 255 bytes at most.
     ///
     /// # Panics
     /// If `mesh` is longer than `u32::MAX` bytes: a mesh id is far below it.

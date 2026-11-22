@@ -3388,9 +3388,10 @@ mod tests {
     // over UDP.
     use crate::daemon::node;
     use crate::lookup::test_relay;
+    use crate::protocol::Nickname;
     use crate::protocol::meshes::Lookup;
     use crate::util::tuning;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
     #[test]
     fn a_browser_refuses_a_mesh_with_no_relay_lookup() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -3635,6 +3636,93 @@ mod tests {
         });
     }
 
+    /// The member key is one value in 3 places: what the config names before the loop, what the node
+    /// shows as its own in its snapshot, and what another node shows for it in its roster. The loop signs
+    /// its proofs with the key of the mesh and the config derives the same key from the seed again, so a
+    /// second derive, or none, would show here as 3 different keys.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn the_member_key_is_the_same_before_the_loop_in_our_snapshot_and_in_another_roster() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            4,
+            async {
+                let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+                let options = |nick: &str, mesh: Option<String>| -> membership::JoinOptions {
+                    let base = membership::JoinOptions::default()
+                        .lookup(vec![Lookup::Relay])
+                        .relay_urls(vec![relay.to_string()]);
+                    base.mesh(mesh).nick(Some(nick.to_owned()))
+                };
+                let first_options = options("member-a", None);
+                let nickname = Nickname::try_new("member-a").ok();
+                let (kind, author) =
+                    membership::resolve_kind(&first_options, nickname).expect("a kind");
+                let params = super::SetupParams::new(author, embed::SilentSink).max_connections(8);
+                let config = super::setup_mesh(kind, params)
+                    .await
+                    .expect("a relay mesh sets up");
+                let before: Option<String> = config.member_key().map(|key| key.to_string());
+                let mesh = config.mesh_id().to_string();
+                let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+                let first = node::Node::spawn(
+                    config,
+                    membership::MembershipApp::new(inbound_tx),
+                    None,
+                    SignalHandling::Leave,
+                );
+                let second_options = options("member-b", Some(mesh));
+                let (sink, _events) = membership::json_sink();
+                let second = membership::join(&second_options, sink)
+                    .await
+                    .expect("the second member joins");
+
+                let deadline = time::Instant::now() + Duration::from_secs(60);
+                let mut seen_by_second: Option<String> = None;
+                while seen_by_second.is_none() && time::Instant::now() < deadline {
+                    let json = second
+                        .request(|reply| {
+                            membership::Request::Inspect(membership::Inspect::Peers { reply })
+                        })
+                        .await
+                        .unwrap_or_default();
+                    let roster: serde_json::Value =
+                        serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+                    let rows = roster["peers"].as_array().cloned().unwrap_or_default();
+                    let row = rows.iter().find(|row| row["nickname"] == "member-a");
+                    seen_by_second = row
+                        .and_then(|row| row["member"].as_str())
+                        .map(str::to_owned);
+                    time::sleep(Duration::from_millis(250)).await;
+                }
+                let (reply, answer) = oneshot::channel();
+                first
+                    .sender()
+                    .send(membership::Request::Inspect(membership::Inspect::Peers {
+                        reply,
+                    }))
+                    .await
+                    .expect("the loop of the first node runs");
+                let own_json = answer.await.expect("the first node answers");
+                let own: serde_json::Value =
+                    serde_json::from_str(&own_json).unwrap_or(serde_json::Value::Null);
+                let own_member: Option<String> = own["own_member"].as_str().map(str::to_owned);
+                first.leave().await.expect("the first node leaves");
+                second.node.leave().await.expect("the second node leaves");
+
+                assert!(before.is_some(), "the config names a member key");
+                assert_eq!(
+                    before, own_member,
+                    "the key before the loop is the own member of the snapshot"
+                );
+                assert_eq!(
+                    before, seen_by_second,
+                    "another node shows the same key for the member"
+                );
+            },
+        );
+    }
+
     /// One state path keeps one seed, and the node shows another member key on each mesh: two meshes
     /// on one state path are not linked by the key.
     #[cfg(all(unix, feature = "host"))]
@@ -3681,65 +3769,6 @@ mod tests {
             assert_ne!(
                 first, second,
                 "one state path, one seed, and the same member key on 2 meshes"
-            );
-        });
-    }
-
-    /// `bind_keys_to_owner` binds the pair of files to a process, as `set_owner_pid` does, and it
-    /// sets no owner of the lifetime: the daemon lives as it did, and the state file names no owner.
-    #[cfg(all(unix, feature = "host"))]
-    #[test]
-    fn bind_keys_to_owner_binds_the_pair_and_sets_no_owner_of_the_lifetime() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            ::habilis_network_test_tracing::expect_warn(
-                "habilis_network::lifecycle",
-                "from another owner",
-            );
-            let dir = TempDir::new("habilis-bind-keys-only");
-            let state = dir.path().join("session.json");
-            let (first_owner, second_owner) = (Sleeper::spawn(), Sleeper::spawn());
-            let start = |owner: u32| {
-                let state = state.clone();
-                async move {
-                    let options = membership::JoinOptions::default();
-                    let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
-                    let params = super::SetupParams::new(author, embed::SilentSink)
-                        .max_connections(8)
-                        .state_file(state);
-                    let config = super::setup_mesh(kind, params)
-                        .await
-                        .expect("a loopback mesh sets up");
-                    let config = config.bind_keys_to_owner(owner).expect("a live process");
-                    let watched = config.owner_pid();
-                    let keys = ended(config.mesh.keys.clone());
-                    config
-                        .endpoints
-                        .router
-                        .shutdown()
-                        .await
-                        .expect("the router stops");
-                    if let Some(handle) = config.transports.multihop.as_ref() {
-                        handle.close().await;
-                    }
-                    (keys, watched)
-                }
-            };
-
-            let (first, watched) = start(first_owner.0.id()).await;
-            let (restart, _) = start(first_owner.0.id()).await;
-            let (other, _) = start(second_owner.0.id()).await;
-
-            assert_eq!(watched, None, "the lifetime of the daemon has no owner");
-            assert_eq!(
-                member_key(&first),
-                member_key(&restart),
-                "the same process keeps the member key"
-            );
-            assert_eq!((first.run, restart.run), (1, 2), "and the run goes on");
-            assert_ne!(
-                member_key(&first),
-                member_key(&other),
-                "another process that names the same state file is a new member"
             );
         });
     }

@@ -10,8 +10,8 @@ pub(in crate::lookup) enum Publish {
     Nothing,
     /// The relay URL of the endpoint, the default of the DHT lookup. No IP address is public.
     RelayOnly,
-    /// The IP addresses of the endpoint too. A mesh with no relay lookup has no relay URL to
-    /// publish, and a record with no address is not published at all.
+    /// Every address of the endpoint, with no filter: its private LAN addresses too. A mesh with no
+    /// relay lookup has no relay URL to publish, and a record with no address is not published at all.
     WithAddresses,
 }
 
