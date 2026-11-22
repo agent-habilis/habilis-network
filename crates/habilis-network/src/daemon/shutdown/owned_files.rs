@@ -75,10 +75,9 @@ mod tests {
         let folder = dir.path();
         let socket = folder.join("swift-cedar.ipc.sock");
         let chunks = folder.join("swift-cedar.chunks");
-        let kept: [PathBuf; 4] = [
+        let kept: [PathBuf; 3] = [
             folder.join("swift-cedar.state.key.lock"),
             folder.join("swift-cedar.state.run.lock"),
-            folder.join("swift-cedar.daemon.lock"),
             folder.join("swift-cedar.tracing.log"),
         ];
         let chunk_bucket = chunks.join("ab");

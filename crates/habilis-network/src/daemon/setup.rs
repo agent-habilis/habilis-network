@@ -1050,15 +1050,21 @@ fn try_lock(lock: &File, lock_path: &Path) -> Result<bool> {
     }
 }
 
-/// The lock file of the daemon of a nickname on a mesh: `<runtime base>/<mesh folder>/<nickname>.daemon.lock`.
+/// The lock file of the daemon of a nickname on a mesh: `<runtime base>/locks/<mesh folder>-<nickname>.lock`. It
+/// lives in a folder of its own, outside the mesh folder, and nothing removes it: a lock file that is removed
+/// leaves a race between a start that holds the old file and a start that makes a new one, and a lock file in the
+/// mesh folder would keep the folder from a sweep of empty folders. The file stays until the runtime base goes.
 #[cfg(all(unix, feature = "host"))]
 fn daemon_lock_path(base: &Path, mesh: &MeshId, author: &Nickname) -> PathBuf {
     use crate::util;
-    util::mesh_runtime_dir(base, mesh.as_str()).join(format!("{author}.daemon.lock"))
+    base.join("locks").join(format!(
+        "{}-{author}.lock",
+        util::mesh_prefix(mesh.as_str())
+    ))
 }
 
 /// Take the lock of the one live daemon of a nickname on a mesh in a runtime base, before the run opens a file
-/// of the folder. The chunk folder, the control socket and the tracing log are named by the mesh and the
+/// of the mesh folder. The chunk folder, the control socket and the tracing log are named by the mesh and the
 /// nickname alone, so two daemons of one pair, with two state files, would clear the files of each other.
 /// A lock on the state file does not keep them apart: each has its own. The rules of the key lock hold: an OS lock
 /// on the descriptor, so the lock goes with the process; a held lock is tried again for `KEY_LOCK_RETRY`, because a
@@ -1078,8 +1084,8 @@ pub(crate) async fn hold_daemon_lock(
     let Some(base) = base else {
         return Ok(None);
     };
-    util::ensure_mesh_runtime_dir(base, mesh.as_str())?;
     let lock_path = daemon_lock_path(base, mesh, author);
+    util::ensure_parent_private(Some(base), &lock_path)?;
     let mut lock = open_lock(&lock_path)?;
     let give_up = Instant::now() + KEY_LOCK_RETRY;
     while !try_lock(&lock, &lock_path)? {
@@ -4378,6 +4384,7 @@ mod tests {
     #[test]
     fn a_second_start_of_the_same_nickname_on_the_mesh_leaves_the_chunk_folder_of_the_first() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::util;
             use std::os::unix::fs::PermissionsExt as _;
             let base = TempDir::new("second-start-chunks");
             fs::set_permissions(base.path(), fs::Permissions::from_mode(0o700))
@@ -4424,7 +4431,7 @@ mod tests {
             let marker = folder.join("marker");
             fs::write(&marker, b"the first run uses this folder").expect("a file in the folder");
 
-            let (second, second_folder, _) = start(Some(mesh), "second.json").await;
+            let (second, second_folder, _) = start(Some(mesh.clone()), "second.json").await;
             assert_eq!(folder, second_folder, "both starts name one chunk folder");
             let cleared_by = time::Instant::now() + Duration::from_secs(2);
             while marker.exists() && time::Instant::now() < cleared_by {
@@ -4433,7 +4440,12 @@ mod tests {
             let kept = marker.exists();
             let refused = second.leave().await;
             first.leave().await.expect("the first node leaves");
+            let lock = base
+                .path()
+                .join("locks")
+                .join(format!("{}-twin.lock", util::mesh_prefix(&mesh)));
 
+            assert!(lock.exists(), "the lock file stays in the locks folder");
             assert!(
                 kept,
                 "the second start cleared the chunk folder of the first run"
