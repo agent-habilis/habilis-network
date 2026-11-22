@@ -61,8 +61,15 @@ impl OwnedFiles {
 fn file_id(path: &Path) -> Option<FileId> {
     use std::os::unix::fs::MetadataExt as _;
     let metadata = fs::symlink_metadata(path).ok()?;
-    // Where the system gives no creation time, the run claims nothing.
-    let created = metadata.created().ok()?;
+    // Where the system gives no creation time, the run claims nothing. The log says so, because a clean
+    // leave then leaves the file.
+    let created = match metadata.created() {
+        Ok(created) => created,
+        Err(error) => {
+            tracing::debug!(target: "habilis_network::lifecycle", path = %path.display(), %error, "no creation time: the run claims no identity for this file and will not remove it");
+            return None;
+        }
+    };
     Some((metadata.dev(), metadata.ino(), created))
 }
 
