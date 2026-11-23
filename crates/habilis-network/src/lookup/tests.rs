@@ -886,12 +886,14 @@ fn the_endpoint_of_a_loopback_mesh_listens_on_loopback_sockets_only() {
     });
 }
 
-/// **A node that asks for a loopback bind listens on this host only, whatever its mesh looks up.**
-/// The members of a test that runs on one machine used to listen on every interface of it, because
-/// their mesh names a relay, and a host on the network could send a handshake to a test member.
+/// **The application endpoint of a node that asks for a loopback bind listens on this host only,
+/// whatever its mesh looks up.** The members of a test that runs on one machine used to listen on
+/// every interface of it, because their mesh names a relay, and a host on the network could send a
+/// handshake to a test member. The other sockets of the node have a test each: the underlay, the
+/// rendezvous endpoint, and the session of a `WebRTC` link.
 #[test]
 #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
-fn a_node_that_asks_for_a_loopback_bind_listens_on_this_host_only() {
+fn the_application_endpoint_of_a_node_that_asks_for_a_loopback_bind_listens_on_this_host_only() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
         use super::{TransportHandles, build_endpoint, test_relay};
         use crate::lookup::{Bind, TransportOpts};
