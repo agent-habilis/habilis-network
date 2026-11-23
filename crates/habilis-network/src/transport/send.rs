@@ -630,9 +630,9 @@ mod tests {
     ///
     /// A connection that is young reads relay until its direct path is selected, so the check of
     /// a warm send cannot tell a path that is forming from a path that never comes. The send
-    /// waits for the path on a task of its own, like the send to a cold peer. A second send
-    /// shares that wait. Here no direct path can come, so both sends end with the relay refusal
-    /// within one budget, and the server reads no frame.
+    /// waits for the path on a task of its own, like the send to a cold peer. Each send waits
+    /// for the path on its own, so that each gets its own verdict. Here no direct path can come, so
+    /// both sends end with the relay refusal within one budget, and the server reads no frame.
     #[test]
     fn a_send_on_a_relay_selected_warm_connection_waits_one_budget_then_fails() {
         ::habilis_network_test_tracing::run_multi_thread(
@@ -661,7 +661,6 @@ mod tests {
                     };
                     handles.push(handle);
                 }
-                assert!(pool.is_dialing(server_id), "the wait is registered");
                 // The budget to select a path (5 s) and one second more, for both sends together.
                 tokio_time::timeout(std_Duration::from_secs(6), async {
                     for handle in handles {
@@ -674,7 +673,11 @@ mod tests {
                 })
                 .await
                 .expect("both sends end within one path budget");
-                assert_eq!(pool.dial_attempts(), 1, "the two sends share one wait");
+                assert_eq!(
+                    pool.dials_to(server_id),
+                    1,
+                    "the sends dial nothing: the connection is the one of the probe"
+                );
                 assert!(received.try_recv().is_err(), "no frame went over the relay");
 
                 router.shutdown().await.expect("shutdown");

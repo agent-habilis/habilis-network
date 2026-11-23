@@ -358,10 +358,11 @@ fn directly_meshed(key: &AuthorKey, state: &EventLoopState) -> bool {
 /// and resends once in the background). A cold peer, and a warm peer whose connection reads relay,
 /// are served on a task of its own, so that the caller never waits on the dial, the path wait or
 /// the write. A connection that reads relay can be a young one whose direct path is still
-/// forming, so the task waits for the path like the dial of a cold peer and shares that wait with
-/// the sends that follow. The error of the dial or of the wait is the send's outcome, through the
-/// handle — there is no fallback. A cold peer on the dial-failure cooldown is refused at once. A
-/// warm connection needs no dial, so the cooldown does not apply to it.
+/// forming, so the task waits for the path like the dial of a cold peer. Each send waits for the
+/// path on its own, so that each gets its own verdict. The error of the dial or of the wait is the
+/// send's outcome, through the handle — there is no fallback. A cold peer on the dial-failure
+/// cooldown is refused at once. A warm connection needs no dial, so the cooldown does not apply
+/// to it.
 ///
 /// `route` gives the multihop route to the peer, and the send reads it only when it dials: at the
 /// ceiling of direct connections, a dial that has a route rides multihop and evicts nobody (see
