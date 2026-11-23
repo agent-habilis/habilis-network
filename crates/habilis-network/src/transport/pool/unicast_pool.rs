@@ -39,8 +39,8 @@ use crate::util::tuning::{DIRECT_IDLE_BACKSTOP, PROBE_HOLD};
 use crate::daemon::state::WireOutTally;
 
 use n0_future::{task, time};
+use std::fmt;
 use std::sync::{Mutex as std_Mutex, OnceLock, OnceLock as std_OnceLock};
-use std::{fmt, result};
 #[cfg(test)]
 use tokio::sync::Notify;
 use tokio::sync::oneshot;
@@ -56,8 +56,6 @@ impl fmt::Debug for UnicastPool {
     }
 }
 
-/// The dial locks of the peers that are being dialed.
-// shared: the map and the turn of each dial hold the lock of a peer
 /// A held outcome of a dial: the peer, the sender that says the dialer holds, and the receiver
 /// that lets it go on.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -169,7 +167,19 @@ pub(in crate::transport::pool) struct PoolInner {
 
 /// What the dialer of a peer publishes to the callers that wait on its dial: nothing while the dial
 /// runs, then `Ok` or the text of its error.
-pub(super) type DialOutcome = Option<result::Result<(), String>>;
+pub(crate) type DialOutcome = Option<DialEnd>;
+
+/// How a dial that callers wait for ended.
+#[derive(Debug, Clone)]
+pub(crate) enum DialEnd {
+    /// The dialer pooled a connection.
+    Ready,
+    /// The dial failed, with the text of its error.
+    Failed(String),
+    /// The dialer was dropped before the dial ended, as a task that is aborted. Nobody failed to
+    /// dial, so a waiter takes the place of the dialer and dials in its turn.
+    DialerLeft,
+}
 
 impl UnicastPool {
     /// A pool wired to `endpoint`, able to dial and carry unicast traffic.
@@ -753,14 +763,15 @@ impl UnicastPool {
     /// Tests only: forget the pooled connection of `eid` and put it on the dial-failure cooldown, as
     /// a failed dial does. It waits for the dial that runs for the peer, because a dial that ends
     /// after it would clear the cooldown and pool a connection, and the next send would not meet
-    /// the cooldown that the test asked for.
+    /// the cooldown that the test asked for. A caller that waits behind it gets the text "the dial
+    /// was failed for a test", which a test reads as its own doing and not as a product error.
     #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
     pub(crate) async fn fail_dial_for_test(&self, eid: EndpointId) {
         let in_flight = loop {
             match self.register_dial(eid) {
                 Registration::Dialer(in_flight) => break in_flight,
                 Registration::Waiter(outcome) => {
-                    let _ = wait_for_dial(outcome).await;
+                    let _ended = wait_for_dial(outcome).await;
                 }
             }
         };
@@ -854,10 +865,12 @@ impl UnicastPool {
                 Registration::Waiter(outcome) => {
                     #[cfg(test)]
                     self.inner.waiting.fetch_add(1, Ordering::Relaxed);
-                    let waited = wait_for_dial(outcome).await;
+                    let ended = wait_for_dial(outcome).await;
                     #[cfg(test)]
                     self.inner.waiting.fetch_sub(1, Ordering::Relaxed);
-                    waited.map_err(anyhow::Error::msg)?;
+                    if let DialEnd::Failed(error) = ended {
+                        bail!(error);
+                    }
                     if let Some(connection) = self.open_pooled(eid, hold).await {
                         return Ok(connection);
                     }
@@ -1082,7 +1095,7 @@ impl UnicastPool {
     }
 
     /// Dial `eid` and pool the connection under `hold`. Only the dialer of the peer calls this, from
-    /// [`Self::connection`], so one dial runs for each peer at a time and a dial starts only when no
+    /// [`Self::connection_through`], so one dial runs for each peer at a time and a dial starts only when no
     /// connection of the peer is open: an insert never replaces a live connection. A replaced
     /// connection must be closed with `close()`, not dropped: an unacknowledged frame on a dropped
     /// connection is lost.
@@ -1244,14 +1257,15 @@ pub(in crate::transport::pool) struct PlannedRoute {
 }
 
 /// Wait for the dialer of a peer to publish how its dial ended. The current value is read first, so
-/// that a receiver made after the publish still sees it.
-async fn wait_for_dial(mut outcome: watch::Receiver<DialOutcome>) -> result::Result<(), String> {
+/// that a receiver made after the publish still sees it. A dialer that is dropped with no outcome
+/// ends as [`DialEnd::DialerLeft`].
+async fn wait_for_dial(mut outcome: watch::Receiver<DialOutcome>) -> DialEnd {
     loop {
         if let Some(done) = outcome.borrow_and_update().clone() {
             return done;
         }
         if outcome.changed().await.is_err() {
-            return Err("the dial ended without an outcome".to_owned());
+            return DialEnd::DialerLeft;
         }
     }
 }

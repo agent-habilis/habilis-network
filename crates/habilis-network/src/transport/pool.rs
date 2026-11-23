@@ -917,6 +917,54 @@ mod tests {
         });
     }
 
+    /// **A dialer that is dropped in its dial does not fail the caller that waits for it.** The probe
+    /// dials, and its future is dropped while the dial is held, as a task that is aborted. A send that
+    /// waited for that dial did not fail to dial: nobody dialed. It takes the place of the dialer, dials
+    /// once, and is delivered.
+    #[test]
+    fn a_dialer_that_is_dropped_in_its_dial_does_not_fail_the_caller_that_waits_for_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: false }).await;
+
+            let _gate = pool.hold_next_dial();
+            let dialer = {
+                let pool = pool.clone();
+                tokio::spawn(async move { pool.probe_connection(server).await })
+            };
+            wait_until(|| pool.is_dialing(server)).await;
+            let waiter = {
+                let pool = pool.clone();
+                let registration = pool.register_dial(server);
+                tokio::spawn(async move {
+                    pool.send_registered(
+                        registration,
+                        server,
+                        bytes::Bytes::from_static(b"b frame"),
+                    )
+                    .await
+                })
+            };
+            wait_until(|| pool.waiting_callers() >= 1).await;
+            dialer.abort();
+            let _ = dialer.await;
+
+            let delivered = waiter.await.expect("the send task ends");
+
+            assert!(
+                delivered.is_ok(),
+                "the send failed because another caller was dropped: {delivered:?}"
+            );
+            assert_eq!(
+                pool.dials_to(server),
+                1,
+                "the send dialed once, in place of the dialer"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
     /// **A send that waits behind a probe uses the unit that the probe reserved.** The probe reserves
     /// one of the two units for the peer. The other unit is taken while the probe dials, and then a
     /// send to the same peer waits for that dial. The connection takes the reserved unit: it is no
@@ -1578,10 +1626,12 @@ mod tests {
         );
     }
 
-    /// A dialer that is aborted mid-dial wakes the callers that wait on it, with an error, long
-    /// before the dial would have timed out, and leaves no entry behind.
+    /// A dialer that is aborted mid-dial hands its place to the callers that wait on it. The cancelled
+    /// dialer leaves no entry, and the first waiter wakes at once, long before the dial would have
+    /// timed out, and dials in its place. A dial that nobody failed is no error for a waiter. (The
+    /// test said that the waiter "gets an error that says the dial was cancelled".)
     #[test]
-    fn a_cancelled_dialer_wakes_its_waiters() {
+    fn a_cancelled_dialer_hands_its_place_to_the_callers_that_wait_on_it() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (pool, bob, endpoint, _silent) = pool_with_silent_peer().await;
             let dialer = tokio::spawn({
@@ -1600,22 +1650,21 @@ mod tests {
                 let pool = pool.clone();
                 async move { pool.dial_or_warm_send(bob, bytes::Bytes::new()).await }
             });
-            time::sleep(Duration::from_millis(100)).await;
+            wait_until(|| pool.waiting_callers() >= 1).await;
 
             dialer.abort();
+            let _ = dialer.await;
 
-            let outcome = time::timeout(Duration::from_secs(1), waiter)
-                .await
-                .expect("the waiter wakes long before the dial times out")
-                .expect("the waiter task ends");
-            let error = outcome.expect_err("a waiter of a cancelled dial gets an error");
+            wait_until(|| pool.is_dialing(bob) && pool.waiting_callers() == 0).await;
             assert!(
-                error.to_string().contains("cancelled"),
-                "the error says that the dial was cancelled: {error}"
+                !waiter.is_finished(),
+                "the waiter dials in the place of the dialer, and does not end with an error"
             );
+            waiter.abort();
+            let _ = waiter.await;
             assert!(
-                !pool.inner.dialing.lock().contains_key(&bob),
-                "the cancelled dialer left its entry"
+                !pool.is_dialing(bob),
+                "the entry of the last dialer is gone with it"
             );
 
             endpoint.close().await;
