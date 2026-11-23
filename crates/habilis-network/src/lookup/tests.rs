@@ -857,6 +857,35 @@ fn an_injected_multihop_handle_must_obey_the_mesh_relay_rule() {
 /// `Router::spawn`). A dial on `GOSSIP_ALPN` then fails on the ALPN, which a listener sends
 /// before any certificate: it proves nothing about the identity, so the probe must not
 /// answer `Foreign`, which makes a walk bind a second rung.
+/// **The endpoint of a loopback mesh listens on loopback sockets only, the `IPv6` ones included.** A
+/// bind address replaces the default of its own family and no other, so the default `[::]`, which
+/// listens on every interface, stayed beside the loopback `127.0.0.1` that the branch bound: the mesh
+/// that promises "zero external network calls" could be reached from the network over `IPv6`.
+#[test]
+#[cfg(feature = "host")]
+fn the_endpoint_of_a_loopback_mesh_listens_on_loopback_sockets_only() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        use super::{TransportHandles, build_endpoint};
+
+        let endpoint = build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            Vec::new(),
+            TransportHandles::default(),
+        )
+        .await
+        .expect("an endpoint");
+        let sockets = endpoint.bound_sockets();
+        endpoint.close().await;
+
+        assert!(
+            sockets.iter().all(|socket| socket.ip().is_loopback()),
+            "the endpoint of a loopback mesh listens beyond it: {sockets:?}"
+        );
+    });
+}
+
 #[test]
 fn a_holder_of_our_identity_that_serves_no_alpn_yet_is_not_a_foreign_mesh() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
