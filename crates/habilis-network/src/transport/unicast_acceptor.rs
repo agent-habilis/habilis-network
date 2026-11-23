@@ -762,7 +762,7 @@ mod tests {
     }
 
     /// A late peer: a server that starts its acceptor only when `start` is notified, a pool
-    /// connected to it, and the frames that it takes. Its clock is paused.
+    /// connected to it, and the frames that it takes.
     async fn late_peer() -> (
         UnicastPool,
         iroh::EndpointId,
@@ -796,34 +796,31 @@ mod tests {
         pool.warm_or_dial(server.id())
             .await
             .expect("a warm connection");
-        tokio_time::pause();
         (pool, server.id(), router, client, start, frames)
     }
 
-    /// Send one frame while the paused clock advances by seconds, and how long the send took on that
-    /// clock.
+    /// Send one frame on a paused clock, and how long the send took on that clock. The open of the
+    /// stream and the write of the frame need no network, so the clock jumps only to a timer of the
+    /// send when the send waits for its peer. The peer here starts never.
     async fn send_on_the_paused_clock(
         pool: &UnicastPool,
         peer: iroh::EndpointId,
     ) -> (anyhow::Result<()>, Duration) {
+        tokio_time::pause();
         let started = tokio_time::Instant::now();
-        let mut send =
-            std::pin::pin!(pool.dial_or_warm_send(peer, bytes::Bytes::from_static(b"frame")));
-        let verdict = loop {
-            tokio::select! {
-                verdict = &mut send => break verdict,
-                () = advance_secs(1) => {}
-            }
-        };
+        let verdict = pool
+            .dial_or_warm_send(peer, bytes::Bytes::from_static(b"frame"))
+            .await;
         (verdict, started.elapsed())
     }
 
     /// **A send that starts in a failover hole is delivered when the peer holds the frame.** The
     /// path of the hop is dead, and the transport under it needs about 5 s to move to another path,
     /// and up to its path idle timeout (15 s) when nothing tells it that the path is dead. The send
-    /// starts at once and the peer holds the frame 6 s later. The wait of a send for the peer is
-    /// not shorter than that time, so the frame is delivered once, and the sender does not give up
-    /// on a frame that the path would have carried.
+    /// starts at once and the peer holds the frame 4 s later, 1 s past the old wait of 3 s. The wait of
+    /// a send for the peer is not shorter than the transport needs, so the frame is delivered once.
+    /// The clock is the real one: a paused clock jumps to the next timer while a packet is still on
+    /// its way, and on a loaded host it would reach the end of the wait before the peer answers.
     #[test]
     fn a_frame_that_the_peer_holds_after_a_failover_hole_is_delivered_once() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -831,7 +828,7 @@ mod tests {
 
             let send = pool.dial_or_warm_send(peer, bytes::Bytes::from_static(b"frame"));
             let hole = async {
-                advance_secs(6).await;
+                time::sleep(Duration::from_secs(4)).await;
                 start.notify_one();
             };
             let (verdict, ()) = tokio::join!(send, hole);
@@ -839,7 +836,7 @@ mod tests {
 
             assert!(
                 matches!(SendVerdict::of(verdict), SendVerdict::Delivered),
-                "the peer held the frame 6 s after the send started, inside the wait of a send"
+                "the peer held the frame 4 s after the send started, inside the wait of a send"
             );
             assert_eq!(taken, 1, "the frame arrives once");
             router.shutdown().await.expect("shutdown");
@@ -866,9 +863,6 @@ mod tests {
                 waited >= SEND_ANSWER_TIMEOUT,
                 "the send ended after {waited:?}, before the wait of a send"
             );
-            // The helper advances the clock while the loopback streams still open, so the time that
-            // it measures can hold a few seconds that the send did not wait. The bound only tells
-            // an end after the wait from a wait without an end.
             assert!(
                 waited < SEND_ANSWER_TIMEOUT * 2,
                 "the send ended after {waited:?}, long after the wait of a send"
