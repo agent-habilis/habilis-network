@@ -130,7 +130,7 @@ mod tests {
 
     /// A cold send to a lane peer with no session holds the frame and marks the session wanted.
     #[test]
-    fn a_frame_held_for_a_lane_peer_marks_its_session_wanted() {
+    fn a_send_to_a_lane_peer_read_as_relay_marks_its_session_wanted() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_a_lane_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
@@ -155,7 +155,7 @@ mod tests {
     /// keeps by key. A frame held for the second key asks for the session of the second key: the
     /// member list of the transport plane has one row for each key, not one for each nickname.
     #[test]
-    fn a_frame_held_for_the_second_key_of_a_nickname_marks_its_session_wanted() {
+    fn a_send_to_the_second_key_of_a_nickname_marks_its_session_wanted() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.standing.insert(Standing::Meshed);
@@ -194,7 +194,7 @@ mod tests {
     /// A peer with an IP path is held too on a lookup-only relay once a probe reads its path as
     /// the relay, but its direct path comes from the probe, so no session is wanted for it.
     #[test]
-    fn a_frame_held_for_a_peer_with_an_ip_path_does_not_want_a_session() {
+    fn a_send_to_a_peer_with_an_ip_path_does_not_want_a_session() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
@@ -227,7 +227,7 @@ mod tests {
     /// session even though the pair has an IP address: a failed offer leaves the pair on the
     /// relay with nobody to offer again, and the next parked frame renews the want.
     #[test]
-    fn a_frame_held_for_a_pair_that_reads_as_relay_wants_a_session() {
+    fn a_send_to_a_pair_that_reads_as_relay_wants_a_session() {
         use crate::daemon::state::DirectState;
         use crate::transport::probe::PathKind;
 
@@ -1157,7 +1157,7 @@ mod tests {
     /// dial waits for a direct path, and the live path of the connection refuses the relay. The
     /// state lags the connection by a few milliseconds after a join, so it must not refuse alone.
     #[test]
-    fn a_directed_frame_is_held_only_for_a_pair_that_a_probe_proved_relay_only() {
+    fn a_directed_frame_to_a_pair_that_a_probe_proved_relay_only_is_sent() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
@@ -1278,7 +1278,7 @@ mod tests {
     /// the sweep tick, so for up to one sweep its directed sends were held though the pair rode a
     /// multihop route. The proof of the addressee runs at the send now.
     #[test]
-    fn a_directed_send_to_an_unwatched_peer_on_a_multihop_route_is_proven_and_not_held() {
+    fn a_directed_send_to_an_unwatched_peer_on_a_multihop_route_is_proven() {
         use crate::daemon::state::DirectState;
         use crate::transport::probe::{PathKind, prove_addressee};
         let _guard = ::habilis_network_test_tracing::init();
@@ -1314,7 +1314,7 @@ mod tests {
     /// **A peer with a path watcher is left to its watcher.** The watcher is the only writer of the
     /// proof of a watched peer, and it also revokes it.
     #[test]
-    fn a_directed_send_to_a_watched_peer_on_a_multihop_route_stays_held_for_its_watcher() {
+    fn a_directed_send_to_a_watched_peer_on_a_multihop_route_is_not_refused_by_the_stored_state() {
         use crate::daemon::state::DirectState;
         use crate::transport::probe::{PathKind, prove_addressee};
         let _guard = ::habilis_network_test_tracing::init();
@@ -1541,7 +1541,7 @@ mod tests {
     }
 
     #[test]
-    fn an_own_frame_to_a_relay_only_pair_is_held() {
+    fn an_own_frame_to_a_relay_only_pair_waits_for_the_path() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);

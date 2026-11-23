@@ -2693,7 +2693,7 @@ mod first_contact_tests {
     /// A meshed send to a relay-only peer whose direct path is not probed is refused at once. The
     /// refusal asks for the lane session, so that the caller's retry can find it.
     #[test]
-    fn a_meshed_directed_send_to_a_held_peer_is_refused_and_asks_for_the_lane_session() {
+    fn a_meshed_directed_send_to_a_relay_only_peer_is_started_and_asks_for_the_lane_session() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
@@ -2809,7 +2809,7 @@ mod first_contact_tests {
     /// held: the send proves the peer by its route, and does not wait for the sweep tick. Only the
     /// lower id of a pair has a watcher, so the higher id had no other source of the proof.
     #[test]
-    fn a_meshed_directed_send_to_an_unwatched_peer_on_a_multihop_route_is_not_held() {
+    fn a_meshed_directed_send_to_an_unwatched_peer_on_a_multihop_route_is_not_refused() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,

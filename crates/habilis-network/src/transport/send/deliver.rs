@@ -114,9 +114,13 @@ fn undeliverable(addressee: Option<&AuthorKey>, state: &EventLoopState) -> SendE
 ///
 /// It checks, in this order, that the frame is one this node signed ([`SendError::ForeignFrame`]),
 /// that the frame is not directed to another key ([`SendError::OtherAddressee`]), and that `to` has
-/// an endpoint to go to, by the directed rules of [`deliver`] ([`SendError::Undeliverable`]). The payload path check applies as it does for [`deliver`], and the send
-/// waits on nothing: a cold peer is dialed by a task, and the verdict comes through
-/// [`Delivered::Pending`].
+/// an endpoint to go to, by the directed rules of [`deliver`] ([`SendError::Undeliverable`]). The
+/// payload path check applies as it does for [`deliver`], and the send waits on nothing: a cold
+/// peer is dialed by a task, and the verdict comes through [`Delivered::Pending`].
+///
+/// This function does not ask for a lane session, because it takes the state by shared
+/// reference. A peer with no IP path gets its session only from `send_app`. A send here to such a
+/// peer waits for the path budget and ends as not delivered.
 ///
 /// # Errors
 /// One of the refusals above, a frame that does not serialize, or the failure of a send to a warm

@@ -826,7 +826,7 @@ pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &Handl
     broadcast_peer_info(state, context).await;
 }
 
-/// Offer the session of the peer now, if a parked frame asked for it. Without this the offer waits
+/// Offer the session of the peer now, if a send to it asked for it. Without this the offer waits
 /// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
 /// or a pair with an IP path that reads as the relay (`note_unproven` marks both).
 fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
