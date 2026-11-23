@@ -105,9 +105,8 @@ mod tests {
 
     // ── lane peers ────────────────────────────────────────────────────
 
-    /// A lane peer: no IP address, only a relay. On a mesh whose relay is lookup only, a frame to
-    /// it is held once a probe reads its path as the relay, and holding it is what asks for its
-    /// session. Before that reading it is unproven, and the send asks for the session itself.
+    /// A lane peer: no IP address, only a relay. On a mesh whose relay is lookup only, the pair is
+    /// unproven until a direct path is shown, and a send to it asks for the session itself.
     fn state_knowing_a_lane_bob() -> (EventLoopState, EndpointId) {
         let mut state = fresh_state();
         state.standing.insert(Standing::Meshed);
@@ -123,14 +122,17 @@ mod tests {
         (state, bob)
     }
 
-    /// A cold send to a lane peer with no session holds the frame and marks the session wanted.
+    /// A send to a lane peer with no session is not refused, and it marks the session wanted.
     #[test]
     fn a_send_to_a_lane_peer_read_as_relay_marks_its_session_wanted() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_a_lane_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
         let now = clock::Instant::now();
-        assert!(!state.lane_session_wanted(bob, now), "nothing is held yet");
+        assert!(
+            !state.lane_session_wanted(bob, now),
+            "nothing asked for a session yet"
+        );
 
         assert!(
             resolve(
@@ -143,11 +145,14 @@ mod tests {
         );
         ask_lane(&mut state, bob);
 
-        assert!(state.lane_session_wanted(bob, now), "the held frame asks");
+        assert!(
+            state.lane_session_wanted(bob, now),
+            "the send asks for the session"
+        );
     }
 
     /// Two live keys use one nickname, and the second is a lane peer whose endpoint the roster
-    /// keeps by key. A frame held for the second key asks for the session of the second key: the
+    /// keeps by key. A send to the second key asks for the session of the second key: the
     /// member list of the transport plane has one row for each key, not one for each nickname.
     #[test]
     fn a_send_to_the_second_key_of_a_nickname_marks_its_session_wanted() {
@@ -182,12 +187,12 @@ mod tests {
 
         assert!(
             state.lane_session_wanted(second_endpoint, clock::Instant::now()),
-            "the held frame of the second key did not ask for its session"
+            "the send to the second key did not ask for its session"
         );
     }
 
-    /// A peer with an IP path is held too on a lookup-only relay once a probe reads its path as
-    /// the relay, but its direct path comes from the probe, so no session is wanted for it.
+    /// A peer with an IP path is unproven too on a lookup-only relay once a probe reads its path
+    /// as the relay, but its direct path comes from the probe, so no session is wanted for it.
     #[test]
     fn a_send_to_a_peer_with_an_ip_path_does_not_want_a_session() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -214,13 +219,13 @@ mod tests {
 
         assert!(
             !state.lane_session_wanted(bob, clock::Instant::now()),
-            "a held frame for a peer on an ip path wants no session"
+            "a send to a peer on an ip path wants no session"
         );
     }
 
-    /// A pair that had a direct path and lost it reads as the relay. Its parked frame asks for a
+    /// A pair that had a direct path and lost it reads as the relay. A send to it asks for a
     /// session even though the pair has an IP address: a failed offer leaves the pair on the
-    /// relay with nobody to offer again, and the next parked frame renews the want.
+    /// relay with nobody to offer again, and the next send renews the want.
     #[test]
     fn a_send_to_a_pair_that_reads_as_relay_wants_a_session() {
         use crate::daemon::state::DirectState;
@@ -251,7 +256,7 @@ mod tests {
 
         assert!(
             state.lane_session_wanted(bob, clock::Instant::now()),
-            "a held frame for a relay pair wants a session"
+            "a send to a relay pair wants a session"
         );
     }
 
