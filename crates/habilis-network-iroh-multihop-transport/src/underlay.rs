@@ -1400,6 +1400,44 @@ mod tests {
         });
     }
 
+    /// The charge of a cell is a guard: dropped, it gives its bytes back, and a charge past the budget gives
+    /// nothing and gives its bytes back too. No node, no clock: the proof of the guard cannot flake.
+    #[test]
+    fn a_charge_gives_its_bytes_back_when_it_is_dropped_and_a_charge_past_the_budget_gives_none() {
+        let _guard = ::habilis_network_test_tracing::init();
+        // the pool is shared by every charge that it makes
+        let pool = Arc::new(super::WriterPool::default());
+        let small = cell(stranger(1).app_id, stranger(2).app_id, MAX_CELL_HOPS);
+        let cost = small.packet.len();
+
+        let charged = super::WriterPool::charge(&pool, small).expect("inside the budget");
+        assert_eq!(
+            pool.queued_bytes.load(Ordering::Relaxed),
+            cost,
+            "the cell is charged"
+        );
+        drop(charged);
+        assert_eq!(
+            pool.queued_bytes.load(Ordering::Relaxed),
+            0,
+            "the drop gives the bytes back"
+        );
+
+        let huge = Cell {
+            packet: vec![0; super::FORWARD_QUEUE_BYTES + 1],
+            ..cell(stranger(1).app_id, stranger(2).app_id, MAX_CELL_HOPS)
+        };
+        assert!(
+            super::WriterPool::charge(&pool, huge).is_none(),
+            "a charge past the budget is refused"
+        );
+        assert_eq!(
+            pool.queued_bytes.load(Ordering::Relaxed),
+            0,
+            "and the refused charge gave its bytes back"
+        );
+    }
+
     /// A writer that was replaced does not retire its successor: `retire` says that the entry is not its own, so
     /// the health of the successor stays. A hop with no entry in the health map is stuck, and not a wait with no end.
     #[test]

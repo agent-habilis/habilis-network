@@ -192,8 +192,9 @@ pub struct HandleConfig {
     /// when it arrives, and how long a removed peer is remembered. See
     /// [`Topology::with_max_age`] for the trade.
     pub vector_max_age: Duration,
-    /// How long a hop's underlay may stay on the relay, refused by the gate,
-    /// before it stops being advertised as a link.
+    /// How long the gate may go without a direct path to a hop (the hop waits, and its cells wait in the
+    /// queue of its writer) before the hop is stuck: no candidate for a next hop, and not advertised as a link.
+    /// A hop is stuck on the first look after the deadline, so at most one tick of the writer (1 s) later.
     pub relay_stuck_after: Duration,
     /// The cost that this node advertises for each link that leaves it. The routing graph is
     /// directed: the links that leave a node carry the cost that the node advertises, and the
