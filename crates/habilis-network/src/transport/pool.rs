@@ -13,6 +13,7 @@ mod send_fault;
 mod uncommitted_stream;
 pub(crate) use send_fault::SendFault;
 mod timeouts;
+pub use timeouts::LONGEST_SEND_CALL;
 #[cfg(test)]
 pub(crate) use timeouts::SEND_ANSWER_TIMEOUT;
 pub(crate) use timeouts::{COOLDOWN_REFUSED, DIAL_TIMEOUT};
@@ -35,7 +36,7 @@ mod tests {
     use crate::util::tuning;
     use iroh::endpoint::{ConnectionError, presets};
     use iroh::{endpoint, protocol};
-    use std::{mem, net};
+    use std::{future, mem, net};
     use tokio::sync::mpsc;
     use tokio::{runtime, task, time};
     #[test]
@@ -653,6 +654,148 @@ mod tests {
             router.shutdown().await.expect("shutdown");
             client.close().await;
         });
+    }
+
+    /// A peer that answers each frame by its first byte. A frame that starts with `a` gets no answer
+    /// at all, or `NOT_TAKEN` when `refuse_a` is set. Any other frame is held, committed and
+    /// acknowledged.
+    #[derive(Debug, Clone, Copy)]
+    struct Picky {
+        refuse_a: bool,
+    }
+
+    impl protocol::ProtocolHandler for Picky {
+        async fn accept(
+            &self,
+            connection: endpoint::Connection,
+        ) -> Result<(), protocol::AcceptError> {
+            use super::super::unicast_acceptor::{HELD, NOT_TAKEN};
+
+            let refuse_a = self.refuse_a;
+            let mut streams = task::JoinSet::new();
+            while let Ok((mut ack, mut recv)) = connection.accept_bi().await {
+                streams.spawn(async move {
+                    let mut prefix = [0u8; 4];
+                    recv.read_exact(&mut prefix).await.ok()?;
+                    let mut frame = vec![0u8; usize::try_from(u32::from_be_bytes(prefix)).ok()?];
+                    recv.read_exact(&mut frame).await.ok()?;
+                    if frame.first() == Some(&b'a') {
+                        if refuse_a {
+                            ack.reset(NOT_TAKEN.into()).ok()?;
+                        } else {
+                            let () = future::pending().await;
+                        }
+                        return Some(());
+                    }
+                    ack.write_all(&[HELD]).await.ok()?;
+                    recv.read_to_end(0).await.ok()?;
+                    ack.finish().ok()?;
+                    ack.stopped().await.ok()?;
+                    Some(())
+                });
+            }
+            Ok(())
+        }
+    }
+
+    /// **A caller that waits for the dial of another is not held up by the frame of the dialer.** The
+    /// dialer sends a frame that the peer never answers, and its send waits for the whole wait of a
+    /// send. The waiter wanted a connection, and it has one as soon as the dial is ready: it sends its
+    /// own frame, and the peer takes it. Before, the dialer told its waiters only when its own send
+    /// ended, so every frame behind it waited for the verdict of a frame that was not its own.
+    #[test]
+    fn a_waiter_sends_its_own_frame_while_the_frame_of_its_dialer_waits_for_the_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: false }).await;
+            let dialer = pool.register_dial(server);
+            let waiter = pool.register_dial(server);
+            let first = pool.send_registered(dialer, server, bytes::Bytes::from_static(b"a frame"));
+            let second =
+                pool.send_registered(waiter, server, bytes::Bytes::from_static(b"b frame"));
+            tokio::pin!(first);
+
+            let outcome = tokio::select! {
+                _ = &mut first => panic!("the frame that the peer never answers ended at once"),
+                outcome = time::timeout(Duration::from_secs(5), second) => outcome,
+            };
+
+            assert!(
+                matches!(outcome, Ok(Ok(()))),
+                "the waiter did not deliver its own frame while the frame of its dialer waited: {outcome:?}"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **A caller that waits for the dial of another gets the verdict of its own frame.** The peer
+    /// refuses the frame of the dialer and takes the frame of the waiter. The dialer says "not
+    /// delivered", and the waiter says "delivered": before, the waiter got the error of the frame of
+    /// the dialer, and its own frame was never sent.
+    #[test]
+    fn a_waiter_delivers_its_own_frame_when_the_frame_of_its_dialer_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: true }).await;
+            let dialer = pool.register_dial(server);
+            let waiter = pool.register_dial(server);
+            let first = pool.send_registered(dialer, server, bytes::Bytes::from_static(b"a frame"));
+            let second =
+                pool.send_registered(waiter, server, bytes::Bytes::from_static(b"b frame"));
+
+            let (first, second) = tokio::join!(first, second);
+
+            assert!(first.is_err(), "the peer refused the frame of the dialer");
+            assert!(
+                second.is_ok(),
+                "the waiter got the verdict of the frame of its dialer: {second:?}"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **No path of one send call is longer than `LONGEST_SEND_CALL`.** The paths are the ones of the
+    /// code: a call that dials and dials again after a lost connection (`dial_and_send`), a send on a
+    /// warm connection that dials after it was lost (`send_if_warm`, `redial_and_send`), and a caller
+    /// that waits for the dial of another, sends its own frame, and dials after a lost connection.
+    /// Each is a sum of the named bounds, and the longest is the constant.
+    #[test]
+    fn no_path_of_a_send_call_is_longer_than_the_longest_send_call() {
+        use super::timeouts::{
+            DIAL_TIMEOUT, PATH_SELECT_TIMEOUT, SEND_ANSWER_TIMEOUT, SEND_TIMEOUT,
+        };
+
+        let send: Duration = SEND_TIMEOUT + SEND_ANSWER_TIMEOUT * 2;
+        let connection: Duration = DIAL_TIMEOUT + PATH_SELECT_TIMEOUT;
+        let paths = [
+            (
+                "dial_and_send, then redial_and_send",
+                connection + send + connection + send,
+            ),
+            (
+                "send_if_warm, then redial_and_send",
+                send + connection + send,
+            ),
+            (
+                "a waiter: the connection of its dialer, its own send, then a redial",
+                connection + send + connection + send,
+            ),
+        ];
+
+        for (name, length) in paths {
+            assert!(
+                length <= super::LONGEST_SEND_CALL,
+                "{name} takes {length:?}, longer than {:?}",
+                super::LONGEST_SEND_CALL
+            );
+        }
+        assert_eq!(
+            paths.iter().map(|(_, length)| *length).max(),
+            Some(super::LONGEST_SEND_CALL),
+            "the constant is the longest path, and no more"
+        );
     }
 
     /// A send to a peer that reads nothing ends. The peer accepts the connection, never accepts a stream and keeps

@@ -54,10 +54,36 @@ pub(super) const SEND_TIMEOUT: Duration = Duration::from_secs(3);
 /// with no signal, and then the frame needs the time of a normal send, which is [`SEND_TIMEOUT`]. A
 /// shorter wait turns every failover of a path into a failed send. The cost is the same number: a
 /// send to a peer that is gone answers "not delivered" after this time, and the connection is busy
-/// in the ledger until then. One send waits at most [`SEND_TIMEOUT`] and this time twice, and the
-/// pool sends a second time after a lost connection, so one call waits at most twice that.
+/// in the ledger until then. One send waits at most [`SEND_TIMEOUT`] and this time twice. A call
+/// makes a second send after a lost connection: see [`LONGEST_SEND_CALL`].
 pub(crate) const SEND_ANSWER_TIMEOUT: Duration =
     QUIC_PATH_IDLE_TIMEOUT.saturating_add(SEND_TIMEOUT);
+
+/// One attempt of a send: the dial, the wait for a direct path, and one [`send_one`]
+/// (the open and the write, the wait for `HELD`, and the wait for the end).
+///
+/// [`send_one`]: super::unicast_pool::send_one
+const SEND_ATTEMPT: Duration = DIAL_TIMEOUT
+    .saturating_add(PATH_SELECT_TIMEOUT)
+    .saturating_add(SEND_TIMEOUT)
+    .saturating_add(SEND_ANSWER_TIMEOUT.saturating_mul(2));
+
+/// The longest time that one call to send a directed frame takes before it gives a verdict. A call
+/// makes one attempt, and a second one after a lost connection (see `SEND_ATTEMPT` in the source:
+/// the dial, the wait for a direct path, and the send with its two waits for the peer). A caller
+/// that waits for the dial of another is told when that connection is ready, so it sends its own
+/// frame and fits the same bound. A caller that must give up on a send for itself, and not decide
+/// before the engine does, reads this and adds a margin.
+///
+/// # Examples
+///
+/// ```
+/// use habilis_network::ops::LONGEST_SEND_CALL;
+///
+/// // A send to a peer that is gone answers within this time, not after the 3 s of a dial.
+/// assert!(LONGEST_SEND_CALL.as_secs() > 18);
+/// ```
+pub const LONGEST_SEND_CALL: Duration = SEND_ATTEMPT.saturating_mul(2);
 
 /// The error of a send that passed [`SEND_TIMEOUT`] or [`SEND_ANSWER_TIMEOUT`]. A caller that tells
 /// the two apart reads it.

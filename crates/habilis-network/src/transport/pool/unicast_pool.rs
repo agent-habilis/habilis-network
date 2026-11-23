@@ -288,14 +288,14 @@ impl UnicastPool {
         let outcome = match self.redial_registration(eid) {
             None => Err(anyhow::anyhow!("{PINNED_REDIAL}")),
             Some(registration) => {
-                let outcome = self.dial_and_send_once(eid, &bytes).await;
-                if let Registration::Dialer(in_flight) = &registration {
-                    in_flight.publish(match &outcome {
-                        Ok(()) => Ok(()),
-                        Err(error) => Err(error.to_string()),
-                    });
+                let in_flight = match &registration {
+                    Registration::Dialer(in_flight) => Some(in_flight),
+                    Registration::Waiter(_) => None,
+                };
+                match self.connection_for_send(in_flight, eid).await {
+                    Ok(connection) => self.send_on(eid, &connection, &bytes).await,
+                    Err(error) => Err(error),
                 }
-                outcome
             }
         };
         match outcome {
@@ -786,6 +786,34 @@ impl UnicastPool {
 
     /// [`Self::dial_and_send`] with no second send after a lost connection.
     async fn dial_and_send_once(&self, eid: EndpointId, bytes: &Bytes) -> Result<()> {
+        let connection = self.connection_for_send(None, eid).await?;
+        self.send_on(eid, &connection, bytes).await
+    }
+
+    /// The connection that a send to `eid` writes on: a warm one, or one that this call dials, and
+    /// with a direct path when the relay is lookup only. A dialer passes its `in_flight` and the
+    /// waiters of its dial are told as soon as the connection is ready or the dial failed: a waiter
+    /// wants a connection, and sends its own frame, so it does not wait for the frame of the dialer
+    /// or take its verdict.
+    async fn connection_for_send(
+        &self,
+        in_flight: Option<&InFlightDial>,
+        eid: EndpointId,
+    ) -> Result<Connection> {
+        let ready = self.ready_connection(eid).await;
+        if let Some(in_flight) = in_flight {
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            self.wait_outcome_hold(eid).await;
+            in_flight.publish(match &ready {
+                Ok(_) => Ok(()),
+                Err(error) => Err(error.to_string()),
+            });
+        }
+        ready
+    }
+
+    /// The warm connection to `eid`, or a new one that this call dials, with a direct path.
+    async fn ready_connection(&self, eid: EndpointId) -> Result<Connection> {
         self.inner.dial_attempts.fetch_add(1, Ordering::Relaxed);
         let connection = self.warm_or_dial(eid).await?;
         // A connection this call just dialed is milliseconds old: its
@@ -799,9 +827,14 @@ impl UnicastPool {
         {
             bail!("{RELAY_REFUSED}");
         }
-        if let Err(error) = self.send_marked(eid, &connection, bytes).await {
+        Ok(connection)
+    }
+
+    /// One send of `bytes` on `connection`. A connection that was lost leaves the pool.
+    async fn send_on(&self, eid: EndpointId, connection: &Connection, bytes: &Bytes) -> Result<()> {
+        if let Err(error) = self.send_marked(eid, connection, bytes).await {
             if connection_lost(&error) {
-                self.evict_if_same(eid, &connection).await;
+                self.evict_if_same(eid, connection).await;
             }
             return Err(error);
         }
@@ -845,14 +878,14 @@ impl UnicastPool {
         loop {
             match registration {
                 Registration::Dialer(in_flight) => {
-                    let outcome = self.dial_and_send(eid, bytes).await;
-                    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-                    self.wait_outcome_hold(eid).await;
-                    in_flight.publish(match &outcome {
-                        Ok(()) => Ok(()),
-                        Err(error) => Err(error.to_string()),
-                    });
-                    return outcome;
+                    let connection = self.connection_for_send(Some(&in_flight), eid).await?;
+                    let outcome = self.send_on(eid, &connection, &bytes).await;
+                    return match outcome {
+                        Err(error) if connection_lost(&error) => {
+                            self.redial_and_send(eid, bytes, &error).await
+                        }
+                        other => other,
+                    };
                 }
                 Registration::Waiter(outcome) => {
                     wait_for_dial(outcome).await.map_err(anyhow::Error::msg)?;
