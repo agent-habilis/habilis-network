@@ -2199,7 +2199,7 @@ dependencies = [
 [[package]]
 name = "iroh-mainline-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=7bca597431307f94fc9200b42af89812a9eeaaba#7bca597431307f94fc9200b42af89812a9eeaaba"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=2f6c0d2c6d292dd4790f097b4af416b6c2025907#2f6c0d2c6d292dd4790f097b4af416b6c2025907"
 dependencies = [
  "derive_more",
  "iroh",
@@ -2216,7 +2216,7 @@ dependencies = [
 [[package]]
 name = "iroh-mdns-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=7bca597431307f94fc9200b42af89812a9eeaaba#7bca597431307f94fc9200b42af89812a9eeaaba"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=2f6c0d2c6d292dd4790f097b4af416b6c2025907#2f6c0d2c6d292dd4790f097b4af416b6c2025907"
 dependencies = [
  "data-encoding",
  "derive_more",
