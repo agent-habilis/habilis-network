@@ -839,6 +839,13 @@ impl UnicastPool {
     /// a send dialed as it is. If the connection is gone by then, the waiter takes a new place, and
     /// the next caller waits for it.
     ///
+    /// A waiter that reads [`DialEnd::DialerLeft`] takes the place of the dialer, and that is safe for
+    /// the callers that exist: the only dialers that are dropped while the node runs are the probes of
+    /// the offer round (`udp_won`), a probe registers only when a unit is free, and only a dialer plans
+    /// a dial, which is what pins a peer. So a pinned peer never has a dropped dialer; if one had, the
+    /// waiter would get [`PINNED_REDIAL`], a refusal that the next send mends. A new caller that can be
+    /// dropped must keep that true.
+    ///
     /// A caller that waits can wait again behind a new dial each time its connection is lost, and no
     /// code bounds the turns (see `LONGEST_SEND_CALL`). A caller that holds a place from the event
     /// loop (`register_planned_dial` in `deliver`) takes it there, before it spawns, because the plan
