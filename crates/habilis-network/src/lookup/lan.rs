@@ -1,13 +1,6 @@
 use tokio::sync::mpsc;
 
-// Only the `host` loopback bind names a socket address; a browser has no IP
-// stack to bind one on.
-#[cfg(feature = "host")]
-use std::net::{Ipv4Addr, SocketAddrV4};
-
 use anyhow::{Context, Result};
-#[cfg(feature = "host")]
-use iroh::endpoint::PortmapperConfig;
 use iroh::endpoint::presets;
 use iroh::{Endpoint, RelayMode, SecretKey};
 
@@ -115,13 +108,9 @@ pub(crate) async fn build_endpoint_keeping_mdns(
         {
             let builder = Endpoint::builder(presets::Minimal);
             #[cfg(feature = "host")]
-            let builder = {
-                let bind_socket = SocketAddrV4::new(Ipv4Addr::LOCALHOST, bind_port.unwrap_or(0));
-                builder
-                    .bind_addr(bind_socket)
-                    .context("failed to set bind address")?
-                    .portmapper_config(PortmapperConfig::Disabled)
-            };
+            let builder =
+                habilis_network_iroh_transport_util::loopback(builder, bind_port.unwrap_or(0))
+                    .context("failed to set bind address")?;
             builder.relay_mode(RelayMode::Disabled)
         }
     } else {
