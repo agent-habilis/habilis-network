@@ -10,7 +10,7 @@
 //! no other sharing point between otherwise-independent crates. It adds no
 //! external dependency — `iroh` is already in the manifest of each of them.
 //!
-//! The third piece is [`loopback`], which binds the endpoint of a builder to this host only. The
+//! The third piece is [`loopback()`], which binds the endpoint of a builder to this host only. The
 //! engine uses it for a mesh that looks up nothing outside the host, and the tests of every crate use
 //! it so that no test endpoint listens on the network. It lives here for the same reason as the other
 //! two: the crates that build endpoints share no other crate.

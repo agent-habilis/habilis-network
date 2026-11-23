@@ -275,7 +275,7 @@ impl Forwarder {
     /// cell is dropped (the table can change between the choice and this call).
     ///
     /// Bounded: the queue of a writer holds [`WRITER_QUEUE`] cells and all the writers hold
-    /// [`FORWARD_QUEUE_BYTES`] bytes. A cell that does not fit is dropped, as a full NIC queue drops a packet.
+    /// [`super::FORWARD_QUEUE_BYTES`] bytes. A cell that does not fit is dropped, as a full NIC queue drops a packet.
     pub(crate) fn enqueue(&self, neighbor: AppId, cell: Cell) {
         let Some(mut charged) = WriterPool::charge(&self.pool, cell) else {
             self.note_drop("forwarding byte budget exhausted");
