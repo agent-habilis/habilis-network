@@ -1559,19 +1559,25 @@ impl EventLoopState {
     }
 
     /// [`Self::starved_join_due`] without the stamp: whether a fallback would be due at `now`.
+    ///
+    /// A node is starved when it held fewer than G peers for `STARVED`, or when it has no member
+    /// neighbor and a `Neighbor` request of it was read as refused (`GraftBackoff::has_refusal`):
+    /// a node with no neighbor has nobody to wait for once a peer has refused it. A refusal counts
+    /// for `STARVED` after it was read, so a node that was refused and then got a neighbor and
+    /// lost its last one asks with a `Join` at once, and that `Join` can make up to
+    /// 1 + 2(G - 1) peers drop a link. The ask is paced by `STARVED` as for any starved node.
     pub(crate) fn starved_join_ready(&self, now: Instant) -> bool {
         let window = STARVED;
-        // A node with no neighbor has no peer to wait for: its first strong request is due at
-        // once. The pace after it is the same as for any starved node.
-        let alone = self.linked_endpoints.is_empty();
-        let starved = alone
+        let refused = self.graft_backoff.has_refusal(now);
+        let alone_and_refused = self.linked_endpoints.is_empty() && refused;
+        let starved = alone_and_refused
             || self
                 .below_target_since
                 .is_some_and(|since| now.duration_since(since) >= window);
         let waited = self
             .join_fallback_at
             .is_none_or(|at| now.duration_since(at) >= window);
-        let stuck = alone || self.links_short >= 2 || self.graft_backoff.has_refusal(now);
+        let stuck = self.links_short >= 2 || refused;
         starved && waited && stuck
     }
 

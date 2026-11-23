@@ -234,30 +234,48 @@ mod tests {
         state
     }
 
-    /// A node with no neighbor has no peer to wait for, so its first strong request is due at
-    /// once, not after `STARVED`. A node with a neighbor keeps the wait.
+    /// A node with no neighbor whose `Neighbor` request was read as refused asks with a `Join` at
+    /// once, and does not wait for `STARVED`. A node with no neighbor and no refusal, and a node
+    /// with a neighbor, keep the wait. The pace after the `Join` is the same as for any starved
+    /// node. The test shows the rule, with a fixed clock. It does not show that a real mesh reaches
+    /// that state and stays there. The first case is a new member at its start: it sends no `Join`.
     #[test]
-    fn a_node_with_no_neighbor_asks_with_a_join_at_once_and_a_node_with_one_waits() {
+    fn a_node_with_no_neighbor_and_a_read_refusal_asks_with_a_join_at_once() {
         let _guard = ::habilis_network_test_tracing::init();
-        let now = Instant::now();
+        let start = Instant::now();
+        let asked_at = start + SECOND;
+        let read_at = asked_at + GRAFT_REFUSED_AFTER;
+        let now = read_at + SECOND;
+        let candidate = endpoint_id(2);
 
-        let mut alone = fresh_state();
-        alone.note_link_count(MAX_CONNECTIONS, now);
+        let mut fresh = fresh_state();
+        fresh.note_link_count(MAX_CONNECTIONS, start);
         assert!(
-            alone.starved_join_ready(now),
-            "a node with no neighbor must ask with a Join at once"
+            !fresh.starved_join_ready(now),
+            "a node with no neighbor and no refusal waits for STARVED"
         );
-        assert!(alone.starved_join_due(now), "the first ask is due");
+
+        let mut refused = fresh_state();
+        refused.note_link_count(MAX_CONNECTIONS, start);
+        refused.graft_backoff.asked(candidate, asked_at);
+        refused.settle_graft_backoff(read_at);
         assert!(
-            !alone.starved_join_ready(now + SECOND),
+            refused.starved_join_ready(now),
+            "a node with no neighbor that was refused asks with a Join at once"
+        );
+        assert!(refused.starved_join_due(now), "the first ask is due");
+        assert!(
+            !refused.starved_join_ready(now + SECOND),
             "the ask is paced: the next one waits for STARVED"
         );
 
         let mut linked = state_with_a_member_to_fill(1);
-        linked.note_link_count(MAX_CONNECTIONS, now);
+        linked.note_link_count(MAX_CONNECTIONS, start);
+        linked.graft_backoff.asked(candidate, asked_at);
+        linked.settle_graft_backoff(read_at);
         assert!(
             !linked.starved_join_ready(now),
-            "a node with a neighbor waits for STARVED"
+            "a node with a neighbor waits for STARVED, refused or not"
         );
     }
 

@@ -38,8 +38,8 @@ pub(crate) struct GraftTarget {
 /// with a `Join` instead when the node is starved, at most once per `STARVED`: it held fewer
 /// than G peers for `STARVED`, and it is 2 or more peers short, or 1 short and a peer refused
 /// it within the last `STARVED` (`GraftBackoff::has_refusal`). A `PeerInfo` graft is not paced.
-/// A node with no neighbor at all is starved at once: its first `Join` does not wait for `STARVED`,
-/// and the next one waits for it, as for any starved node.
+/// A node with no neighbor at all, whose `Neighbor` request was read as refused, is starved at once:
+/// its `Join` does not wait for `STARVED`, and the next one waits for it, as for any starved node.
 ///
 /// The `Join` ignores the backoff of the peer, but the guard of a node that is 1 peer short does
 /// not: it needs a refusal read within the last `STARVED`, and the wait of the backoff can reach

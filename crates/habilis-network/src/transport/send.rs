@@ -191,8 +191,8 @@ mod tests {
         );
     }
 
-    /// A peer with an IP path is unproven too on a lookup-only relay once a probe reads its path
-    /// as the relay, but its direct path comes from the probe, so no session is wanted for it.
+    /// A peer with an IP path that no probe has proven direct is asked for too on a lookup-only
+    /// relay, but its direct path comes from the probe, so no session is wanted for it.
     #[test]
     fn a_send_to_a_peer_with_an_ip_path_does_not_want_a_session() {
         let _guard = ::habilis_network_test_tracing::init();
