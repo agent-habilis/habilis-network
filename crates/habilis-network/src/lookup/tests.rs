@@ -915,6 +915,30 @@ fn a_node_that_asks_for_a_loopback_bind_listens_on_this_host_only() {
     });
 }
 
+/// **The endpoints that a node builds beside its own take its bind and no other option.** The
+/// rendezvous endpoint and the prober of a beacon have no transport choice of their own, so a node
+/// with `udp` off must not hand that choice to them.
+#[test]
+#[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+fn a_side_endpoint_takes_the_bind_of_the_node_and_no_other_option() {
+    use super::bind_only;
+    use crate::lookup::Bind;
+
+    let node = TransportOpts {
+        udp: false,
+        ..TransportOpts::default()
+    }
+    .bind(Bind::Loopback);
+
+    let side = bind_only(node);
+
+    assert_eq!(side.bind, Bind::Loopback, "the bind of the node");
+    assert!(
+        side.udp,
+        "the udp choice of the node stays with its member endpoint"
+    );
+}
+
 /// **The underlay of a node that binds loopback binds loopback too.** A node has 2 endpoints, the
 /// application endpoint and its underlay, and the second one took no bind: it listened on every
 /// interface of the host, and so did the sockets that a subnet bind added to it.

@@ -182,7 +182,10 @@ pub(crate) async fn spawn_rival_probe(
         None,
         None,
         Vec::new(),
-        TransportHandles::default(),
+        TransportHandles {
+            options: params.bind_options,
+            ..TransportHandles::default()
+        },
     )
     .await
     {

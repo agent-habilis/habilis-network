@@ -26,6 +26,11 @@ pub(crate) struct RendezvousParams {
     /// address-lookups (or a joiner using only mDNS/DHT could never
     /// resolve it) — see `beacon_lookups`.
     pub(crate) lookups: LookupOpts,
+    /// The bind of the node, in the default options of an endpoint (`lookup::bind_only`), so that
+    /// the endpoints that the beacon builds (the rendezvous endpoint and the throwaway probers of a
+    /// rival) listen where the node does: a node that listens on this host only builds none that
+    /// listens beyond it. No other option of the node reaches them.
+    pub(crate) bind_options: lookup::TransportOpts,
     /// The mesh's `transport.relay_transport`. With it off, the beacon holds every
     /// inbound gossip connection — a joiner's first link — until iroh selects
     /// a direct path on it, so no frame ever crosses the relay.

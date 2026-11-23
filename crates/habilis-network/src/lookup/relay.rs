@@ -1808,6 +1808,7 @@ mod tests {
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: Some(home.clone()),
             rung_tx: mpsc::unbounded_channel().0,
+            bind_options: TransportOpts::default(),
         }
     }
 

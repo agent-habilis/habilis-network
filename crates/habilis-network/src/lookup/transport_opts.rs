@@ -157,6 +157,20 @@ pub(crate) fn binds_loopback_only(_options: TransportOpts) -> bool {
     false
 }
 
+/// The options of an endpoint that a node builds beside its own and that has no transport choice of
+/// its own (a rendezvous endpoint, a prober): the defaults, with the bind of the node. The other
+/// fields (`udp`, relay, `WebRTC`, gossip) are choices of the member endpoint and do not reach it.
+#[must_use]
+pub(crate) fn bind_only(options: TransportOpts) -> TransportOpts {
+    #[cfg(feature = "iroh-test-utils")]
+    return TransportOpts::default().bind(options.bind);
+    #[cfg(not(feature = "iroh-test-utils"))]
+    {
+        let _ = options;
+        TransportOpts::default()
+    }
+}
+
 impl Default for TransportOpts {
     fn default() -> Self {
         Self {

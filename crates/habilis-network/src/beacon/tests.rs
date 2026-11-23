@@ -1,3 +1,4 @@
+use crate::lookup::TransportOpts;
 use crate::protocol::meshes::LookupOpts;
 
 use iroh::Endpoint;
@@ -959,6 +960,7 @@ fn public_params() -> RendezvousParams {
         bind_ports: Vec::new(),
         id,
         lookups: LookupOpts::loopback(),
+        bind_options: TransportOpts::default(),
         relay_transport: PayloadPath::DirectOnly,
         bootstrap_relay: None,
         rung_tx: mpsc::unbounded_channel().0,

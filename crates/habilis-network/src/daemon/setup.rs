@@ -68,6 +68,7 @@ fn rendezvous_params(
     mesh: &Mesh,
     topic_id: proto::TopicId,
     lookups: &LookupOpts,
+    options: lookup::TransportOpts,
     rung_tx: mpsc::UnboundedSender<lookup::RungDecision>,
 ) -> RendezvousParams {
     let bind_ports = if mesh.is_loopback() {
@@ -89,6 +90,7 @@ fn rendezvous_params(
         bind_ports,
         id: mesh.rendezvous_id(),
         lookups: lookups.clone(),
+        bind_options: lookup::bind_only(options),
         relay_transport: transport::PayloadPath::from(relay_transport),
         bootstrap_relay,
         rung_tx,
@@ -1902,7 +1904,13 @@ async fn setup_create(
 
     let (gossip, router, webrtc_admission, address_book, webrtc_ice) =
         build_overlay(build, &mesh, &endpoint, &webrtc, admission);
-    let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
+    let rdv = rendezvous_params(
+        &mesh,
+        topic_id,
+        build.lookups,
+        build.transports,
+        build.rung_tx.clone(),
+    );
     // Creator has no peers yet — bootstrap is empty.
     let topic = split::subscribe_mesh(&gossip, topic_id, rdv.id, []).await?;
 
@@ -1978,7 +1986,13 @@ async fn setup_join(
         build_member_endpoint(build, injected).await?;
 
     let lan_contacts = lookup::lan_contacts(&endpoint, mdns, &topic_id).await?;
-    let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
+    let rdv = rendezvous_params(
+        &mesh,
+        topic_id,
+        build.lookups,
+        build.transports,
+        build.rung_tx.clone(),
+    );
     let (gossip, router, webrtc_admission, address_book, webrtc_ice) =
         build_overlay(build, &mesh, &endpoint, &webrtc, admission);
     // Must precede the join (the subscribe below): the peer resolves the rendezvous id via

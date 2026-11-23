@@ -68,7 +68,10 @@ pub(crate) async fn build_rendezvous_endpoint(
         // Made before the endpoint: the endpoint reports its connections to it
         // from the first handshake on.
         let admission = transport::SignalAdmission::new(tuning::MAX_CONNECTIONS);
-        let transport_handles = public_beacon_handles(&params.lookups, &webrtc, &admission);
+        let transport_handles = TransportHandles {
+            options: params.bind_options,
+            ..public_beacon_handles(&params.lookups, &webrtc, &admission)
+        };
         let endpoint = build_endpoint(
             &lookups,
             Some(params.secret.clone()),
@@ -102,6 +105,7 @@ pub(crate) async fn build_rendezvous_endpoint(
             Vec::new(),
             TransportHandles {
                 role: beacon_role(&params.lookups),
+                options: params.bind_options,
                 ..TransportHandles::default()
             },
         )
@@ -166,6 +170,12 @@ pub(crate) async fn build_rendezvous_endpoint(
 #[cfg(all(test, feature = "host"))]
 mod tests {
     use iroh::SecretKey;
+    #[cfg(feature = "iroh-test-utils")]
+    use iroh::address_lookup::memory::MemoryLookup;
+    #[cfg(feature = "iroh-test-utils")]
+    use iroh_gossip::proto::TopicId;
+    #[cfg(feature = "iroh-test-utils")]
+    use tokio::sync::mpsc;
 
     use crate::lookup::{self, EndpointRole};
     use crate::protocol::meshes::{LookupOpts, RelayChoice};
@@ -192,6 +202,46 @@ mod tests {
             handles.webrtc.is_some(),
             "it still carries the WebRTC handle"
         );
+    }
+
+    /// The rendezvous endpoint of a node that listens on this host only listens there too: it is
+    /// an endpoint of the node, and a public rendezvous names a relay, not a bind.
+    #[cfg(feature = "iroh-test-utils")]
+    #[test]
+    fn the_rendezvous_endpoint_of_a_node_that_binds_loopback_binds_loopback() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let secret = SecretKey::generate();
+            let (reports, _arrivals) = mpsc::unbounded_channel();
+            let params = super::RendezvousParams {
+                topic_id: TopicId::from_bytes([7u8; 32]),
+                id: secret.public(),
+                secret,
+                bind_ports: Vec::new(),
+                lookups: LookupOpts::new(RelayChoice::Pinned),
+                bind_options: lookup::TransportOpts::default().bind(lookup::Bind::Loopback),
+                relay_transport: transport::PayloadPath::DirectOnly,
+                bootstrap_relay: Some("https://relay.example/".parse().expect("a relay URL")),
+                rung_tx: mpsc::unbounded_channel().0,
+            };
+            let peer = lookup::build_peer_endpoint(&LookupOpts::loopback())
+                .await
+                .expect("a loopback peer endpoint");
+            let book = MemoryLookup::new();
+            let mut rungs = super::RungWatch::new(reports);
+
+            let walk = super::build_rendezvous_endpoint(&params, &peer, &book, &mut rungs).await;
+
+            let super::Walk::Bound(endpoint, _lane) = walk else {
+                panic!("the public rendezvous binds");
+            };
+            let sockets = endpoint.bound_sockets();
+            endpoint.close().await;
+            peer.close().await;
+            assert!(
+                sockets.iter().all(|socket| socket.ip().is_loopback()),
+                "the rendezvous endpoint of a loopback node listens on loopback only: {sockets:?}"
+            );
+        });
     }
 
     /// The role follows the relay lookup that the mesh is configured with. The beacon of a mesh with a relay

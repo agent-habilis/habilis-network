@@ -885,6 +885,7 @@ mod tests {
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
             rung_tx: mpsc::unbounded_channel().0,
+            bind_options: lookup::TransportOpts::default(),
         }
     }
 
@@ -1186,6 +1187,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: mpsc::unbounded_channel().0,
+                bind_options: lookup::TransportOpts::default(),
             };
 
             let endpoint = lookup::build_endpoint(
@@ -1283,6 +1285,7 @@ mod tests {
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
             rung_tx: mpsc::unbounded_channel().0,
+            bind_options: lookup::TransportOpts::default(),
         };
 
         // The holder: another member of the same room, on the only rung.
@@ -1472,6 +1475,7 @@ mod tests {
                     relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
                     rung_tx: mpsc::unbounded_channel().0,
+                    bind_options: lookup::TransportOpts::default(),
                 }
             };
             let params = params_of(6);
@@ -1597,6 +1601,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: mpsc::unbounded_channel().0,
+                bind_options: lookup::TransportOpts::default(),
             };
             // A beacon of another mesh holds the first rung: this member reads it as foreign and
             // binds the second.
@@ -1610,6 +1615,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: mpsc::unbounded_channel().0,
+                bind_options: lookup::TransportOpts::default(),
             };
             let other_endpoint = loopback_endpoint().await;
             let other_book = lookup::address_book(&other_endpoint);
@@ -2133,6 +2139,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: mpsc::unbounded_channel().0,
+                bind_options: lookup::TransportOpts::default(),
             };
 
             let endpoint = lookup::build_endpoint(
@@ -2239,6 +2246,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: mpsc::unbounded_channel().0,
+                bind_options: lookup::TransportOpts::default(),
             };
 
             let endpoint = lookup::build_endpoint(

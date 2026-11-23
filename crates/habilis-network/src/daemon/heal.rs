@@ -370,6 +370,8 @@ mod tests {
     #[cfg(feature = "host")]
     use crate::gossip::split;
     #[cfg(feature = "host")]
+    use crate::lookup::TransportOpts;
+    #[cfg(feature = "host")]
     #[cfg(feature = "host")]
     use crate::membership;
     #[cfg(feature = "host")]
@@ -432,6 +434,7 @@ mod tests {
                     relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
                     rung_tx: mpsc::unbounded_channel().0,
+                    bind_options: TransportOpts::default(),
                 };
                 let parts = CtxParts {
                     endpoint: &node.endpoint,
