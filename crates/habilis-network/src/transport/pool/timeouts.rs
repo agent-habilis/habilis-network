@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crate::util::tuning::QUIC_PATH_IDLE_TIMEOUT;
+
 /// How long an inline dial keeps trying before giving up. Deliberately short —
 /// far under the application's 90s discovery deadline — because the dial blocks the send,
 /// and an unreachable peer should surface as an error now, not stall the
@@ -40,12 +42,23 @@ pub(crate) const PINNED_IDLE: Duration = super::super::ceiling::EXTRA_IDLE;
 /// may be gone. The next send plans the dial with a fresh route.
 pub(super) const PINNED_REDIAL: &str = "pinned peer: the next send plans a fresh route";
 
-/// How long one send may take: the open of the stream, the write of the frame, and the acknowledgement
-/// of the peer. A peer that accepts the
-/// connection and reads nothing fills its limit of streams, and the open then waits. Each send sits in a task of
-/// its own, so a wait without a bound grows the tasks of this node for as long as the peer makes it send. The
-/// budget is the dial's, because a send that waits this long is as dead as a peer that does not answer a dial.
+/// How long the open of the stream and the write of the frame may take. Both are local: a peer that
+/// accepts the connection and reads nothing fills its limit of streams, and the open then waits.
+/// Each send sits in a task of its own, so a wait without a bound grows the tasks of this node for
+/// as long as the peer makes it send. The budget is the dial's, because a send that waits this long
+/// is as dead as a peer that does not answer a dial.
 pub(super) const SEND_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// The error of a send that passed [`SEND_TIMEOUT`]. A caller that tells the two apart reads it.
+/// How long a send waits for the peer: once for `HELD`, and once for the end of the frame. The
+/// transport under the connection can need its whole path idle timeout to leave a path that died
+/// with no signal, and then the frame needs the time of a normal send, which is [`SEND_TIMEOUT`]. A
+/// shorter wait turns every failover of a path into a failed send. The cost is the same number: a
+/// send to a peer that is gone answers "not delivered" after this time, and the connection is busy
+/// in the ledger until then. One send waits at most [`SEND_TIMEOUT`] and this time twice, and the
+/// pool sends a second time after a lost connection, so one call waits at most twice that.
+pub(crate) const SEND_ANSWER_TIMEOUT: Duration =
+    QUIC_PATH_IDLE_TIMEOUT.saturating_add(SEND_TIMEOUT);
+
+/// The error of a send that passed [`SEND_TIMEOUT`] or [`SEND_ANSWER_TIMEOUT`]. A caller that tells
+/// the two apart reads it.
 pub(super) const SEND_TIMED_OUT: &str = "unicast send timed out";

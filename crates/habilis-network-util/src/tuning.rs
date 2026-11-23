@@ -1329,6 +1329,14 @@ pub const QUIC_CONNECTION_RECEIVE_WINDOW: u32 = 16 * 1024 * 1024;
 /// How many bytes a node sends to a peer before the peer acknowledges them (decision D11): 16 `MiB`.
 pub const QUIC_SEND_WINDOW: u64 = 16 * 1024 * 1024;
 
+/// How long a path of a QUIC connection can carry nothing from the peer before the transport
+/// abandons it. It is the time that the transport needs to leave a path that died with no signal,
+/// and it is the largest value that iroh takes: iroh clamps a larger one to 15 s. Two things read
+/// it. The endpoint passes it to iroh, and the wait of a send for its peer (`SEND_ANSWER_TIMEOUT`
+/// of the pool) is not shorter than it, so a send that starts while its path dies is delivered when
+/// the transport moves to another path, and is not given up as a failure of the peer.
+pub const QUIC_PATH_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// How long after a `Neighbor` request a node reads "no link came up" as a refusal: the longer of
 /// the relink cooldown (10 s) and the probe deadline (15 s), plus 5 s. A link that comes up later
 /// than this is not a reply to the request.

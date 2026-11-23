@@ -54,8 +54,10 @@ pub(crate) const HELD: u8 = 1;
 /// held frame is up to [`MAX_UNICAST_FRAME`] bytes, so the memory of one connection is at most
 /// this number times that, and it takes this many places of the inbox. A sender that waits for
 /// each frame to be delivered holds one at a time. The idle timeout ends a connection whose held
-/// frames never commit: `SEND_TIMEOUT` (3 s) bounds a correct commit, and the idle timeout is far
-/// above it.
+/// frames never commit: `SEND_ANSWER_TIMEOUT` (18 s) bounds the wait of a correct sender for the
+/// commit, and the idle timeout (15 min) is far above it. A peer that sends frames and never commits
+/// holds these places for the idle timeout at most, and no other frame of that connection takes
+/// them.
 const MAX_HELD_FRAMES: usize = 16;
 
 /// One frame that a peer sent on a unidirectional stream, and the endpoint of the connection that
@@ -264,6 +266,7 @@ mod tests {
 
     use super::super::UNICAST_ALPN;
     use super::super::admission::SignalAdmission;
+    use super::super::pool::SEND_ANSWER_TIMEOUT;
     use super::{
         DIRECT_IDLE_BACKSTOP, EXTRA_IDLE, HELD, IDLE, MAX_HELD_FRAMES, PayloadPath, UNCOMMITTED,
         UnicastAcceptor, UnicastFrame, mpsc,
@@ -739,34 +742,9 @@ mod tests {
     #[test]
     fn a_frame_whose_send_timed_out_never_reaches_the_loop_of_a_peer_that_reads_late() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let (tx, mut frames) = mpsc::channel(8);
-            // Shared by the test, which starts the peer late, and the handler.
-            let start = Arc::new(Notify::new());
-            let handler = LateStart {
-                inner: UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
-                start: Arc::clone(&start),
-            };
-            let bind = || async {
-                iroh::Endpoint::builder(presets::Minimal)
-                    .relay_mode(iroh::RelayMode::Disabled)
-                    .bind()
-                    .await
-                    .expect("bind a loopback endpoint")
-            };
-            let server = bind().await;
-            let router = Router::builder(server.clone())
-                .accept(UNICAST_ALPN, handler)
-                .spawn();
-            let client = bind().await;
-            lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
-            let pool = UnicastPool::new(client.clone(), true);
-            pool.warm_or_dial(server.id())
-                .await
-                .expect("a warm connection");
+            let (pool, peer, router, client, start, mut frames) = late_peer().await;
 
-            let verdict = pool
-                .dial_or_warm_send(server.id(), bytes::Bytes::from_static(b"frame"))
-                .await;
+            let (verdict, _waited) = send_on_the_paused_clock(&pool, peer).await;
             start.notify_one();
             let taken = frames_taken(&mut frames).await;
 
@@ -777,6 +755,123 @@ mod tests {
             assert_eq!(
                 taken, 0,
                 "the send answered an error, and the peer took the frame later"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// A late peer: a server that starts its acceptor only when `start` is notified, a pool
+    /// connected to it, and the frames that it takes. Its clock is paused.
+    async fn late_peer() -> (
+        UnicastPool,
+        iroh::EndpointId,
+        Router,
+        iroh::Endpoint,
+        // Shared by the test, which starts the peer late, and the handler that waits for it.
+        Arc<Notify>,
+        mpsc::Receiver<UnicastFrame>,
+    ) {
+        let (tx, frames) = mpsc::channel(8);
+        // Shared by the test, which starts the peer late, and the handler.
+        let start = Arc::new(Notify::new());
+        let handler = LateStart {
+            inner: UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+            start: Arc::clone(&start),
+        };
+        let bind = || async {
+            iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint")
+        };
+        let server = bind().await;
+        let router = Router::builder(server.clone())
+            .accept(UNICAST_ALPN, handler)
+            .spawn();
+        let client = bind().await;
+        lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
+        let pool = UnicastPool::new(client.clone(), true);
+        pool.warm_or_dial(server.id())
+            .await
+            .expect("a warm connection");
+        tokio_time::pause();
+        (pool, server.id(), router, client, start, frames)
+    }
+
+    /// Send one frame while the paused clock advances by seconds, and how long the send took on that
+    /// clock.
+    async fn send_on_the_paused_clock(
+        pool: &UnicastPool,
+        peer: iroh::EndpointId,
+    ) -> (anyhow::Result<()>, Duration) {
+        let started = tokio_time::Instant::now();
+        let mut send =
+            std::pin::pin!(pool.dial_or_warm_send(peer, bytes::Bytes::from_static(b"frame")));
+        let verdict = loop {
+            tokio::select! {
+                verdict = &mut send => break verdict,
+                () = advance_secs(1) => {}
+            }
+        };
+        (verdict, started.elapsed())
+    }
+
+    /// **A send that starts in a failover hole is delivered when the peer holds the frame.** The
+    /// path of the hop is dead, and the transport under it needs about 5 s to move to another path,
+    /// and up to its path idle timeout (15 s) when nothing tells it that the path is dead. The send
+    /// starts at once and the peer holds the frame 6 s later. The wait of a send for the peer is
+    /// not shorter than that time, so the frame is delivered once, and the sender does not give up
+    /// on a frame that the path would have carried.
+    #[test]
+    fn a_frame_that_the_peer_holds_after_a_failover_hole_is_delivered_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, peer, router, client, start, mut frames) = late_peer().await;
+
+            let send = pool.dial_or_warm_send(peer, bytes::Bytes::from_static(b"frame"));
+            let hole = async {
+                advance_secs(6).await;
+                start.notify_one();
+            };
+            let (verdict, ()) = tokio::join!(send, hole);
+            let taken = frames_taken(&mut frames).await;
+
+            assert!(
+                matches!(SendVerdict::of(verdict), SendVerdict::Delivered),
+                "the peer held the frame 6 s after the send started, inside the wait of a send"
+            );
+            assert_eq!(taken, 1, "the frame arrives once");
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **A send to a peer that never holds the frame answers "not delivered" after the wait of a
+    /// send, and not before, and not never.** It is the cost of a wait that is as long as the
+    /// failover of the path: a peer that is gone answers after the whole wait. The time is the paused
+    /// clock.
+    #[test]
+    fn a_send_to_a_peer_that_never_holds_the_frame_ends_after_the_wait_of_a_send() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, peer, router, client, _start, _frames) = late_peer().await;
+
+            let (verdict, waited) = send_on_the_paused_clock(&pool, peer).await;
+
+            assert!(
+                matches!(SendVerdict::of(verdict), SendVerdict::NotDelivered(_)),
+                "the peer never held the frame, so the verdict is certain"
+            );
+            assert!(
+                waited >= SEND_ANSWER_TIMEOUT,
+                "the send ended after {waited:?}, before the wait of a send"
+            );
+            // The helper advances the clock while the loopback streams still open, so the time that
+            // it measures can hold a few seconds that the send did not wait. The bound only tells
+            // an end after the wait from a wait without an end.
+            assert!(
+                waited < SEND_ANSWER_TIMEOUT * 2,
+                "the send ended after {waited:?}, long after the wait of a send"
             );
             router.shutdown().await.expect("shutdown");
             client.close().await;

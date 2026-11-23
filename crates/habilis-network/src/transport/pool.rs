@@ -13,6 +13,8 @@ mod send_fault;
 mod uncommitted_stream;
 pub(crate) use send_fault::SendFault;
 mod timeouts;
+#[cfg(test)]
+pub(crate) use timeouts::SEND_ANSWER_TIMEOUT;
 pub(crate) use timeouts::{COOLDOWN_REFUSED, DIAL_TIMEOUT};
 mod unicast_pool;
 pub(crate) use unicast_pool::UnicastPool;
@@ -673,9 +675,10 @@ mod tests {
             }
             let (pool, server, router, client) = pool_serving(Duration::from_secs(600), Mute).await;
             let connection = pool.warm_or_dial(server).await.expect("dial");
+            time::pause();
 
             let ended = time::timeout(
-                super::timeouts::SEND_TIMEOUT * 2,
+                super::timeouts::SEND_TIMEOUT + super::timeouts::SEND_ANSWER_TIMEOUT * 2,
                 super::unicast_pool::send_one(&connection, b"frame", None, None),
             )
             .await;
@@ -694,7 +697,7 @@ mod tests {
     }
 
     /// A write that fails drops the connection it failed on, and not the one that another dial
-    /// pooled while it waited. A send that times out holds for `SEND_TIMEOUT`, which is long enough
+    /// pooled while it waited. A send that times out holds for `SEND_ANSWER_TIMEOUT`, which is long enough
     /// for a parallel send to replace a dead connection, and an eviction by endpoint id alone would
     /// put that replacement out of the pool as well.
     #[test]

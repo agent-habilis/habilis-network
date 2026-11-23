@@ -1,8 +1,9 @@
 //! Why a unicast send did not end with the end of the peer.
 
+use std::time::Duration;
 use std::{error, fmt};
 
-use super::timeouts::{SEND_TIMED_OUT, SEND_TIMEOUT};
+use super::timeouts::SEND_TIMED_OUT;
 
 /// The cause of a send that the peer did not acknowledge. The phase is the phase of the SENDER: the
 /// commit is its finish of the stream. A fault before it is certain: the peer never takes the frame.
@@ -14,18 +15,22 @@ pub(crate) enum SendFault {
     NotTaken,
     /// The connection ended, or its stream failed, before the commit.
     LostBeforeCommit(String),
-    /// The deadline of the send ended before the commit. The text says which step was waiting.
-    TimedOutBeforeCommit(&'static str),
+    /// The wait of the send ended before the commit, after `after`. The text says which step was
+    /// waiting.
+    TimedOutBeforeCommit { step: &'static str, after: Duration },
     /// The connection ended, or its stream failed, after the commit.
     LostAfterCommit(String),
-    /// The deadline of the send ended after the commit, before the peer ended its side.
-    TimedOutAfterCommit,
+    /// The wait of the send ended after the commit, after `after`, before the peer ended its side.
+    TimedOutAfterCommit(Duration),
 }
 
 impl SendFault {
     /// Whether the sender had committed the frame when it failed.
     pub(crate) fn committed(&self) -> bool {
-        matches!(self, Self::LostAfterCommit(_) | Self::TimedOutAfterCommit)
+        matches!(
+            self,
+            Self::LostAfterCommit(_) | Self::TimedOutAfterCommit(_)
+        )
     }
 
     /// Whether the connection is the cause, the only cause that a second send on a new connection
@@ -42,15 +47,15 @@ impl fmt::Display for SendFault {
             Self::LostBeforeCommit(why) => {
                 write!(formatter, "unicast stream failed before the commit: {why}")
             }
-            Self::TimedOutBeforeCommit(step) => {
-                write!(formatter, "{SEND_TIMED_OUT} after {SEND_TIMEOUT:?}: {step}")
+            Self::TimedOutBeforeCommit { step, after } => {
+                write!(formatter, "{SEND_TIMED_OUT} after {after:?}: {step}")
             }
             Self::LostAfterCommit(why) => {
                 write!(formatter, "unicast stream failed after the commit: {why}")
             }
-            Self::TimedOutAfterCommit => write!(
+            Self::TimedOutAfterCommit(after) => write!(
                 formatter,
-                "{SEND_TIMED_OUT} after {SEND_TIMEOUT:?}: the peer did not end the frame"
+                "{SEND_TIMED_OUT} after {after:?}: the peer did not end the frame"
             ),
         }
     }

@@ -7,7 +7,7 @@ use super::registration::Registration;
 use super::send_fault::SendFault;
 use super::timeouts::{
     AT_CEILING, COOLDOWN_REFUSED, DIAL_FAILURE_COOLDOWN, DIAL_TIMEOUT, PATH_SELECT_TIMEOUT,
-    PINNED_IDLE, PINNED_REDIAL, SEND_TIMEOUT,
+    PINNED_IDLE, PINNED_REDIAL, SEND_ANSWER_TIMEOUT, SEND_TIMEOUT,
 };
 use super::warm_send::WarmSend;
 use crate::transport::admission::{BusyGuard, SignalAdmission};
@@ -407,8 +407,8 @@ impl UnicastPool {
     /// the event loop never blocks on QUIC I/O, and the handle of `Sent` gives its verdict: the
     /// peer took the frame (see [`send_one`]), or it did not. A send that ends with no
     /// acknowledgement because the connection ended evicts the connection and redials-and-resends
-    /// once. A peer that said no ([`SendFault::NotTaken`]) and a send that passed [`SEND_TIMEOUT`]
-    /// are not sent again: the peer is there.
+    /// once. A peer that said no ([`SendFault::NotTaken`]) and a send that timed out ([`SEND_TIMEOUT`],
+    /// [`SEND_ANSWER_TIMEOUT`]) are not sent again: the peer is there.
     pub(crate) async fn send_if_warm(&self, eid: EndpointId, bytes: Bytes) -> WarmSend {
         let Some(connection) = self.warm(eid).await else {
             return WarmSend::Cold;
@@ -568,7 +568,7 @@ impl UnicastPool {
     }
 
     /// Drop the pooled connection of `eid`, but only if it is still `connection`. A write that
-    /// fails takes up to [`SEND_TIMEOUT`], and another send can dial a replacement in that time: an
+    /// fails takes up to [`SEND_ANSWER_TIMEOUT`], and another send can dial a replacement in that time: an
     /// eviction by endpoint id alone throws the replacement away, and every send that follows pays
     /// for a cold dial.
     pub(in crate::transport::pool) async fn evict_if_same(
@@ -1284,41 +1284,53 @@ pub(super) async fn send_one(
     _busy: Option<BusyGuard>,
     tally: Option<&WireOutTally>,
 ) -> Result<(), SendFault> {
-    // The open, the write and both waits share one deadline: a peer that reads nothing fills its limit of
-    // streams, and the open of the next stream then waits for room that never comes. The send sits in a
-    // task of its own, so a wait without a bound grows the tasks of this node.
+    // The open and the write share one deadline of SEND_TIMEOUT: both are local, and a peer that reads
+    // nothing fills its limit of streams, so the open of the next stream waits for room that never
+    // comes. The wait for HELD and the wait for the end are each SEND_ANSWER_TIMEOUT, because the path
+    // of the connection can die with no signal and the transport needs its path idle timeout to move
+    // to another one. The send sits in a task of its own, so a wait without a bound grows the tasks of
+    // this node.
     let deadline = PoolInstant::now() + SEND_TIMEOUT;
     let (stream, held) = match time::timeout(SEND_TIMEOUT, connection.open_bi()).await {
         Ok(opened) => opened.map_err(|error| SendFault::LostBeforeCommit(error.to_string()))?,
-        Err(_) => return Err(SendFault::TimedOutBeforeCommit("no stream was opened")),
+        Err(_) => {
+            return Err(SendFault::TimedOutBeforeCommit {
+                step: "no stream was opened",
+                after: SEND_TIMEOUT,
+            });
+        }
     };
     let mut frame = OutgoingFrame::new(stream, held);
     let left_to_write: Duration = deadline.saturating_duration_since(PoolInstant::now());
     match time::timeout(left_to_write, frame.write(bytes)).await {
         Ok(written) => written?,
-        Err(_) => return Err(SendFault::TimedOutBeforeCommit("the peer read nothing")),
+        Err(_) => {
+            return Err(SendFault::TimedOutBeforeCommit {
+                step: "the peer read nothing",
+                after: SEND_TIMEOUT,
+            });
+        }
     }
     if let Some(tally) = tally {
         tally.note(bytes);
     }
-    let left_to_hold: Duration = deadline.saturating_duration_since(PoolInstant::now());
-    match time::timeout(left_to_hold, frame.held()).await {
+    match time::timeout(SEND_ANSWER_TIMEOUT, frame.held()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => return Err(fault_of_held(&error)),
         Err(_) => {
-            return Err(SendFault::TimedOutBeforeCommit(
-                "the peer did not hold the frame",
-            ));
+            return Err(SendFault::TimedOutBeforeCommit {
+                step: "the peer did not hold the frame",
+                after: SEND_ANSWER_TIMEOUT,
+            });
         }
     }
     let mut committed = frame.commit()?;
-    let left_to_end: Duration = deadline.saturating_duration_since(PoolInstant::now());
-    match time::timeout(left_to_end, committed.delivered()).await {
+    match time::timeout(SEND_ANSWER_TIMEOUT, committed.delivered()).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(SendFault::LostAfterCommit(error.to_string())),
         Err(_) => {
             committed.stop();
-            Err(SendFault::TimedOutAfterCommit)
+            Err(SendFault::TimedOutAfterCommit(SEND_ANSWER_TIMEOUT))
         }
     }
 }
