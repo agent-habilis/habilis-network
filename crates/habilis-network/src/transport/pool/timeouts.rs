@@ -75,13 +75,20 @@ const SEND_ATTEMPT: Duration = DIAL_TIMEOUT
 /// frame and fits the same bound. A caller that must give up on a send for itself, and not decide
 /// before the engine does, reads this and adds a margin.
 ///
+/// This is a bound of the parts, not a proof. A call that finds the connection lost after a dial
+/// that it waited for takes a new place behind a new dial, and it can wait again behind another
+/// caller each time; each turn costs at most the dial and the wait for a direct path, and no code
+/// bounds the number of turns. A backstop that reads this adds a margin.
+///
 /// # Examples
 ///
 /// ```
+/// use std::time::Duration;
 /// use habilis_network::ops::LONGEST_SEND_CALL;
 ///
-/// // A send to a peer that is gone answers within this time, not after the 3 s of a dial.
-/// assert!(LONGEST_SEND_CALL.as_secs() > 18);
+/// // The backstop of a caller that waits for the verdict of a send: the bound of the engine, and a margin.
+/// let backstop: Duration = LONGEST_SEND_CALL.saturating_add(Duration::from_secs(10));
+/// # let _ = backstop;
 /// ```
 pub const LONGEST_SEND_CALL: Duration = SEND_ATTEMPT.saturating_mul(2);
 

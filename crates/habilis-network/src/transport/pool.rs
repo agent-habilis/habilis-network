@@ -34,6 +34,8 @@ mod tests {
     use crate::lookup;
     use crate::transport::PayloadPath;
     use crate::util::tuning;
+    #[cfg(feature = "iroh-test-utils")]
+    use futures_util::future::join_all;
     use iroh::endpoint::{ConnectionError, presets};
     use iroh::{endpoint, protocol};
     use std::{future, mem, net};
@@ -750,6 +752,51 @@ mod tests {
             assert!(
                 second.is_ok(),
                 "the waiter got the verdict of the frame of its dialer: {second:?}"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **A connection that dies right after the dial published it costs one new dial, not one for
+    /// each waiter.** Four callers send to a cold peer: one is the dialer and three wait for it. The
+    /// connection is closed after the dialer made it ready and before it published. The dialer sends
+    /// on a lost connection and dials again, and the waiters find the pool cold: they take a new place
+    /// behind that dial. All four frames arrive, and the pool made two dials, the first and the
+    /// second, and not one for each waiter.
+    #[cfg(feature = "iroh-test-utils")]
+    #[test]
+    fn waiters_of_a_connection_that_dies_after_the_publish_make_one_new_dial_together() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: false }).await;
+            let (reached, release) = pool.hold_next_outcome(server);
+            let sends: Vec<_> = (0..4)
+                .map(|index| {
+                    let registration = pool.register_dial(server);
+                    let frame = bytes::Bytes::from(format!("b frame {index}"));
+                    pool.send_registered(registration, server, frame)
+                })
+                .collect();
+            let lose = async {
+                reached.await.expect("the dialer holds its outcome");
+                let connection = pool
+                    .connection(server)
+                    .expect("the dialer pooled a connection");
+                connection.close(0u32.into(), b"lost");
+                pool.inner.conns.lock().await.remove(&server);
+                drop(release);
+            };
+
+            let (outcomes, ()) = tokio::join!(join_all(sends), lose);
+
+            for outcome in outcomes {
+                outcome.expect("each caller delivers its own frame");
+            }
+            assert_eq!(
+                pool.dials_to(server),
+                2,
+                "the first dial, and one new dial for the dialer and the three waiters"
             );
             router.shutdown().await.expect("shutdown");
             client.close().await;
