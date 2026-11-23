@@ -180,8 +180,12 @@ fn the_session_of_a_pair_that_lost_ip_opens_with_no_send() {
     });
 }
 
-/// A send by `ops::deliver` right after the cut: its verdict, whether bob reads it, and when the
-/// session opens counted from the cut. A second send after the session is delivered and read.
+/// A send by `ops::deliver` right after the cut, and the one property that it must keep: a frame
+/// that bob reads was not written on a relay path, and a send that is refused names the relay and
+/// delivers nothing. The cut of the harness is not instant, so the first send can ride the IP path
+/// that iroh still has selected, ride a `WebRTC` path that a dial finds, or meet the relay and be
+/// refused. Each case is checked in full, and the test does not count which one a run takes. A
+/// second send after the session is open is delivered and read.
 #[test]
 fn a_send_by_ops_deliver_after_the_ip_cut_ends_with_a_verdict_and_the_next_one_is_delivered() {
     let guard = habilis_network_test_tracing::init();
