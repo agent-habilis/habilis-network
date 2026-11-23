@@ -114,11 +114,8 @@ pub async fn send_app(
         // Directed vs. broadcast is decided inside `deliver` from the frame's
         // `to` — the same routing the application's send path rides. A directed
         // frame with no path comes back as an error for the caller to act on.
-        if let Some(peer) = probe::prove_addressee(state, &frame) {
-            probe::open_lane_after_proof(state, context, peer);
-        } else if transport::note_unproven(state, &frame) {
-            offer_for_parked(state, context, &frame);
-        }
+        // The proof of the pair and the ask for its lane session come from the message that
+        // `deliver` sends to the loop, the same for every directed send.
         return transport::deliver(&frame, bytes, state, context.sender).await;
     }
     // An unmeshed node buffers a broadcast frame for the meshed edge.
@@ -826,18 +823,36 @@ pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &Handl
     broadcast_peer_info(state, context).await;
 }
 
-/// Offer the session of the peer now, if a send to it asked for it. Without this the offer waits
-/// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
-/// or a pair with an IP path that reads as the relay (`note_unproven` marks both).
-fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
-    let Some(key) = sole_addressee(&frame.kind) else {
-        return;
-    };
-    let Some(address) = state.address_of(key) else {
-        return;
-    };
-    if state.lane_session_wanted(address.id, clock::Instant::now()) {
-        webrtc::negotiate_session::negotiate_session(state, context, address.id, address);
+/// A directed send to `peer` starts: the loop's answer to the message of the send paths.
+///
+/// It is the whole step that `send_app` ran before a send, now for every directed send: the proof of
+/// a pair that rides a multihop route with no path watcher, else the ask for the lane session. The
+/// message comes from the send paths, which hold only a shared reference to the state.
+pub(crate) fn directed_send_started(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    peer: iroh::EndpointId,
+) {
+    state.sends_started_handled += 1;
+    if let Some(proven) = probe::prove_by_route(state, [peer]).pop() {
+        probe::open_lane_after_proof(state, context, proven);
+    } else if transport::ask_lane(state, peer) {
+        offer_lane_session(state, context, peer);
+    }
+}
+
+/// Offer the session of `peer` now, if a send asked for it. Without this the offer waits for the
+/// next tick of the retry pass, up to 30 s. The peer is a lane peer, or a pair with an IP path that
+/// reads as the relay.
+fn offer_lane_session(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    peer: iroh::EndpointId,
+) {
+    if let Some(address) = state.member_address_of(peer)
+        && state.lane_session_wanted(peer, clock::Instant::now())
+    {
+        webrtc::negotiate_session::negotiate_session(state, context, peer, address);
     }
 }
 
@@ -868,7 +883,7 @@ fn json_merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::{farewell_targets, peer_info_json, wire};
-    use crate::daemon::state::EventLoopState;
+    use crate::daemon::state::{DirectState, EventLoopState};
     use crate::protocol::identity::Identity;
     use crate::protocol::seal_error::SEAL_SYMMETRIC_OVERHEAD;
     use crate::protocol::{
@@ -877,11 +892,13 @@ mod tests {
     use crate::testing::{
         endpoint_id, fresh_state, fresh_state_with_mesh_key, longest_mesh_id, nick, test_key,
     };
-    use crate::transport::SendError;
+    use crate::transport::probe::PathKind;
+    use crate::transport::{PayloadPath, SendError, deliver_in_background};
     use crate::util::consts::MAX_MESSAGE_SIZE;
     use crate::util::tuning::SLICE_VALUE_UNITS_MAX;
     use habilis_network_doc::SliceError;
     use std::time::Duration;
+    use tokio::sync::mpsc;
 
     use crate::protocol::peer_addr_error;
     #[cfg(feature = "host")]
@@ -1346,7 +1363,7 @@ mod tests {
     /// second one: the admission table keeps one round per peer.
     #[cfg(feature = "host")]
     #[test]
-    fn offering_for_a_parked_frame_starts_one_round_and_no_more() {
+    fn offering_a_lane_session_starts_one_round_and_no_more() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,
@@ -1354,7 +1371,6 @@ mod tests {
                 let node = testing::LaneNode::start().await;
                 let context = node.context();
                 let mut state = node.state();
-                let frame = node.frame_to_bob();
                 assert_eq!(
                     state.webrtc_admission.in_flight(),
                     0,
@@ -1362,9 +1378,9 @@ mod tests {
                 );
 
                 state.want_lane_session(node.bob, clock::Instant::now());
-                super::offer_for_parked(&mut state, &context, &frame);
+                super::offer_lane_session(&mut state, &context, node.bob);
                 assert_eq!(state.webrtc_admission.in_flight(), 1, "the offer is out");
-                super::offer_for_parked(&mut state, &context, &frame);
+                super::offer_lane_session(&mut state, &context, node.bob);
                 assert_eq!(state.webrtc_admission.in_flight(), 1, "not a second round");
 
                 state.webrtc_admission.close();
@@ -1384,12 +1400,123 @@ mod tests {
                 let node = testing::LaneNode::start().await;
                 let context = node.context();
                 let mut state = node.state();
-                super::offer_for_parked(&mut state, &context, &node.frame_to_bob());
+                super::offer_lane_session(&mut state, &context, node.bob);
                 assert_eq!(
                     state.webrtc_admission.in_flight(),
                     0,
                     "no admission slot is in flight when nothing is offered"
                 );
+                node.endpoint.close().await;
+            },
+        );
+    }
+
+    /// A send through `ops::deliver_in_background` holds only a shared reference to the state, and
+    /// it still asks for the lane session of a peer that has no IP path: it tells the loop, and the
+    /// function that the loop runs for it marks the peer wanted and starts the offer round.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_send_by_ops_to_a_lane_peer_asks_for_its_session_by_the_loop() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let node = testing::LaneNode::start().await;
+                let context = node.context();
+                let mut state = node.state();
+                state.relay_transport = PayloadPath::DirectOnly;
+                let (started, mut told) = mpsc::unbounded_channel();
+                state.send_started = started;
+                let frame = node.frame_to_bob();
+                let bytes = frame.serialize().expect("serialize");
+
+                let _ = deliver_in_background(&frame, bytes, &state, &node.sender).await;
+                let peer = told.try_recv().expect("the send told the loop");
+                assert_eq!(peer, node.bob, "the message names the addressee");
+                super::directed_send_started(&mut state, &context, peer);
+
+                assert!(
+                    state.lane_session_wanted(node.bob, clock::Instant::now()),
+                    "the loop did not mark the lane peer wanted"
+                );
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    1,
+                    "the loop did not start the offer round"
+                );
+                state.webrtc_admission.close();
+                node.endpoint.close().await;
+            },
+        );
+    }
+
+    /// A burst of sends to one lane peer makes one offer round.
+    #[cfg(feature = "host")]
+    #[test]
+    fn five_sends_by_ops_to_a_lane_peer_make_one_offer_round() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let node = testing::LaneNode::start().await;
+                let context = node.context();
+                let mut state = node.state();
+                state.relay_transport = PayloadPath::DirectOnly;
+                let (started, mut told) = mpsc::unbounded_channel();
+                state.send_started = started;
+                for _ in 0..5 {
+                    let frame = node.frame_to_bob();
+                    let bytes = frame.serialize().expect("serialize");
+                    let _ = deliver_in_background(&frame, bytes, &state, &node.sender).await;
+                }
+                let mut messages = 0;
+                while let Ok(peer) = told.try_recv() {
+                    messages += 1;
+                    super::directed_send_started(&mut state, &context, peer);
+                }
+                assert_eq!(messages, 5, "each send tells the loop");
+                assert_eq!(
+                    state.webrtc_admission.in_flight(),
+                    1,
+                    "5 sends must make one offer round"
+                );
+                state.webrtc_admission.close();
+                node.endpoint.close().await;
+            },
+        );
+    }
+
+    /// A peer on a multihop route with no path watcher is proven by the message of a send, as
+    /// `send_app` proved it before the send. The pair is `Direct` after it, and the next message
+    /// asks for nothing.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_send_by_ops_to_an_unwatched_multihop_peer_proves_the_pair_by_the_loop() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let node = testing::LaneNode::start().await;
+                let context = node.context();
+                let mut state = node.state();
+                state.relay_transport = PayloadPath::DirectOnly;
+                state.direct.insert(node.bob, DirectState::RelayOnly);
+                state.path_kinds.insert(node.bob, PathKind::Multihop);
+                let (started, mut told) = mpsc::unbounded_channel();
+                state.send_started = started;
+                let frame = node.frame_to_bob();
+                let bytes = frame.serialize().expect("serialize");
+
+                let _ = deliver_in_background(&frame, bytes, &state, &node.sender).await;
+                let peer = told.try_recv().expect("the send told the loop");
+                super::directed_send_started(&mut state, &context, peer);
+
+                assert_eq!(
+                    state.direct.get(&node.bob),
+                    Some(&DirectState::Direct),
+                    "the loop did not prove the pair by its route"
+                );
+                state.webrtc_admission.close();
                 node.endpoint.close().await;
             },
         );

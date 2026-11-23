@@ -172,7 +172,7 @@ async fn run_checked<Driver: NodeDriver>(
     state.mint_mesh = mesh.mint_mesh.take(); // creator-only: backs the `invite` command
     let (fetch_tx, fetch_rx) = mpsc::unbounded_channel();
     state.fetches = chunk_fetch::Fetches::new(fetch_tx);
-    let (direct_rx, path_rx) = wire_transports(
+    let (direct_rx, path_rx, send_started_rx) = wire_transports(
         &mut state,
         &endpoints.endpoint,
         transports,
@@ -279,6 +279,7 @@ async fn run_checked<Driver: NodeDriver>(
         lan_contacts: endpoints.lan_contacts,
         direct_rx,
         path_rx,
+        send_started_rx,
         owned,
         owned_files,
     }))
@@ -518,6 +519,7 @@ fn wire_transports(
 ) -> (
     mpsc::UnboundedReceiver<probe::DirectOutcome>,
     mpsc::UnboundedReceiver<probe::PathChange>,
+    mpsc::UnboundedReceiver<EndpointId>,
 ) {
     #[cfg(feature = "multihop")]
     {
@@ -563,6 +565,9 @@ fn wire_transports(
     let (path_tx, path_rx) = mpsc::unbounded_channel();
     state.webrtc_admission.set_path_sink(path_tx.clone());
     state.path_changes = path_tx;
+    // Directed sends report here; the loop proves the pair or asks for its session.
+    let (started_tx, started_rx) = mpsc::unbounded_channel();
+    state.send_started = started_tx;
     state.rendezvous_id = Some(rendezvous_params.id);
     if rendezvous_params.answers_jsep() {
         state.rendezvous_flags.insert(RendezvousFlag::AnswersJsep);
@@ -570,7 +575,7 @@ fn wire_transports(
         state.rendezvous_flags.remove(&RendezvousFlag::AnswersJsep);
     }
     state.write_peer_count();
-    (direct_rx, path_rx)
+    (direct_rx, path_rx, started_rx)
 }
 
 /// Starts the rendezvous: an eager member co-hosts from t=0, and everyone else defers to the heal
@@ -933,6 +938,8 @@ struct EventLoop<Driver: NodeDriver> {
     /// Path watcher reports (`transport::probe::on_path_change`). Never closes,
     /// like `direct_rx`.
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
+    /// The endpoints of the directed sends that start. Never closes, like `direct_rx`.
+    send_started_rx: mpsc::UnboundedReceiver<EndpointId>,
     /// Closed with the rendezvous as the loop ends.
     owned: OwnedEndpoints,
     /// Removed when the loop ends clean.
@@ -990,6 +997,7 @@ struct Loop<'node, Driver: NodeDriver> {
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
     direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
+    send_started_rx: mpsc::UnboundedReceiver<EndpointId>,
     anchors: TickAnchors,
     resubscribe_attempts: u32,
     owned: OwnedEndpoints,
@@ -1191,6 +1199,12 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state.idle.ext.other += 1;
         let context = self.parts.handler_ctx(&self.sender);
         gossip::lan::on_lan_event(event, &mut self.state, &context).await;
+    }
+
+    fn directed_send_started(&mut self, peer: EndpointId) {
+        self.state.idle.ext.other += 1;
+        let context = self.parts.handler_ctx(&self.sender);
+        gossip::directed_send_started(&mut self.state, &context, peer);
     }
 
     async fn path_change(&mut self, change: probe::PathChange) {
@@ -1653,6 +1667,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         lan_contacts,
         direct_rx,
         path_rx,
+        send_started_rx,
         owned,
         owned_files,
     } = loop_state;
@@ -1736,6 +1751,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         lan_contacts,
         direct_rx,
         path_rx,
+        send_started_rx,
         anchors,
         resubscribe_attempts,
         owned,
@@ -1805,6 +1821,7 @@ async fn run_loop<Driver: NodeDriver>(
                 }
             }
             Some(change) = lp.path_rx.recv() => { lp.path_change(change).await; },
+            Some(peer) = lp.send_started_rx.recv() => { lp.directed_send_started(peer); },
             frame = recv_opt(&mut lp.unicast_rx) => match frame {
                 Some(frame) => { lp.unicast(frame).await; },
                 None => { lp.unicast_rx = None; },

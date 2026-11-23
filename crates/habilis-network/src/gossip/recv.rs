@@ -2189,9 +2189,11 @@ mod arms_reclaim_tests {
 #[cfg(test)]
 mod first_contact_tests {
     use crate::daemon::state::{RendezvousFlag, Standing};
+    use crate::gossip::directed_send_started;
     use crate::lifecycle;
     use crate::protocol::{Shard, ShardGroup, UnixSecs};
     use crate::transport::UdpTransport;
+    use iroh::EndpointId;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
@@ -2221,6 +2223,24 @@ mod first_contact_tests {
     };
 
     use crate::daemon::state::DirectState;
+    /// Gives the state a channel for the messages of the directed sends, as the loop does.
+    fn tell_the_loop_of(state: &mut EventLoopState) -> mpsc::UnboundedReceiver<EndpointId> {
+        let (started, told) = mpsc::unbounded_channel();
+        state.send_started = started;
+        told
+    }
+
+    /// The next turn of the loop: runs the function of its arm for each message that the sends told.
+    fn run_the_started_arm(
+        state: &mut EventLoopState,
+        context: &HandlerCtx<'_>,
+        told: &mut mpsc::UnboundedReceiver<EndpointId>,
+    ) {
+        while let Ok(peer) = told.try_recv() {
+            directed_send_started(state, context, peer);
+        }
+    }
+
     #[cfg(feature = "multihop")]
     use crate::gossip;
     use crate::gossip::{ingest_from, split};
@@ -2714,7 +2734,9 @@ mod first_contact_tests {
             )
             .sign(&Identity::generate());
 
+            let mut told = tell_the_loop_of(&mut state);
             let sent = ops::send_app(&mut state, &context, frame).await;
+            run_the_started_arm(&mut state, &context, &mut told);
             assert!(
                 matches!(sent, Ok(transport::Delivered::Pending(_))),
                 "the send to a relay-only peer did not start: {sent:?}"
@@ -2763,7 +2785,9 @@ mod first_contact_tests {
                 .sign(&Identity::generate())
             };
 
+            let mut told = tell_the_loop_of(&mut state);
             let sent = ops::send_app(&mut state, &context, frame()).await;
+            run_the_started_arm(&mut state, &context, &mut told);
             assert!(
                 matches!(sent, Ok(transport::Delivered::Pending(_))),
                 "the send to an unprobed peer on an unmeshed node did not start: {sent:?}"
@@ -2833,7 +2857,9 @@ mod first_contact_tests {
                 )
                 .sign(&Identity::generate());
 
+                let mut told = tell_the_loop_of(&mut state);
                 let sent = ops::send_app(&mut state, &context, frame).await;
+                run_the_started_arm(&mut state, &context, &mut told);
 
                 assert!(
                     sent.is_ok(),

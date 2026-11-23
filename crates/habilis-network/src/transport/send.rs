@@ -11,11 +11,8 @@ mod deliver;
 mod route;
 #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
 pub(crate) use deliver::resolve;
-pub(crate) use deliver::{
-    can_unicast, lane_for, note_unproven, send_best_effort, send_dialing_back,
-};
+pub(crate) use deliver::{ask_lane, can_unicast, lane_for, send_best_effort, send_dialing_back};
 pub use deliver::{deliver, deliver_in_background, deliver_to, deliver_to_in_background};
-pub(crate) use route::directed_endpoint;
 #[cfg(test)]
 use route::{Route, route};
 mod lane;
@@ -37,9 +34,7 @@ mod tests {
 
     use iroh::EndpointId;
 
-    use super::{
-        Lane, Route, SendError, can_unicast, deliver, lane_for, note_unproven, resolve, route,
-    };
+    use super::{Lane, Route, SendError, ask_lane, can_unicast, deliver, lane_for, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::messages::{AppFrameParams, Verified};
     use crate::protocol::{
@@ -146,7 +141,7 @@ mod tests {
             .is_ok(),
             "the stored state refused the send"
         );
-        note_unproven(&mut state, &directed_msg());
+        ask_lane(&mut state, bob);
 
         assert!(state.lane_session_wanted(bob, now), "the held frame asks");
     }
@@ -183,7 +178,7 @@ mod tests {
             .is_ok(),
             "the stored state refused the send"
         );
-        note_unproven(&mut state, &directed_msg_to(second));
+        ask_lane(&mut state, second_endpoint);
 
         assert!(
             state.lane_session_wanted(second_endpoint, clock::Instant::now()),
@@ -215,7 +210,7 @@ mod tests {
             .is_ok(),
             "the stored state refused the send"
         );
-        note_unproven(&mut state, &directed_msg());
+        ask_lane(&mut state, bob);
 
         assert!(
             !state.lane_session_wanted(bob, clock::Instant::now()),
@@ -252,7 +247,7 @@ mod tests {
             .is_ok(),
             "the stored state refused the send"
         );
-        note_unproven(&mut state, &directed_msg());
+        ask_lane(&mut state, bob);
 
         assert!(
             state.lane_session_wanted(bob, clock::Instant::now()),
@@ -1203,7 +1198,7 @@ mod tests {
         assert!(!state.lane_session_wanted(bob, now), "nothing asked yet");
 
         assert!(
-            note_unproven(&mut state, &directed_msg()),
+            ask_lane(&mut state, bob),
             "a stored relay-only peer is unproven"
         );
         assert!(
@@ -1232,10 +1227,7 @@ mod tests {
         let now = clock::Instant::now();
 
         state.direct.insert(bob, DirectState::Direct);
-        assert!(
-            !note_unproven(&mut state, &directed_msg()),
-            "a proven peer is not unproven"
-        );
+        assert!(!ask_lane(&mut state, bob), "a proven peer is not unproven");
         assert!(
             !state.lane_session_wanted(bob, now),
             "a proven peer asked for a session"
@@ -1244,7 +1236,7 @@ mod tests {
         state.direct.remove(&bob);
         state.relay_transport = PayloadPath::RelayAllowed;
         assert!(
-            !note_unproven(&mut state, &directed_msg()),
+            !ask_lane(&mut state, bob),
             "a mesh whose relay carries payload has no unproven peer"
         );
         assert!(
@@ -1254,7 +1246,7 @@ mod tests {
 
         state.relay_transport = PayloadPath::DirectOnly;
         assert!(
-            note_unproven(&mut state, &directed_msg()),
+            ask_lane(&mut state, bob),
             "an unread peer on a lookup-only relay is unproven"
         );
         assert_eq!(
@@ -1266,10 +1258,28 @@ mod tests {
             state.lane_session_wanted(bob, now),
             "the unproven lane peer did not ask for its session"
         );
-        assert!(
-            !note_unproven(&mut state, &open_broadcast()),
-            "a broadcast has no addressee to prove"
-        );
+    }
+
+    /// A broadcast has no addressee to prove or to ask for, so its send tells the loop nothing.
+    #[test]
+    fn a_broadcast_tells_the_loop_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = loopback_node().await;
+            let (mut state, _bob) = state_knowing_bob();
+            let (started, mut told) = mpsc::unbounded_channel();
+            state.send_started = started;
+            let message = open_broadcast();
+            let bytes = message.serialize().expect("serialize");
+
+            let delivered = deliver(&message, bytes, &state, &sender).await;
+
+            assert!(delivered.is_ok(), "the broadcast is sent: {delivered:?}");
+            assert!(
+                told.try_recv().is_err(),
+                "a broadcast told the loop that a directed send starts"
+            );
+            endpoint.close().await;
+        });
     }
 
     /// **A peer with no path watcher is proven by its multihop route when a send needs it.**
@@ -1280,7 +1290,7 @@ mod tests {
     #[test]
     fn a_directed_send_to_an_unwatched_peer_on_a_multihop_route_is_proven() {
         use crate::daemon::state::DirectState;
-        use crate::transport::probe::{PathKind, prove_addressee};
+        use crate::transport::probe::{PathKind, prove_by_route};
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.relay_transport = PayloadPath::DirectOnly;
@@ -1294,7 +1304,7 @@ mod tests {
         );
 
         assert_eq!(
-            prove_addressee(&mut state, &frame),
+            prove_by_route(&mut state, [bob]).pop(),
             Some(bob),
             "the route proves the unwatched peer"
         );
@@ -1316,7 +1326,7 @@ mod tests {
     #[test]
     fn a_directed_send_to_a_watched_peer_on_a_multihop_route_is_not_refused_by_the_stored_state() {
         use crate::daemon::state::DirectState;
-        use crate::transport::probe::{PathKind, prove_addressee};
+        use crate::transport::probe::{PathKind, prove_by_route};
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.relay_transport = PayloadPath::DirectOnly;
@@ -1326,7 +1336,7 @@ mod tests {
         let frame = directed_msg();
 
         assert_eq!(
-            prove_addressee(&mut state, &frame),
+            prove_by_route(&mut state, [bob]).pop(),
             None,
             "the route proves no watched peer"
         );

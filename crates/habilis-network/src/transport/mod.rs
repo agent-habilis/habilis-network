@@ -75,9 +75,7 @@ pub use send::{
     Delivered, Lane, PendingSend, SendError, SendVerdict, deliver, deliver_in_background,
     deliver_to, deliver_to_in_background,
 };
-pub(crate) use send::{
-    can_unicast, directed_endpoint, lane_for, note_unproven, send_best_effort, send_dialing_back,
-};
+pub(crate) use send::{ask_lane, can_unicast, lane_for, send_best_effort, send_dialing_back};
 pub(crate) use unicast_acceptor::{UnicastAcceptor, UnicastFrame};
 pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, UdpTransport, WebRtcSignalAcceptor};
 

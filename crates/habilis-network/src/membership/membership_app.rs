@@ -104,6 +104,36 @@ pub fn msg_fits(text: &str) -> bool {
     escaped_len(text) <= ESCAPED_BUDGET
 }
 
+/// Answers a request with the end of its send. A send that runs on a task gets a task of its own for
+/// the wait, so that the loop serves the next request meanwhile.
+fn answer_delivery(
+    delivered: Result<Delivered, transport::SendError>,
+    reply: oneshot::Sender<Result<(), String>>,
+) {
+    match delivered {
+        Ok(Delivered::Done) => {
+            let _ = reply.send(Ok(()));
+        }
+        Ok(Delivered::Pending(handle)) => {
+            task::spawn(async move {
+                let verdict = handle.await.unwrap_or_else(|_| {
+                    SendVerdict::Unconfirmed("the send ended without an outcome".to_owned())
+                });
+                // The text of a failed verdict says which kind it is: "not delivered" or "not confirmed".
+                let _ = reply.send(match verdict {
+                    SendVerdict::Delivered => Ok(()),
+                    failed @ (SendVerdict::NotDelivered(_) | SendVerdict::Unconfirmed(_)) => {
+                        Err(reply_text(&failed))
+                    }
+                });
+            });
+        }
+        Err(error) => {
+            let _ = reply.send(Err(reply_text(&error)));
+        }
+    }
+}
+
 /// The body of a `msg` frame.
 ///
 /// # Errors
@@ -352,6 +382,16 @@ pub enum MessagingTest {
         /// Gets `Ok` when the request is done, or the error text.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Tests only: send one directed `msg` the way a consumer app does, through [`ops::deliver`]
+    /// with the state and the sender and no `send_app`. It answers when the send ends.
+    OpsSend {
+        /// The recipient.
+        to: Option<Nickname>,
+        /// The body of the message.
+        body: MessageBody,
+        /// Gets `Ok` when the send is delivered, or the error text.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Tests only: ping every member and answer with the round trip time in
     /// milliseconds of each one that answered within the ping window. A test uses it to
     /// show that a pair answers over the one path it has.
@@ -425,6 +465,12 @@ pub enum InspectTest {
         peer: String,
         /// Gets the answer, or `UnknownPeer` when no member has that nickname.
         reply: oneshot::Sender<Result<bool, UnknownPeer>>,
+    },
+    /// Tests only: how many messages of directed sends the loop of this node has handled. It shows
+    /// that the channel of the sends is wired in a real node and that the select arm runs.
+    SendsStartedHandled {
+        /// Gets the count.
+        reply: oneshot::Sender<u64>,
     },
     /// Tests only: how many dials this node made to the member `peer` since it started, direct or
     /// through a route. A send over a warm connection is not a dial. A peer that the node does not
@@ -944,30 +990,7 @@ impl MembershipApp {
                 return false;
             }
         };
-        match send_app(state, context, frame).await {
-            Ok(Delivered::Done) => {
-                let _ = reply.send(Ok(()));
-            }
-            Ok(Delivered::Pending(handle)) => {
-                // The dial runs on a task, and so does the wait for its outcome: the loop
-                // serves the next request meanwhile.
-                task::spawn(async move {
-                    let verdict = handle.await.unwrap_or_else(|_| {
-                        SendVerdict::Unconfirmed("the send ended without an outcome".to_owned())
-                    });
-                    // The text of a failed verdict says which kind it is: "not delivered" or "not confirmed".
-                    let _ = reply.send(match verdict {
-                        SendVerdict::Delivered => Ok(()),
-                        failed @ (SendVerdict::NotDelivered(_) | SendVerdict::Unconfirmed(_)) => {
-                            Err(reply_text(&failed))
-                        }
-                    });
-                });
-            }
-            Err(error) => {
-                let _ = reply.send(Err(reply_text(&error)));
-            }
-        }
+        answer_delivery(send_app(state, context, frame).await, reply);
         true
     }
 
@@ -1065,6 +1088,43 @@ impl MembershipApp {
                 }
                 true
             }
+            MessagingTest::OpsSend { to, body, reply } => {
+                let to = match recipient_key(state, to) {
+                    Ok(to) => to,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return false;
+                    }
+                };
+                let built = app_frame(
+                    state,
+                    context,
+                    self,
+                    AppFrameParams::new(
+                        AppTag::try_new(MSG_TAG).expect("a valid app tag"),
+                        to,
+                        None,
+                        body,
+                    ),
+                );
+                let frame = match built {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        let _ = reply.send(Err(reply_text(&error)));
+                        return false;
+                    }
+                };
+                let bytes = match frame.serialize() {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        let _ = reply.send(Err(error.to_string()));
+                        return false;
+                    }
+                };
+                let delivered = ops::deliver(&frame, bytes, state, context.sender).await;
+                answer_delivery(delivered, reply);
+                true
+            }
             MessagingTest::Ping { reply } => {
                 ops::start_ping_round(state, context, Some(reply)).await;
                 true
@@ -1111,6 +1171,10 @@ impl MembershipApp {
             }
             InspectTest::EndpointId { reply } => {
                 let _ = reply.send(context.endpoint.id());
+                false
+            }
+            InspectTest::SendsStartedHandled { reply } => {
+                let _ = reply.send(state.sends_started_handled);
                 false
             }
             InspectTest::DialsTo { peer, reply } => {

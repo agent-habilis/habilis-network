@@ -594,6 +594,15 @@ pub struct EventLoopState {
     /// Where a path watcher reports a change of the selected path to a peer
     /// the race covers (`transport::probe::on_path_change`).
     pub(crate) path_changes: mpsc::UnboundedSender<probe::PathChange>,
+    /// Where a directed send says that it starts, by the endpoint of its addressee. The send
+    /// paths hold only a shared reference to the state, so this is how they reach the loop: the
+    /// loop proves the pair or asks for its lane session (`gossip::directed_send_started`). A
+    /// detached sender until the real loop installs its channel. A send on a closed channel is
+    /// ignored: only a stopping loop closes it, and then nobody is left to ask.
+    pub(crate) send_started: mpsc::UnboundedSender<EndpointId>,
+    /// How many messages of directed sends the loop has handled. A test reads it to show that the
+    /// channel is wired in a real node and that the select arm calls the function.
+    pub(crate) sends_started_handled: u64,
     /// The pooled connection each watched peer's watcher follows, by stable
     /// id (`None` while its dial runs), so a replaced connection gets a fresh
     /// watcher and a stale one's reports are dropped.
@@ -1113,6 +1122,8 @@ impl EventLoopState {
             direct_proven: mpsc::unbounded_channel().0,
             gossip_handle: None,
             path_changes: mpsc::unbounded_channel().0,
+            send_started: mpsc::unbounded_channel().0,
+            sends_started_handled: 0,
             path_watchers: HashMap::new(),
             path_kinds: HashMap::new(),
             route_dialed: HashMap::new(),

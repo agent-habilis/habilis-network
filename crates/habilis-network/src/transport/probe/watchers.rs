@@ -15,7 +15,6 @@ use iroh::EndpointId;
 
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState};
-use crate::protocol::messages::{Verified, sole_addressee};
 use crate::transport::webrtc;
 use crate::util::clock::Instant;
 
@@ -448,14 +447,4 @@ pub(crate) fn prove_routed_pairs(state: &mut EventLoopState, context: &HandlerCt
     for peer in prove_by_route(state, peers) {
         open_lane_after_proof(state, context, peer);
     }
-}
-
-/// Prove the addressee of a directed `frame` by the same rule as the sweep, and give it back when it
-/// is proven now. The sweep runs every 10 s, and a pair with no path watcher (the higher id of a
-/// pair) has no other source of the proof, so a send would be held for up to that time though
-/// the pair rides a multihop route.
-pub(crate) fn prove_addressee(state: &mut EventLoopState, frame: &Verified) -> Option<EndpointId> {
-    let key = sole_addressee(&frame.kind)?;
-    let peer = transport::directed_endpoint(key, state)?;
-    prove_by_route(state, [peer]).pop()
 }

@@ -65,12 +65,24 @@ pub async fn deliver(
                 .map_err(SendError::internal)?;
             Ok(Delivered::Done)
         }
-        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, &state.unicast_pool, || {
-            probe::route_to(state, eid)
-        })
-        .await
-        .map_err(SendError::internal),
+        Resend::Unicast(eid, bytes) => {
+            announce_directed_send(state, eid);
+            send_unicast(eid, bytes, &state.unicast_pool, || {
+                probe::route_to(state, eid)
+            })
+            .await
+            .map_err(SendError::internal)
+        }
     }
+}
+
+/// Tells the loop that a directed send to `eid` starts, so that it proves the pair or asks for its
+/// lane session. The send holds only a shared reference to the state, and it neither waits for the
+/// loop nor fails when the loop is gone: a loop that stops has nobody left to ask. A message goes
+/// for each directed send, whatever the state of the pair: the loop decides, and a push on an
+/// unbounded channel costs less than the copy of that decision here.
+fn announce_directed_send(state: &EventLoopState, eid: EndpointId) {
+    let _ = state.send_started.send(eid);
 }
 
 /// The routing decision of [`deliver`], without the send: which plane carries
@@ -118,9 +130,9 @@ fn undeliverable(addressee: Option<&AuthorKey>, state: &EventLoopState) -> SendE
 /// payload path check applies as it does for [`deliver`], and the send waits on nothing: a cold
 /// peer is dialed by a task, and the verdict comes through [`Delivered::Pending`].
 ///
-/// This function does not ask for a lane session, because it takes the state by shared
-/// reference. A peer with no IP path gets its session only from `send_app`. A send here to such a
-/// peer waits for the path budget and ends as not delivered.
+/// Like every directed send of this module, it tells the loop that a send starts: the loop proves
+/// the pair, or asks for the lane session of a peer with no IP path. That happens on the next turn
+/// of the loop, after the handler in progress ends. The send does not wait for it.
 ///
 /// # Errors
 /// One of the refusals above, a frame that does not serialize, or the failure of a send to a warm
@@ -146,6 +158,7 @@ pub async fn deliver_to(
     state: &EventLoopState,
 ) -> Result<Delivered, SendError> {
     let (eid, bytes) = resolve_to(to, message, state)?;
+    announce_directed_send(state, eid);
     send_unicast(eid, bytes, &state.unicast_pool, || {
         probe::route_to(state, eid)
     })
@@ -222,16 +235,14 @@ pub async fn deliver_to_in_background(
 /// - the addressee has no known endpoint yet, or advertises the rendezvous
 ///   pseudo-node. The first can change once its `PeerInfo` arrives. The
 ///   second never does, so a retry budget must not rely on it.
-/// - it is held for a direct path: the peer is not proven direct and the
-///   relay carries no payload.
 /// - it is cold and on the per-peer dial-failure cooldown.
 /// - the gossip broadcast failed.
 ///
 /// A `false` send is not queued: the caller tries again later.
 ///
-/// Like [`deliver`], it cannot prove the addressee by its multihop route. Only the directed send of
-/// the engine does (`Messaging::Send` and `SendToKey`), so a send to an unwatched peer on a
-/// multihop route can be held for up to one sweep (10 s).
+/// Like every directed send of this module, it tells the loop that a send starts, and the loop
+/// proves the addressee by its multihop route or asks for its lane session. That happens on the
+/// next turn of the loop, after the handler in progress ends.
 ///
 /// `true` does not prove delivery: a background dial or write can still fail,
 /// and is only logged. A warm connection whose selected path reads relay gives
@@ -281,19 +292,12 @@ pub(crate) fn can_unicast(eid: EndpointId, state: &EventLoopState) -> bool {
     !super::route::unproven(eid, state) || state.unicast_arrival == Some(eid)
 }
 
-/// A directed frame to a peer whose direct path is not proven yet, on a mesh where the relay is
-/// lookup only, is a reason to open its session. This covers a pair that a probe stored as
-/// relay-only too: the state refuses nothing, and the send asks. The send dials
-/// the peer and waits for a direct path. A peer that has no IP path, or that turns out relay-only,
-/// needs a lane session, so it is asked now and not on the next retry pass. Returns whether the
-/// frame is such a frame, and the peer is a candidate for the offer.
-pub(crate) fn note_unproven(state: &mut EventLoopState, message: &Verified) -> bool {
-    let Some(key) = sole_addressee(&message.kind) else {
-        return false;
-    };
-    let Some(eid) = super::route::directed_endpoint(key, state) else {
-        return false;
-    };
+/// A directed send to `eid` whose direct path is not proven yet, on a mesh where the relay is lookup
+/// only, asks for its lane session: the peer is marked wanted if it needs a lane or reads as the
+/// relay. It returns whether the send is such a send, and the peer is then a candidate for the
+/// offer. A pair that a probe stored as relay-only is asked for too: the stored state refuses
+/// nothing.
+pub(crate) fn ask_lane(state: &mut EventLoopState, eid: EndpointId) -> bool {
     if !super::route::unproven(eid, state) {
         return false;
     }
