@@ -81,9 +81,24 @@ pub struct TransportOpts {
     /// other path. Off by default, and set only by [`Self::within`]: it is a choice of the
     /// mesh, which every member makes the same way, and not a limit of this node.
     pub gossip: GossipPath,
+    /// Where the endpoint listens. Tests only.
+    #[cfg(feature = "iroh-test-utils")]
+    pub bind: super::Bind,
 }
 
 impl TransportOpts {
+    /// Where the endpoint listens. Tests only.
+    #[cfg(feature = "iroh-test-utils")]
+    #[must_use]
+    pub fn bind(
+        mut self,
+        // `Bind::Loopback` keeps the endpoint off the network
+        bind: super::Bind,
+    ) -> Self {
+        self.bind = bind;
+        self
+    }
+
     /// Set the UDP transport.
     #[must_use]
     pub fn udp(
@@ -129,6 +144,19 @@ impl TransportOpts {
     }
 }
 
+/// Whether the endpoint of a node with these options listens on this host only.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) fn binds_loopback_only(options: TransportOpts) -> bool {
+    options.bind == super::Bind::Loopback
+}
+
+/// Whether the endpoint of a node with these options listens on this host only: a build without
+/// the test feature has no way to ask for it.
+#[cfg(all(not(feature = "iroh-test-utils"), not(target_arch = "wasm32")))]
+pub(crate) fn binds_loopback_only(_options: TransportOpts) -> bool {
+    false
+}
+
 impl Default for TransportOpts {
     fn default() -> Self {
         Self {
@@ -136,6 +164,8 @@ impl Default for TransportOpts {
             relay: true,
             webrtc: true,
             gossip: GossipPath::Off,
+            #[cfg(feature = "iroh-test-utils")]
+            bind: super::Bind::AllInterfaces,
         }
     }
 }
@@ -176,6 +206,8 @@ impl TransportOpts {
             relay: true,
             webrtc: true,
             gossip: GossipPath::Off,
+            #[cfg(feature = "iroh-test-utils")]
+            bind: super::Bind::AllInterfaces,
         }
     }
 }

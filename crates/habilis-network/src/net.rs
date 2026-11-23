@@ -8,6 +8,8 @@ use crate::gossip::PathSummary;
 use iroh::endpoint::TransportAddrUsage;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 
+#[cfg(feature = "iroh-test-utils")]
+pub use crate::lookup::Bind;
 #[cfg(feature = "multihop")]
 pub use crate::lookup::multihop_handle_config;
 #[cfg(all(

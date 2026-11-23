@@ -22,6 +22,8 @@ mod subnet_binds;
 
 mod endpoint;
 
+#[cfg(feature = "iroh-test-utils")]
+mod bind;
 #[cfg(feature = "host")]
 mod capability;
 #[cfg(all(feature = "host", feature = "dht"))]
@@ -53,6 +55,8 @@ mod transport_opts;
 )]
 pub mod test_relay;
 
+#[cfg(feature = "iroh-test-utils")]
+pub use bind::Bind;
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
 pub use endpoint_role::EndpointRole;

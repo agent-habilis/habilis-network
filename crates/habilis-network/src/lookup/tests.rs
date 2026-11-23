@@ -886,6 +886,35 @@ fn the_endpoint_of_a_loopback_mesh_listens_on_loopback_sockets_only() {
     });
 }
 
+/// **A node that asks for a loopback bind listens on this host only, whatever its mesh looks up.**
+/// The members of a test that runs on one machine used to listen on every interface of it, because
+/// their mesh names a relay, and a host on the network could send a handshake to a test member.
+#[test]
+#[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+fn a_node_that_asks_for_a_loopback_bind_listens_on_this_host_only() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        use super::{TransportHandles, build_endpoint, test_relay};
+        use crate::lookup::{Bind, TransportOpts};
+
+        let (relay_url, _relay) = test_relay::spawn_plain().await.expect("a local relay");
+        let lookups = LookupOpts::new(RelayChoice::Custom(vec![relay_url]));
+        let handles = TransportHandles {
+            options: TransportOpts::default().bind(Bind::Loopback),
+            ..TransportHandles::default()
+        };
+        let endpoint = build_endpoint(&lookups, None, None, Vec::new(), handles)
+            .await
+            .expect("an endpoint");
+        let sockets = endpoint.bound_sockets();
+        endpoint.close().await;
+
+        assert!(
+            sockets.iter().all(|socket| socket.ip().is_loopback()),
+            "the endpoint of a mesh with a relay on this host listens beyond it: {sockets:?}"
+        );
+    });
+}
+
 #[test]
 fn a_holder_of_our_identity_that_serves_no_alpn_yet_is_not_a_foreign_mesh() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {

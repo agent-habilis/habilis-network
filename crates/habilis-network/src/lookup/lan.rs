@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use iroh::endpoint::presets;
 use iroh::{Endpoint, RelayMode, SecretKey};
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::transport_opts;
 use crate::protocol::meshes::{LookupOpts, RelayChoice};
 
 use iroh_gossip::proto;
@@ -140,6 +142,13 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     }
 
     let options = transports.options;
+    // Where this node listens is its own choice and not the mesh's: a loopback mesh binds the host
+    // above, and a test asks for the same for a mesh that names a relay.
+    #[cfg(feature = "host")]
+    if transport_opts::binds_loopback_only(options) && !lookups.is_loopback() {
+        builder = habilis_network_iroh_transport_util::loopback(builder, bind_port.unwrap_or(0))
+            .context("failed to set bind address")?;
+    }
     #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
     let has_webrtc = transports.webrtc.is_some();
     builder = super::install_transports(builder, transports);
@@ -197,7 +206,7 @@ pub(crate) async fn build_endpoint_keeping_mdns(
 
     // Two interfaces in one subnet give a peer two addresses that reach this host over one wire.
     #[cfg(not(target_arch = "wasm32"))]
-    if options.udp && !lookups.is_loopback() {
+    if options.udp && !lookups.is_loopback() && !transport_opts::binds_loopback_only(options) {
         builder = super::subnet_binds::bind_one_address_per_subnet(builder)?;
     }
 

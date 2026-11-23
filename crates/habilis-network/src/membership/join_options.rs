@@ -20,6 +20,8 @@ use super::membership_app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::beacon;
+#[cfg(feature = "iroh-test-utils")]
+use crate::lookup::{Bind, TransportOpts};
 use n0_future::time;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use std::sync::atomic;
@@ -85,9 +87,34 @@ pub struct JoinOptions {
     /// Cap on the direct connections of the node, and the size of the gossip active view; `0`
     /// takes the engine default.
     pub max_connections: usize,
+    /// Where the node listens. Tests only: a node of the product listens on every interface. A
+    /// test that runs on one machine keeps its members off the network with `Bind::Loopback`.
+    #[cfg(feature = "iroh-test-utils")]
+    #[serde(skip)]
+    pub bind: Bind,
 }
 
 impl JoinOptions {
+    /// Where the node listens. Tests only.
+    ///
+    /// # Examples
+    ///
+    /// A member that listens on this host only.
+    ///
+    /// ```
+    /// use habilis_network::membership::JoinOptions;
+    /// use habilis_network::net::Bind;
+    ///
+    /// let options = JoinOptions::default().bind(Bind::Loopback);
+    /// assert_eq!(options.bind, Bind::Loopback);
+    /// ```
+    #[cfg(feature = "iroh-test-utils")]
+    #[must_use]
+    pub fn bind(mut self, bind: Bind) -> Self {
+        self.bind = bind;
+        self
+    }
+
     /// Set the topic that derives the mesh.
     #[must_use]
     pub fn topic(mut self, topic: Option<String>) -> Self {
@@ -264,11 +291,10 @@ pub async fn join<S: NodeSink + 'static>(
     }
 
     let (inbound_tx, inbound) = mpsc::channel(INBOUND_CAP);
-    let config = setup_mesh(
-        kind,
-        SetupParams::new(author, sink).max_connections(options.max_connections),
-    )
-    .await?;
+    let params = SetupParams::new(author, sink).max_connections(options.max_connections);
+    #[cfg(feature = "iroh-test-utils")]
+    let params = params.transports(TransportOpts::default().bind(options.bind));
+    let config = setup_mesh(kind, params).await?;
 
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     if NEW_MEMBERS_ARE_BLIND.load(Ordering::SeqCst) {
