@@ -27,7 +27,6 @@ pub(super) mod ctx_parts;
 mod event_loop_error;
 pub(super) mod tick_gap;
 
-#[cfg(feature = "multihop")]
 use iroh::EndpointId;
 #[cfg(feature = "multihop")]
 use std::collections::{BTreeSet, HashSet};
