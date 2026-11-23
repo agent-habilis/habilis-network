@@ -1561,13 +1561,17 @@ impl EventLoopState {
     /// [`Self::starved_join_due`] without the stamp: whether a fallback would be due at `now`.
     pub(crate) fn starved_join_ready(&self, now: Instant) -> bool {
         let window = STARVED;
-        let starved = self
-            .below_target_since
-            .is_some_and(|since| now.duration_since(since) >= window);
+        // A node with no neighbor has no peer to wait for: its first strong request is due at
+        // once. The pace after it is the same as for any starved node.
+        let alone = self.linked_endpoints.is_empty();
+        let starved = alone
+            || self
+                .below_target_since
+                .is_some_and(|since| now.duration_since(since) >= window);
         let waited = self
             .join_fallback_at
             .is_none_or(|at| now.duration_since(at) >= window);
-        let stuck = self.links_short >= 2 || self.graft_backoff.has_refusal(now);
+        let stuck = alone || self.links_short >= 2 || self.graft_backoff.has_refusal(now);
         starved && waited && stuck
     }
 

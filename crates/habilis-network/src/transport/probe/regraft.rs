@@ -234,6 +234,33 @@ mod tests {
         state
     }
 
+    /// A node with no neighbor has no peer to wait for, so its first strong request is due at
+    /// once, not after `STARVED`. A node with a neighbor keeps the wait.
+    #[test]
+    fn a_node_with_no_neighbor_asks_with_a_join_at_once_and_a_node_with_one_waits() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let now = Instant::now();
+
+        let mut alone = fresh_state();
+        alone.note_link_count(MAX_CONNECTIONS, now);
+        assert!(
+            alone.starved_join_ready(now),
+            "a node with no neighbor must ask with a Join at once"
+        );
+        assert!(alone.starved_join_due(now), "the first ask is due");
+        assert!(
+            !alone.starved_join_ready(now + SECOND),
+            "the ask is paced: the next one waits for STARVED"
+        );
+
+        let mut linked = state_with_a_member_to_fill(1);
+        linked.note_link_count(MAX_CONNECTIONS, now);
+        assert!(
+            !linked.starved_join_ready(now),
+            "a node with a neighbor waits for STARVED"
+        );
+    }
+
     /// The fill tick grafts a member while the node holds fewer than G peers.
     #[test]
     fn the_fill_tick_grafts_a_member_at_g_minus_one_peers() {
