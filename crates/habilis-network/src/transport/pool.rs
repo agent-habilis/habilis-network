@@ -34,7 +34,6 @@ mod tests {
     use crate::lookup;
     use crate::transport::PayloadPath;
     use crate::util::tuning;
-    #[cfg(feature = "iroh-test-utils")]
     use futures_util::future::join_all;
     use iroh::endpoint::{ConnectionError, presets};
     use iroh::{endpoint, protocol};
@@ -797,6 +796,172 @@ mod tests {
                 pool.dials_to(server),
                 2,
                 "the first dial, and one new dial for the dialer and the three waiters"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **A probe and a send to one cold peer at once make one dial.** The probe is not a send: it
+    /// plans its dial as a courtesy. Both ask the pool for a connection to the same peer, and the
+    /// peer is dialed once, by whoever asked first.
+    #[test]
+    fn a_probe_and_a_send_to_one_cold_peer_at_once_make_one_dial() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: false }).await;
+
+            let probe = pool.probe_connection(server);
+            let send = pool.dial_or_warm_send(server, bytes::Bytes::from_static(b"b frame"));
+            let (connection, delivered) = tokio::join!(probe, send);
+
+            connection.expect("the probe has a connection");
+            delivered.expect("the send is delivered");
+            assert_eq!(
+                pool.dials_to(server),
+                1,
+                "one dial for the probe and the send"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **A dial that fails reaches every caller that waited for it, a probe included, with the error
+    /// of the dial.** Four sends and one probe ask for a peer that is not there. The peer is dialed
+    /// once, and each caller says why: none of them meets the cooldown of the dial that it waited for.
+    #[test]
+    fn callers_of_a_dial_that_fails_make_one_dial_and_each_gets_its_error() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let gone = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint");
+            let address = gone.addr();
+            let peer = gone.id();
+            gone.close().await;
+            let client = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint");
+            lookup::add_peer_addr(&lookup::address_book(&client), address);
+            let pool =
+                super::UnicastPool::with_idle(client.clone(), false, Duration::from_secs(600));
+            time::pause();
+
+            let probe = pool.probe_connection(peer);
+            let sends: Vec<_> = (0..4)
+                .map(|index| {
+                    let registration = pool.register_dial(peer);
+                    let frame = bytes::Bytes::from(format!("b frame {index}"));
+                    pool.send_registered(registration, peer, frame)
+                })
+                .collect();
+            let (probed, sent) = tokio::join!(probe, join_all(sends));
+
+            let mut errors: Vec<String> = sent
+                .into_iter()
+                .map(|outcome| format!("{:#}", outcome.expect_err("the peer is not there")))
+                .collect();
+            errors.push(format!("{:#}", probed.expect_err("the peer is not there")));
+            assert_eq!(pool.dials_to(peer), 1, "one dial for the five callers");
+            let first = errors[0].clone();
+            assert!(
+                errors.iter().all(|error| *error == first),
+                "each caller got the error of the dial: {errors:?}"
+            );
+            client.close().await;
+        });
+    }
+
+    /// **A probe that waits behind the dial of a send leaves the connection held as used.** The
+    /// probe reads the connection with its own hold, which does not turn a connection that a send
+    /// opened into a probe hold.
+    #[test]
+    fn a_probe_that_waits_on_a_send_dial_leaves_the_connection_as_used() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: false }).await;
+
+            let gate = pool.hold_next_dial();
+            let send = pool.dial_or_warm_send(server, bytes::Bytes::from_static(b"b frame"));
+            let probe = async {
+                wait_until(|| pool.is_dialing(server)).await;
+                pool.probe_connection(server).await
+            };
+            // The dial of the send is held while the probe asks for the same peer.
+            let release = async {
+                time::sleep(Duration::from_millis(300)).await;
+                gate.notify_one();
+            };
+            let (delivered, connection, ()) = tokio::join!(send, probe, release);
+
+            delivered.expect("the send is delivered");
+            connection.expect("the probe has a connection");
+            let hold = pool
+                .inner
+                .conns
+                .lock()
+                .await
+                .get(&server)
+                .map(|pooled| pooled.hold);
+            assert!(
+                matches!(hold, Some(super::unicast_pool::Hold::Used)),
+                "the connection of a send stays used, not {hold:?}"
+            );
+            assert_eq!(pool.dials_to(server), 1, "one dial");
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **A send that waits behind a probe uses the unit that the probe reserved.** The probe reserves
+    /// one of the two units for the peer. The other unit is taken while the probe dials, and then a
+    /// send to the same peer waits for that dial. The connection takes the reserved unit: it is no
+    /// extra, the count is not over the ceiling, and nobody is evicted for the send.
+    #[test]
+    fn a_send_that_waits_behind_a_probe_uses_the_unit_that_the_probe_reserved() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: false }).await;
+            let admission = SignalAdmission::new(2);
+            pool.set_admission(admission.clone());
+            let other = testing::endpoint_id(7);
+
+            let gate = pool.hold_next_dial();
+            let probe = pool.probe_connection(server);
+            let send = async {
+                wait_until(|| pool.is_dialing(server)).await;
+                admission.note_success(other);
+                let registration = pool.register_dial(server);
+                pool.send_registered(registration, server, bytes::Bytes::from_static(b"b frame"))
+                    .await
+            };
+            let release = async {
+                wait_until(|| pool.waiting_callers() >= 1).await;
+                gate.notify_one();
+            };
+            let (connection, delivered, ()) = tokio::join!(probe, send, release);
+
+            let connection = connection.expect("the probe has a connection");
+            delivered.expect("the send is delivered");
+            admission.note_connection(&connection);
+            assert!(
+                !admission.is_extra(server),
+                "the connection took the unit that the probe reserved"
+            );
+            assert_eq!(
+                admission.over_ceiling(),
+                0,
+                "the count is not over the ceiling"
+            );
+            assert!(
+                !admission.is_extra(other),
+                "the peer that took the other unit was not evicted for the send"
             );
             router.shutdown().await.expect("shutdown");
             client.close().await;
@@ -1626,14 +1791,6 @@ mod tests {
         }
     }
 
-    /// The handles that hold the dial lock of a peer: the map, and the turn of each dial that waits or dials.
-    fn lock_handles(pool: &super::UnicastPool) -> usize {
-        use std::sync::Arc;
-
-        let locks = pool.inner.dial_locks.lock();
-        locks.values().map(Arc::strong_count).max().unwrap_or(0)
-    }
-
     /// Two probes that dial one cold peer at once share one connection, and it keeps the hold of a probe: `Probing`
     /// while the probes run, and `Probed` once they end. A send is what turns it into `Used`.
     #[test]
@@ -1671,11 +1828,11 @@ mod tests {
                 let gate = pool.hold_next_dial();
                 let first_probe = pool.probe_connection(peer);
                 let second_probe = async {
-                    wait_until(|| lock_handles(&pool) >= 2).await;
+                    wait_until(|| pool.is_dialing_any()).await;
                     pool.probe_connection(peer).await
                 };
                 let release = async {
-                    wait_until(|| lock_handles(&pool) >= 3).await;
+                    wait_until(|| pool.waiting_callers() >= 1).await;
                     gate.notify_one();
                 };
                 let (one, two, ()) = tokio::join!(first_probe, second_probe, release);
@@ -1749,7 +1906,7 @@ mod tests {
                 let gate = pool.hold_next_dial();
                 let dial = pool.probe_connection(peer);
                 let force = async {
-                    wait_until(|| lock_handles(&pool) >= 2).await;
+                    wait_until(|| pool.is_dialing_any()).await;
                     let forcing = pool.fail_dial_for_test(peer);
                     tokio::pin!(forcing);
                     let early = time::timeout(Duration::from_millis(300), &mut forcing).await;
@@ -1781,7 +1938,7 @@ mod tests {
     /// A dial that is cancelled leaves no lock behind: the lock of the peer goes when the dial future is dropped, not
     /// only when the dial ends.
     #[test]
-    fn a_cancelled_dial_leaves_no_lock_behind() {
+    fn a_cancelled_dial_leaves_no_place_behind() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,
@@ -1802,14 +1959,14 @@ mod tests {
                 });
                 time::sleep(Duration::from_millis(300)).await;
                 assert!(
-                    !pool.inner.dial_locks.lock().is_empty(),
-                    "a dial that waits holds the lock of its peer"
+                    pool.is_dialing(peer),
+                    "a dial that waits holds the place of its peer"
                 );
                 task.abort();
                 let _ = task.await;
                 assert!(
-                    pool.inner.dial_locks.lock().is_empty(),
-                    "a cancelled dial leaves no lock behind"
+                    !pool.is_dialing(peer),
+                    "a cancelled dial leaves no place behind"
                 );
                 node.close().await;
             },
@@ -1852,12 +2009,12 @@ mod tests {
                 let gate = pool.hold_next_dial();
                 let probe_dial = pool.probe_connection(server.id());
                 let send = async {
-                    wait_until(|| lock_handles(&pool) >= 2).await;
+                    wait_until(|| pool.is_dialing_any()).await;
                     pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"one"))
                         .await
                 };
                 let release = async {
-                    wait_until(|| lock_handles(&pool) >= 3).await;
+                    wait_until(|| pool.waiting_callers() >= 1).await;
                     gate.notify_one();
                 };
                 let (dialed, outcome, ()) = tokio::join!(probe_dial, send, release);

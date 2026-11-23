@@ -26,11 +26,11 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use n0_future::time::Instant as PoolInstant;
 use tokio::sync::{Mutex, watch};
 
+#[cfg(test)]
+use crate::transport::PendingSend;
 use crate::transport::unicast_acceptor::NOT_TAKEN;
 use crate::transport::webrtc::close_code::IDLE;
-use crate::transport::{
-    LOG_TARGET, PendingSend, RELAY_REFUSED, SendVerdict, UNICAST_ALPN, payload_allowed_on,
-};
+use crate::transport::{LOG_TARGET, RELAY_REFUSED, SendVerdict, UNICAST_ALPN, payload_allowed_on};
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
@@ -58,8 +58,6 @@ impl fmt::Debug for UnicastPool {
 
 /// The dial locks of the peers that are being dialed.
 // shared: the map and the turn of each dial hold the lock of a peer
-type DialLocks = HashMap<EndpointId, Arc<Mutex<()>>>;
-
 /// A held outcome of a dial: the peer, the sender that says the dialer holds, and the receiver
 /// that lets it go on.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -126,18 +124,17 @@ pub(in crate::transport::pool) struct PoolInner {
     /// that says a node dialed nobody for a peer reads it with [`UnicastPool::dials_to`].
     #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
     pub(in crate::transport::pool) dials_made: std_Mutex<HashMap<EndpointId, u64>>,
-    /// Endpoints with a dial or a path wait in flight, each with the receiver of the outcome that
-    /// its dialer publishes, so that concurrent sends to one peer that has no usable connection
-    /// yet share one dial or one wait instead of racing their own: the first is the dialer, the
-    /// others wait on the receiver. Read by [`UnicastPool::send_registered`] and
-    /// [`UnicastPool::dial_and_send_in_background`]. An inline dial through
-    /// [`UnicastPool::warm_or_dial`] waits on the peer lock of `dial_locks` instead.
+    /// Endpoints with a dial in flight, each with the receiver of the outcome that its dialer
+    /// publishes. Every way into a dial of a peer takes a place here, sends, the direct-path probe and
+    /// an inline dial alike: the first caller is the dialer and dials once, the others are waiters, and
+    /// read the pooled connection when the dialer says that the dial ended. This is the only exclusion
+    /// between two dials of one peer.
     pub(in crate::transport::pool) dialing:
         parking_lot::Mutex<HashMap<EndpointId, watch::Receiver<DialOutcome>>>,
-    /// One lock for each peer that is being dialed by [`UnicastPool::dial_pooled`]: a second dial waits for the first
-    /// one, then finds its connection pooled. An entry is removed when its last waiter has gone.
-    // shared: the dialer and every waiter for one peer hold the same lock
-    pub(in crate::transport::pool) dial_locks: parking_lot::Mutex<DialLocks>,
+    /// Tests only: how many callers wait now for the dial of another, so that a test knows that a
+    /// caller is in place without a sleep.
+    #[cfg(test)]
+    pub(in crate::transport::pool) waiting: AtomicU64,
     /// Tests only: the next dial waits on this before it connects, so a test can queue a send
     /// behind it.
     #[cfg(test)]
@@ -207,11 +204,12 @@ impl UnicastPool {
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
                 #[cfg(test)]
+                waiting: AtomicU64::new(0),
+                #[cfg(test)]
                 dials_started: AtomicU64::new(0),
                 #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
                 dials_made: std_Mutex::new(HashMap::new()),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
-                dial_locks: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
                 routes: parking_lot::Mutex::new(HashMap::new()),
                 pinned_idle: PINNED_IDLE,
@@ -287,16 +285,10 @@ impl UnicastPool {
     ) -> Result<()> {
         let outcome = match self.redial_registration(eid) {
             None => Err(anyhow::anyhow!("{PINNED_REDIAL}")),
-            Some(registration) => {
-                let in_flight = match &registration {
-                    Registration::Dialer(in_flight) => Some(in_flight),
-                    Registration::Waiter(_) => None,
-                };
-                match self.connection_for_send(in_flight, eid).await {
-                    Ok(connection) => self.send_on(eid, &connection, &bytes).await,
-                    Err(error) => Err(error),
-                }
-            }
+            Some(registration) => match self.connection_for_send(registration, eid).await {
+                Ok(connection) => self.send_on(eid, &connection, &bytes).await,
+                Err(error) => Err(error),
+            },
         };
         match outcome {
             Err(error) if committed(first) => {
@@ -383,11 +375,12 @@ impl UnicastPool {
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
                 #[cfg(test)]
+                waiting: AtomicU64::new(0),
+                #[cfg(test)]
                 dials_started: AtomicU64::new(0),
                 #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
                 dials_made: std_Mutex::new(HashMap::new()),
                 dialing: parking_lot::Mutex::new(HashMap::new()),
-                dial_locks: parking_lot::Mutex::new(HashMap::new()),
                 addrs: std_Mutex::new(HashMap::new()),
                 routes: parking_lot::Mutex::new(HashMap::new()),
                 pinned_idle: PINNED_IDLE,
@@ -474,6 +467,18 @@ impl UnicastPool {
             .addrs
             .lock()
             .is_ok_and(|addrs| addrs.get(&address.id) == Some(address))
+    }
+
+    /// Tests only: whether any dial is in flight.
+    #[cfg(test)]
+    pub(crate) fn is_dialing_any(&self) -> bool {
+        !self.inner.dialing.lock().is_empty()
+    }
+
+    /// Tests only: how many callers wait now for the dial of another caller.
+    #[cfg(test)]
+    pub(crate) fn waiting_callers(&self) -> u64 {
+        self.inner.waiting.load(Ordering::Relaxed)
     }
 
     /// Tests only: whether a dial to `eid` is in flight.
@@ -751,10 +756,17 @@ impl UnicastPool {
     /// the cooldown that the test asked for.
     #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
     pub(crate) async fn fail_dial_for_test(&self, eid: EndpointId) {
-        let turn = DialTurn::new(self, eid);
-        let _held = turn.mutex().lock().await;
+        let in_flight = loop {
+            match self.register_dial(eid) {
+                Registration::Dialer(in_flight) => break in_flight,
+                Registration::Waiter(outcome) => {
+                    let _ = wait_for_dial(outcome).await;
+                }
+            }
+        };
         self.drop_connection(eid).await;
         self.note_dial_failure(eid).await;
+        in_flight.publish(Err("the dial was failed for a test".to_owned()));
     }
 
     /// Put `eid` on the dial-failure cooldown, as a failed dial does.
@@ -775,59 +787,87 @@ impl UnicastPool {
     /// A detached pool, an endpoint on failed-dial cooldown, a dial that
     /// fails/times out, or a stream write error.
     pub(crate) async fn dial_and_send(&self, eid: EndpointId, bytes: Bytes) -> Result<()> {
-        let outcome = self.dial_and_send_once(eid, &bytes).await;
-        if let Err(error) = &outcome
-            && connection_lost(error)
-        {
-            return self.redial_and_send(eid, bytes, error).await;
-        }
-        outcome
+        self.send_registered(self.register_dial(eid), eid, bytes)
+            .await
     }
 
-    /// [`Self::dial_and_send`] with no second send after a lost connection.
-    async fn dial_and_send_once(&self, eid: EndpointId, bytes: &Bytes) -> Result<()> {
-        let connection = self.connection_for_send(None, eid).await?;
-        self.send_on(eid, &connection, bytes).await
-    }
-
-    /// The connection that a send to `eid` writes on: a warm one, or one that this call dials, and
-    /// with a direct path when the relay is lookup only. A dialer passes its `in_flight` and the
-    /// waiters of its dial are told as soon as the connection is ready or the dial failed: a waiter
-    /// wants a connection, and sends its own frame, so it does not wait for the frame of the dialer
-    /// or take its verdict.
+    /// The connection that a send to `eid` writes on, through the registration of its dial: a warm
+    /// one, or one that the dialer of the peer dials, and with a direct path when the relay is lookup
+    /// only. A waiter wants a connection and sends its own frame, so it never waits for the frame of
+    /// the dialer or takes its verdict.
     async fn connection_for_send(
         &self,
-        in_flight: Option<&InFlightDial>,
+        registration: Registration,
         eid: EndpointId,
     ) -> Result<Connection> {
-        let ready = self.ready_connection(eid).await;
-        if let Some(in_flight) = in_flight {
-            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-            self.wait_outcome_hold(eid).await;
-            in_flight.publish(match &ready {
-                Ok(_) => Ok(()),
-                Err(error) => Err(error.to_string()),
-            });
+        if matches!(registration, Registration::Dialer(_)) {
+            self.inner.dial_attempts.fetch_add(1, Ordering::Relaxed);
         }
-        ready
-    }
-
-    /// The warm connection to `eid`, or a new one that this call dials, with a direct path.
-    async fn ready_connection(&self, eid: EndpointId) -> Result<Connection> {
-        self.inner.dial_attempts.fetch_add(1, Ordering::Relaxed);
-        let connection = self.warm_or_dial(eid).await?;
+        let connection = self
+            .connection_through(registration, eid, Hold::Used)
+            .await?;
         // A connection this call just dialed is milliseconds old: its
         // non-relay path (the punch, or a WebRTC path opened right after
         // `AddConnection`) is still forming, and the synchronous check read
         // "no path selected yet" as relay — refusing the *first* directed
         // frame to every peer without a warm connection. Wait like the
-        // accept side does, on a dial-sized budget.
+        // accept side does, on a dial-sized budget. Each caller waits for itself: a
+        // connection that a probe dialed has no path wait behind it.
         if !self.inner.relay_transport
             && !payload_path::wait_direct(&connection, PATH_SELECT_TIMEOUT).await
         {
             bail!("{RELAY_REFUSED}");
         }
         Ok(connection)
+    }
+
+    /// The pooled connection to `eid` for a caller that reads it with `hold`, through its place in
+    /// the registry of dials. The dialer dials, publishes how the dial ended, and returns the
+    /// connection. A waiter waits for that, and reads the connection with its own `hold`: a send
+    /// turns a connection that a probe dialed into a used one, and a probe leaves a connection that
+    /// a send dialed as it is. If the connection is gone by then, the waiter takes a new place, and
+    /// the next caller waits for it.
+    ///
+    /// A caller that waits can wait again behind a new dial each time its connection is lost, and no
+    /// code bounds the turns (see `LONGEST_SEND_CALL`). A caller that holds a place from the event
+    /// loop (`register_planned_dial` in `deliver`) takes it there, before it spawns, because the plan
+    /// of the dial reads the state of the loop, and a place taken inside the task would plan from a
+    /// later state.
+    async fn connection_through(
+        &self,
+        mut registration: Registration,
+        eid: EndpointId,
+        hold: Hold,
+    ) -> Result<Connection> {
+        loop {
+            match registration {
+                Registration::Dialer(in_flight) => {
+                    let dialed = self.dial_now(eid, hold).await;
+                    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+                    self.wait_outcome_hold(eid).await;
+                    in_flight.publish(match &dialed {
+                        Ok(_) => Ok(()),
+                        Err(error) => Err(error.to_string()),
+                    });
+                    return dialed;
+                }
+                Registration::Waiter(outcome) => {
+                    #[cfg(test)]
+                    self.inner.waiting.fetch_add(1, Ordering::Relaxed);
+                    let waited = wait_for_dial(outcome).await;
+                    #[cfg(test)]
+                    self.inner.waiting.fetch_sub(1, Ordering::Relaxed);
+                    waited.map_err(anyhow::Error::msg)?;
+                    if let Some(connection) = self.open_pooled(eid, hold).await {
+                        return Ok(connection);
+                    }
+                    let Some(next) = self.redial_registration(eid) else {
+                        bail!("{PINNED_REDIAL}");
+                    };
+                    registration = next;
+                }
+            }
+        }
     }
 
     /// One send of `bytes` on `connection`. A connection that was lost leaves the pool.
@@ -862,50 +902,28 @@ impl UnicastPool {
     }
 
     /// The send of a caller that has taken its place already, with [`Self::register_dial`]. The
-    /// dialer dials and publishes how the dial ended. A waiter waits for that, then writes on the
-    /// connection that the dial made; if the connection is gone by then, it takes the place of the
-    /// dialer, and the next waiter waits for it.
+    /// dialer dials and publishes how the dial ended, and sends its own frame. A waiter waits for the
+    /// outcome, then sends its own frame on the connection that the dial made; if the connection is
+    /// gone by then, it takes a new place, and the next caller waits for it.
     ///
     /// # Errors
     /// A refused path, a dial or a path wait or a write that fails, a peer on the dial-failure
     /// cooldown, or the error of the dial that this call waited for.
     pub(crate) async fn send_registered(
         &self,
-        mut registration: Registration,
+        registration: Registration,
         eid: EndpointId,
         bytes: Bytes,
     ) -> Result<()> {
-        loop {
-            match registration {
-                Registration::Dialer(in_flight) => {
-                    let connection = self.connection_for_send(Some(&in_flight), eid).await?;
-                    let outcome = self.send_on(eid, &connection, &bytes).await;
-                    return match outcome {
-                        Err(error) if connection_lost(&error) => {
-                            self.redial_and_send(eid, bytes, &error).await
-                        }
-                        other => other,
-                    };
-                }
-                Registration::Waiter(outcome) => {
-                    wait_for_dial(outcome).await.map_err(anyhow::Error::msg)?;
-                    match self.send_if_warm(eid, bytes.clone()).await {
-                        WarmSend::Sent(pending) => return verdict_of(pending).await,
-                        WarmSend::Refused => bail!("{RELAY_REFUSED}"),
-                        WarmSend::Cold => {
-                            let Some(next) = self.redial_registration(eid) else {
-                                bail!("{PINNED_REDIAL}");
-                            };
-                            registration = next;
-                        }
-                    }
-                }
-            }
+        let connection = self.connection_for_send(registration, eid).await?;
+        match self.send_on(eid, &connection, &bytes).await {
+            Err(error) if connection_lost(&error) => self.redial_and_send(eid, bytes, &error).await,
+            other => other,
         }
     }
 
-    /// Tests only: hold the outcome of the next dial of `eid`, after its dial and its path wait and
-    /// before it is published. The first receiver resolves once the dialer holds; the dialer goes
+    /// Tests only: hold the outcome of the next dial of `eid`, after its dial and before it is
+    /// published. The first receiver resolves once the dialer holds; the dialer goes
     /// on once the second sender sends or is dropped.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) fn hold_next_outcome(
@@ -967,12 +985,13 @@ impl UnicastPool {
         registration
     }
 
-    /// The pooled connection to `eid`, dialing one if none is warm. The
-    /// direct-path probe uses this so its connection *is* the one later
-    /// unicast rides — one handshake, and a punch landed here serves both.
+    /// The pooled connection to `eid`, dialing one if none is warm, through the registry of dials like
+    /// every other caller. Tests and test hooks only: the sends of the engine and its direct-path probe
+    /// ask for their connection with their own hold.
     ///
     /// # Errors
     /// See [`Self::dial_and_send`].
+    #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
     pub(crate) async fn warm_or_dial(&self, eid: EndpointId) -> Result<Connection> {
         if self.inner.endpoint.is_none() {
             bail!("unicast pool has no endpoint");
@@ -980,7 +999,8 @@ impl UnicastPool {
         if let Some(connection) = self.warm(eid).await {
             return Ok(connection);
         }
-        self.dial_pooled(eid, Hold::Used).await
+        let registration = self.register_dial(eid);
+        self.connection_through(registration, eid, Hold::Used).await
     }
 
     /// The pooled connection that a direct-path probe uses: the one a send
@@ -1014,9 +1034,18 @@ impl UnicastPool {
         if !self.reserve_unprompted_dial(eid) {
             bail!("{AT_CEILING}");
         }
-        let release = PlanRelease::new(self, eid);
-        let result = self.dial_pooled(eid, Hold::Probing).await;
-        if result.is_ok() {
+        // A probe that dials owns the unit that it reserved, and gives it back when it fails. A probe
+        // that waits for the dial of another caller owns nothing: the dialer holds the reservation of
+        // the peer, and a send that waits behind a probe uses the unit that the probe reserved.
+        let registration = self.register_dial(eid);
+        let release =
+            matches!(registration, Registration::Dialer(_)).then(|| PlanRelease::new(self, eid));
+        let result = self
+            .connection_through(registration, eid, Hold::Probing)
+            .await;
+        if result.is_ok()
+            && let Some(release) = release
+        {
             release.disarm();
         }
         result
@@ -1031,26 +1060,6 @@ impl UnicastPool {
         {
             pooled.hold = Hold::Probed(PoolInstant::now());
         }
-    }
-
-    /// Dial `eid` and pool the connection under `hold`. One dial runs for each peer at a time, and a dial starts only
-    /// when no connection of the peer is open, so an insert never replaces a live connection. A replaced connection
-    /// must be closed with `close()`, not dropped: an unacknowledged frame on a dropped connection is lost.
-    async fn dial_pooled(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
-        let turn = DialTurn::new(self, eid);
-        let permit = turn.mutex().lock().await;
-        let result = self.dial_pooled_turn(eid, hold).await;
-        drop(permit);
-        result
-    }
-
-    /// The lock of `eid` for one dial. It is created on first use.
-    // shared: the turn of each dial of the peer holds a handle
-    fn dial_lock(&self, eid: EndpointId) -> Arc<Mutex<()>> {
-        let mut locks = self.inner.dial_locks.lock();
-        // shared: the dialer and every waiter for the peer hold the same lock
-        let lock = locks.entry(eid).or_insert_with(|| Arc::new(Mutex::new(())));
-        Arc::clone(lock)
     }
 
     /// The open pooled connection of `eid`, if there is one. A caller that sends with it (`hold` is `Used`) takes it as
@@ -1072,8 +1081,12 @@ impl UnicastPool {
         Some(pooled.connection.clone())
     }
 
-    /// The body of [`Self::dial_pooled`], run under the lock of the peer.
-    async fn dial_pooled_turn(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
+    /// Dial `eid` and pool the connection under `hold`. Only the dialer of the peer calls this, from
+    /// [`Self::connection`], so one dial runs for each peer at a time and a dial starts only when no
+    /// connection of the peer is open: an insert never replaces a live connection. A replaced
+    /// connection must be closed with `close()`, not dropped: an unacknowledged frame on a dropped
+    /// connection is lost.
+    async fn dial_now(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
         let planned = self.inner.routes.lock().remove(&eid);
         if let Some(connection) = self.open_pooled(eid, hold).await {
             self.release_plan(eid);
@@ -1230,52 +1243,6 @@ pub(in crate::transport::pool) struct PlannedRoute {
     alone: bool,
 }
 
-/// The lock of one peer for one dial. Dropping it, when the dial ends, returns early, is cancelled or panics, gives
-/// the lock back and removes its entry from the map when no other dial waits for it.
-struct DialTurn<'pool> {
-    pool: &'pool UnicastPool,
-    eid: EndpointId,
-    // shared: the dialer and every waiter for the peer hold the same lock. It is `None` only inside
-    // the drop, which gives it back while the map is locked.
-    lock: Option<Arc<Mutex<()>>>,
-}
-
-impl<'pool> DialTurn<'pool> {
-    fn new(pool: &'pool UnicastPool, eid: EndpointId) -> Self {
-        let lock = pool.dial_lock(eid);
-        Self {
-            pool,
-            eid,
-            lock: Some(lock),
-        }
-    }
-
-    /// The lock of the peer, to wait on and to hold for the dial. A borrow, so that it adds no
-    /// handle to the count of the map.
-    fn mutex(&self) -> &Mutex<()> {
-        self.lock
-            .as_deref()
-            .expect("a turn holds its lock until it is dropped")
-    }
-}
-
-impl Drop for DialTurn<'_> {
-    fn drop(&mut self) {
-        let mut locks = self.pool.inner.dial_locks.lock();
-        // The turn gives its handle back while it holds the map. A turn that counted its own handle
-        // after the map was released could see the handle of another turn that was ending at the same
-        // time, and both would leave the entry in the map.
-        drop(self.lock.take());
-        // one handle: the map
-        if locks
-            .get(&self.eid)
-            .is_some_and(|lock| Arc::strong_count(lock) == 1)
-        {
-            locks.remove(&self.eid);
-        }
-    }
-}
-
 /// Wait for the dialer of a peer to publish how its dial ended. The current value is read first, so
 /// that a receiver made after the publish still sees it.
 async fn wait_for_dial(mut outcome: watch::Receiver<DialOutcome>) -> result::Result<(), String> {
@@ -1396,7 +1363,8 @@ fn committed(error: &anyhow::Error) -> bool {
 }
 
 /// The verdict of a send that runs on a task. A task that ended without a verdict is a send that
-/// was not delivered.
+/// was not delivered. Tests only.
+#[cfg(test)]
 pub(crate) async fn verdict_of(pending: PendingSend) -> Result<()> {
     pending
         .await
@@ -1408,68 +1376,73 @@ pub(crate) async fn verdict_of(pending: PendingSend) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DialTurn, UnicastPool};
+    use super::{Registration, UnicastPool};
     use crate::testing;
-    use std::sync::{Arc, Barrier};
+    use std::sync::Barrier;
     use std::thread;
 
-    /// Two dial turns of one peer share one lock. When the first turn ends, the map still holds the lock for the
-    /// second one; when the last turn ends, the map is empty.
+    /// The entry of a dial leaves the map with its dialer, and not with a later one. After the outcome
+    /// is published, the next caller is a dialer of its own, and the end of the first dialer, which
+    /// drops after the publish, does not take the entry of the second.
     #[test]
-    fn the_last_turn_of_a_peer_removes_its_lock() {
+    fn the_entry_of_a_dial_leaves_with_its_dialer_and_not_with_a_later_one() {
         let _guard = ::habilis_network_test_tracing::init();
         let pool = UnicastPool::disconnected();
         let peer = testing::endpoint_id(7);
-        let first = DialTurn::new(&pool, peer);
-        let second = DialTurn::new(&pool, peer);
-        drop(first);
-        let held = pool.inner.dial_locks.lock();
-        let own = second.lock.as_ref();
-        let second_keeps_it = held
-            .get(&peer)
-            .zip(own)
-            .is_some_and(|(mapped, turn)| Arc::ptr_eq(mapped, turn));
-        drop(held);
+        let Registration::Dialer(first) = pool.register_dial(peer) else {
+            panic!("the first caller is the dialer");
+        };
         assert!(
-            second_keeps_it,
-            "the map still holds the lock that the second turn waits on"
+            matches!(pool.register_dial(peer), Registration::Waiter(_)),
+            "a caller that comes while the dial is in flight waits for it"
+        );
+        first.publish(Err("the dial ended".to_owned()));
+        assert!(
+            !pool.is_dialing(peer),
+            "the outcome takes the entry out of the map"
+        );
+        let Registration::Dialer(second) = pool.register_dial(peer) else {
+            panic!("a caller after the outcome is a dialer of its own");
+        };
+        drop(first);
+        assert!(
+            pool.is_dialing(peer),
+            "the end of the first dialer left the dial of the second in flight"
         );
         drop(second);
         assert!(
-            pool.inner.dial_locks.lock().is_empty(),
-            "the last turn of the peer removes its lock"
+            !pool.is_dialing(peer),
+            "the last dial of the peer leaves no entry"
         );
     }
 
-    /// The last two turns of a peer end on two threads at once. Each turn must give its handle back
-    /// while it holds the map lock, or both can count the handle of the other, leave the entry in the
-    /// map, and keep a lock that nobody waits on until the peer is dialed again. A run of many pairs
-    /// finds such a pair, so the map must be empty after every pair. The window is a few
-    /// nanoseconds, so the red is not certain: on the old code a run of 2,000,000 pairs failed at pair
-    /// 71,213 and a run of 20,000 pairs did not fail. A run of 100,000 pairs fails on the old code in
-    /// about 3 runs of 4, and it passes on the code with the fix. It is a guard, not a proof.
+    /// The end of a dialer and a new caller meet on two threads at once. Whichever comes first, the
+    /// map holds no entry after both end. The window is a few nanoseconds, so a run of many pairs
+    /// is a guard and not a proof.
     #[test]
-    fn two_turns_that_end_at_once_leave_no_lock_in_the_map() {
+    fn a_dialer_that_ends_as_a_caller_registers_leaves_no_entry_in_the_map() {
         let _guard = ::habilis_network_test_tracing::init();
         let pool = UnicastPool::disconnected();
         let peer = testing::endpoint_id(8);
         for round in 0..100_000 {
-            let first = DialTurn::new(&pool, peer);
-            let second = DialTurn::new(&pool, peer);
+            let Registration::Dialer(first) = pool.register_dial(peer) else {
+                panic!("round {round}: the map was not empty before the pair");
+            };
             let start = Barrier::new(2);
             thread::scope(|scope| {
                 scope.spawn(|| {
                     start.wait();
+                    first.publish(Err("the dial ended".to_owned()));
                     drop(first);
                 });
                 scope.spawn(|| {
                     start.wait();
-                    drop(second);
+                    drop(pool.register_dial(peer));
                 });
             });
             assert!(
-                pool.inner.dial_locks.lock().is_empty(),
-                "round {round}: a lock stayed in the map after the last two turns ended"
+                !pool.is_dialing(peer),
+                "round {round}: an entry stayed in the map after the dialer and the caller ended"
             );
         }
     }
