@@ -32,12 +32,15 @@ pub(crate) fn build_rtc(now: Instant) -> Rtc {
         .build(now)
 }
 
-/// Binds an ephemeral UDP socket for the str0m session. When the bind is
+/// Binds an ephemeral UDP socket for the str0m session, on `bind_ip`. When the bind is
 /// unspecified, advertise a non-loopback interface address so the single
 /// (vanilla-ICE) host candidate is reachable beyond this machine; the
-/// loopback fallback is what makes same-host tests work.
-pub(crate) async fn bind_ephemeral_udp() -> io::Result<(UdpSocket, SocketAddr)> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+/// loopback fallback is what makes same-host tests work. A bind on a specific address,
+/// loopback included, advertises that address.
+pub(crate) async fn bind_ephemeral_udp(
+    bind_ip: net::IpAddr,
+) -> io::Result<(UdpSocket, SocketAddr)> {
+    let socket = UdpSocket::bind((bind_ip, 0)).await?;
     let local = socket.local_addr()?;
     let ip: net::IpAddr = if local.ip().is_unspecified() {
         let mut interfaces = if_addrs::get_if_addrs().ok().into_iter().flatten();
@@ -471,7 +474,7 @@ mod tests {
         ChannelReadyTarget, HandshakeNoise, bind_ephemeral_udp, build_rtc,
         drive_until_channel_ready,
     };
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::{Duration, Instant};
     use tokio::net::UdpSocket;
 
@@ -504,12 +507,37 @@ mod tests {
     }
 
     #[test]
+    fn a_session_socket_bound_on_loopback_listens_and_advertises_loopback() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (socket, advertised) = bind_ephemeral_udp(IpAddr::V4(Ipv4Addr::LOCALHOST))
+                .await
+                .expect("bind a loopback socket");
+            let local = socket.local_addr().expect("local addr");
+            assert!(
+                local.ip().is_loopback(),
+                "the socket listens beyond the host: {local}"
+            );
+            assert!(
+                advertised.ip().is_loopback(),
+                "the candidate names another address: {advertised}"
+            );
+            assert_eq!(
+                advertised.port(),
+                local.port(),
+                "the candidate names another port"
+            );
+        });
+    }
+
+    #[test]
     fn a_stray_datagram_does_not_abort_the_handshake() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             // The socket is reachable by anything that can route to the host
             // candidate we put in the SDP, so one garbage packet from a scanner
             // used to kill a negotiation that was otherwise fine.
-            let (socket, advertised) = bind_ephemeral_udp().await.expect("bind media socket");
+            let (socket, advertised) = bind_ephemeral_udp(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+                .await
+                .expect("bind media socket");
             // The socket binds to the wildcard address, so reach it on loopback
             // rather than the 0.0.0.0 that `local_addr` reports.
             let local = SocketAddr::from((

@@ -30,11 +30,12 @@ pub(super) async fn build_offer(
     })
 }
 
-/// Host candidates only when the mesh is loopback: `IceConfig::default()`
-/// queries two public STUN servers, which a loopback mesh promises not to.
+/// A node that stays on this host gathers host candidates only and binds the socket of the
+/// session on loopback: `IceConfig::default()` queries two public STUN servers, which such a node
+/// promises not to, and a socket on every interface lets another machine send to it.
 pub(crate) fn ice_config(profile: IceProfile) -> IceConfig {
     if profile.host_only {
-        IceConfig::host_only()
+        IceConfig::loopback_only()
     } else {
         IceConfig::default()
     }
@@ -50,4 +51,36 @@ pub(super) async fn build_answer(
         .await
         .context("build WebRTC answer")?;
     Ok(Answer { pending, envelope })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ice_config;
+    use crate::transport::webrtc::ice_profile::IceProfile;
+
+    /// **A node that stays on this host asks no STUN server and binds its session socket on
+    /// loopback; any other node keeps the default.**
+    #[test]
+    fn the_profile_of_a_node_on_this_host_gives_a_loopback_session_without_stun() {
+        let on_this_host = ice_config(IceProfile::default().host_only(true));
+        assert!(
+            on_this_host.stun_servers.is_empty(),
+            "a STUN server is asked"
+        );
+        assert!(
+            on_this_host.bind_ip.is_loopback(),
+            "the session socket listens beyond the host: {}",
+            on_this_host.bind_ip
+        );
+
+        let elsewhere = ice_config(IceProfile::default().host_only(false));
+        assert!(
+            !elsewhere.stun_servers.is_empty(),
+            "the default asks no STUN server"
+        );
+        assert!(
+            elsewhere.bind_ip.is_unspecified(),
+            "the default binds loopback only"
+        );
+    }
 }

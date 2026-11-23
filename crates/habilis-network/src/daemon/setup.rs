@@ -1768,7 +1768,7 @@ fn build_overlay(
     transport::IceProfile,
 ) {
     let ice = transport::IceProfile {
-        host_only: mesh.is_loopback(),
+        host_only: lookup::stays_on_this_host(mesh.is_loopback(), build.transports),
     };
     let unicast = build.unicast_acceptor.clone().admission(admission.clone());
     let webrtc_lane = build

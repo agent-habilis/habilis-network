@@ -126,7 +126,12 @@ pub(crate) async fn claim_holder(
             (
                 handle,
                 admission,
-                transport::IceProfile { host_only: false },
+                transport::IceProfile {
+                    host_only: lookup::stays_on_this_host(
+                        params.lookups.is_loopback(),
+                        params.bind_options,
+                    ),
+                },
             )
         }),
         // The rendezvous serves no caller protocol either — it is a meeting

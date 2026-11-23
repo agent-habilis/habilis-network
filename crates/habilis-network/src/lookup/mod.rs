@@ -68,7 +68,7 @@ pub(crate) use relay::{
 };
 pub use transport_handles::TransportHandles;
 pub use transport_opts::TransportOpts;
-pub(crate) use transport_opts::bind_only;
+pub(crate) use transport_opts::{bind_only, stays_on_this_host};
 
 #[cfg(all(feature = "multihop", not(feature = "host")))]
 pub(crate) use peer::browser_handle_config;

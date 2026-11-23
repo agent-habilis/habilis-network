@@ -939,6 +939,23 @@ fn a_side_endpoint_takes_the_bind_of_the_node_and_no_other_option() {
     );
 }
 
+/// **A node stays on this host when its mesh is loopback or when it binds loopback.** One answer
+/// for 2 things: the `WebRTC` sessions of the node gather host candidates only, and bind their
+/// sockets on loopback.
+#[test]
+#[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+fn a_node_stays_on_this_host_when_its_mesh_or_its_bind_says_so() {
+    use super::stays_on_this_host;
+    use crate::lookup::Bind;
+
+    let all_interfaces = TransportOpts::default();
+    let loopback = TransportOpts::default().bind(Bind::Loopback);
+    assert!(stays_on_this_host(true, all_interfaces), "a loopback mesh");
+    assert!(stays_on_this_host(false, loopback), "a loopback bind");
+    assert!(stays_on_this_host(true, loopback), "both");
+    assert!(!stays_on_this_host(false, all_interfaces), "neither");
+}
+
 /// **The underlay of a node that binds loopback binds loopback too.** A node has 2 endpoints, the
 /// application endpoint and its underlay, and the second one took no bind: it listened on every
 /// interface of the host, and so did the sockets that a subnet bind added to it.

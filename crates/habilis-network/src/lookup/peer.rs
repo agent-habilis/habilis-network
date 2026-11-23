@@ -399,7 +399,7 @@ pub(crate) async fn build_peer_multihop_with(
     if let Some((handle, table)) = underlay_leg {
         let allowed = underlay_webrtc::Allowed::default();
         let ice = transport::IceProfile {
-            host_only: lookups.is_loopback(),
+            host_only: super::stays_on_this_host(lookups.is_loopback(), options),
         };
         // The underlay is an endpoint of its own, with lookup services of its own, so it has
         // an address book of its own.

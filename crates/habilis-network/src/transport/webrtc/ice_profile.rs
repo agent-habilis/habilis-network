@@ -26,7 +26,8 @@
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
 pub struct IceProfile {
-    /// Gather host candidates only: no STUN, no TURN, no packets off the box.
+    /// Stay on this host: gather host candidates only (no STUN, no TURN) and bind the socket of the
+    /// session on loopback, so that no packet leaves the box and no other machine can send to it.
     pub host_only: bool,
 }
 

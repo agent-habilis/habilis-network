@@ -33,7 +33,7 @@ impl fmt::Debug for Negotiating {
 /// the SDP and there is no trickle message to add them later.
 pub(super) async fn start(ice: &IceConfig) -> Result<Negotiating, JsepError> {
     let mut rtc = build_rtc(Instant::now());
-    let (socket, advertised) = bind_ephemeral_udp()
+    let (socket, advertised) = bind_ephemeral_udp(ice.bind_ip)
         .await
         .map_err(|error| JsepError::Bind(Box::new(error)))?;
     add_host_candidate(&mut rtc, advertised)?;
@@ -45,4 +45,31 @@ pub(super) async fn start(ice: &IceConfig) -> Result<Negotiating, JsepError> {
         socket,
         advertised,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::start;
+    use crate::native::ice_config::IceConfig;
+
+    /// **A negotiation with the loopback-only configuration binds its socket on loopback and
+    /// advertises it.** The default binds every interface.
+    #[test]
+    fn a_loopback_only_negotiation_binds_and_advertises_loopback() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let negotiating = start(&IceConfig::loopback_only())
+                .await
+                .expect("start a negotiation");
+            let local = negotiating.socket.local_addr().expect("local addr");
+            assert!(
+                local.ip().is_loopback(),
+                "the socket listens beyond the host: {local}"
+            );
+            assert!(
+                negotiating.advertised.ip().is_loopback(),
+                "the candidate names another address: {}",
+                negotiating.advertised
+            );
+        });
+    }
 }

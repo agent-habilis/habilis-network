@@ -145,16 +145,24 @@ impl TransportOpts {
 }
 
 /// Whether the endpoint of a node with these options listens on this host only.
-#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+#[cfg(feature = "iroh-test-utils")]
 pub(crate) fn binds_loopback_only(options: TransportOpts) -> bool {
     options.bind == super::Bind::Loopback
 }
 
 /// Whether the endpoint of a node with these options listens on this host only: a build without
 /// the test feature has no way to ask for it.
-#[cfg(all(not(feature = "iroh-test-utils"), not(target_arch = "wasm32")))]
+#[cfg(not(feature = "iroh-test-utils"))]
 pub(crate) fn binds_loopback_only(_options: TransportOpts) -> bool {
     false
+}
+
+/// Whether a node stays on this host: the lookups of its mesh are loopback only (`loopback_mesh`),
+/// or it asked for a loopback bind. One answer for the two things that follow from it: the
+/// `WebRTC` sessions of the node gather host candidates only (no STUN) and bind their sockets on
+/// loopback, so that no packet leaves the host and no other machine can send one to the node.
+pub(crate) fn stays_on_this_host(loopback_mesh: bool, options: TransportOpts) -> bool {
+    loopback_mesh || binds_loopback_only(options)
 }
 
 /// The options of an endpoint that a node builds beside its own and that has no transport choice of
