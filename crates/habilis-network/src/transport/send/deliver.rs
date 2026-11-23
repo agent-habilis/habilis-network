@@ -77,8 +77,8 @@ pub async fn deliver(
 /// `msg`, so that a caller that must not wait can queue it for another task.
 ///
 /// # Errors
-/// The same as [`deliver`] for a message that has no path now: held for a
-/// direct path, or its addressee has no known endpoint.
+/// The same as [`deliver`] for a message that has no path now: its addressee has no known
+/// endpoint.
 pub(crate) fn resolve(
     message: &Verified,
     bytes: WireFrame,
@@ -87,7 +87,6 @@ pub(crate) fn resolve(
     match super::route::route(message, state) {
         Route::Broadcast => Ok(Resend::Broadcast(bytes)),
         Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
-        Route::Held(eid) => Err(SendError::Held { eid }),
         Route::Undeliverable => Err(undeliverable(sole_addressee(&message.kind), state)),
     }
 }
@@ -115,14 +114,9 @@ fn undeliverable(addressee: Option<&AuthorKey>, state: &EventLoopState) -> SendE
 ///
 /// It checks, in this order, that the frame is one this node signed ([`SendError::ForeignFrame`]),
 /// that the frame is not directed to another key ([`SendError::OtherAddressee`]), and that `to` has
-/// an endpoint to go to, by the directed rules of [`deliver`] ([`SendError::Undeliverable`] or
-/// [`SendError::Held`]). The payload path check applies as it does for [`deliver`], and the send
+/// an endpoint to go to, by the directed rules of [`deliver`] ([`SendError::Undeliverable`]). The payload path check applies as it does for [`deliver`], and the send
 /// waits on nothing: a cold peer is dialed by a task, and the verdict comes through
 /// [`Delivered::Pending`].
-///
-/// A frame held for a direct path comes back as [`SendError::Held`], and nothing asks for a lane
-/// session, as `send_app` does for a held frame. The caller retries the repair later, and a peer
-/// that has no IP path needs its session from another send.
 ///
 /// # Errors
 /// One of the refusals above, a frame that does not serialize, or the failure of a send to a warm
@@ -173,7 +167,6 @@ pub(crate) fn resolve_to(
     }
     let eid = match super::route::route_to_key(to, state) {
         Route::Unicast(eid) => eid,
-        Route::Held(eid) => return Err(SendError::Held { eid }),
         Route::Undeliverable | Route::Broadcast => return Err(undeliverable(Some(to), state)),
     };
     let bytes = message
@@ -284,19 +277,9 @@ pub(crate) fn can_unicast(eid: EndpointId, state: &EventLoopState) -> bool {
     !super::route::unproven(eid, state) || state.unicast_arrival == Some(eid)
 }
 
-/// A frame held for a lane peer is the reason to open its session: the peer has no IP path, and
-/// a send could not dial it without one. So is a frame held for a pair that lost its direct path
-/// and reads as the relay. Call this when a send failed with [`SendError::Held`]; any other error,
-/// and a peer that has an IP path and no relay reading, change nothing.
-pub(crate) fn note_held(state: &mut EventLoopState, error: &SendError) {
-    let SendError::Held { eid } = error else {
-        return;
-    };
-    want_lane_if_needed(state, *eid);
-}
-
-/// The same reason as [`note_held`], for a frame that is not held: a directed frame to a peer
-/// whose direct path is not proven yet, on a mesh where the relay is lookup only. The send dials
+/// A directed frame to a peer whose direct path is not proven yet, on a mesh where the relay is
+/// lookup only, is a reason to open its session. This covers a pair that a probe stored as
+/// relay-only too: the state refuses nothing, and the send asks. The send dials
 /// the peer and waits for a direct path. A peer that has no IP path, or that turns out relay-only,
 /// needs a lane session, so it is asked now and not on the next retry pass. Returns whether the
 /// frame is such a frame, and the peer is a candidate for the offer.
@@ -336,7 +319,7 @@ pub(crate) fn lane_for(key: &AuthorKey, state: &EventLoopState) -> Lane {
     let Some(eid) = super::route::directed_endpoint(key, state) else {
         return Lane::Unreachable;
     };
-    if super::route::held(eid, state) {
+    if super::route::relay_only(eid, state) {
         return Lane::RelayOnly;
     }
     if directly_meshed(key, state) {

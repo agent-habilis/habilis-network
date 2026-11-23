@@ -17,10 +17,6 @@ pub(super) enum Route {
     /// connection uses a direct path when one exists, else the registered
     /// multihop transport — the send decision doesn't distinguish.
     Unicast(EndpointId),
-    /// Directed to a known endpoint whose only path a probe proved to be the relay, on a mesh
-    /// where the relay carries no payload: refused until a direct path is proven, never sent
-    /// relayed. The caller retries the send.
-    Held(EndpointId),
     /// Directed with no known endpoint: an error, never gossip.
     Undeliverable,
 }
@@ -32,11 +28,10 @@ pub(super) fn route(message: &Verified, state: &EventLoopState) -> Route {
     route_to_key(key, state)
 }
 
-/// The directed rules for a frame that goes to `key` alone: unicast to its endpoint, held for a
-/// direct path, or undeliverable. It never gives [`Route::Broadcast`].
+/// The directed rules for a frame that goes to `key` alone: unicast to its endpoint, or
+/// undeliverable. It never gives [`Route::Broadcast`].
 pub(super) fn route_to_key(key: &AuthorKey, state: &EventLoopState) -> Route {
     match directed_endpoint(key, state) {
-        Some(eid) if held(eid, state) => Route::Held(eid),
         Some(eid) => Route::Unicast(eid),
         None => Route::Undeliverable,
     }
@@ -50,13 +45,10 @@ pub(super) fn unproven(eid: EndpointId, state: &EventLoopState) -> bool {
     !state.relay_transport.relay_allowed() && state.direct.get(&eid) != Some(&DirectState::Direct)
 }
 
-/// Whether a directed frame to `eid` is refused right now: the relay is lookup
-/// only and a probe proved that the pair has no direct path. A pair that no probe has read, or
-/// whose probe is in flight, is not held: the send dials it and waits for a direct path within
-/// the path-select budget, and the live path of the connection refuses a payload that would go
-/// out on the relay. The state read here lags the connection, so it must not refuse on its own
-/// what the connection has not shown.
-pub(super) fn held(eid: EndpointId, state: &EventLoopState) -> bool {
+/// Whether a probe stored the pair as relay-only on a mesh whose relay is lookup only. It labels
+/// the roster column ([`super::lane_for`]) and refuses nothing: the state lags the connection, so
+/// the live path of the connection decides what may go out.
+pub(super) fn relay_only(eid: EndpointId, state: &EventLoopState) -> bool {
     !state.relay_transport.relay_allowed()
         && state.direct.get(&eid) == Some(&DirectState::RelayOnly)
 }

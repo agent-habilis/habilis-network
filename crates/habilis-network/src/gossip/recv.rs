@@ -2714,22 +2714,14 @@ mod first_contact_tests {
             )
             .sign(&Identity::generate());
 
-            let refused = ops::send_app(&mut state, &context, frame).await;
-            let Err(error) = &refused else {
-                panic!("the send to a held peer was not refused: {refused:?}");
-            };
+            let sent = ops::send_app(&mut state, &context, frame).await;
             assert!(
-                matches!(error, transport::SendError::Held { .. }),
-                "the refusal is not Held: {error}"
-            );
-            assert!(
-                error.to_string().contains("a probe found only the relay")
-                    && error.to_string().contains("retry"),
-                "the refusal does not tell the caller to retry: {error}"
+                matches!(sent, Ok(transport::Delivered::Pending(_))),
+                "the send to a relay-only peer did not start: {sent:?}"
             );
             assert!(
                 state.lane_session_wanted(eid, clock::Instant::now()),
-                "the refused send did not ask for the lane session"
+                "the send did not ask for the lane session"
             );
             assert!(
                 state.pending_outbound.is_empty(),
@@ -2782,10 +2774,10 @@ mod first_contact_tests {
             );
 
             state.direct.insert(eid, DirectState::RelayOnly);
-            let held = ops::send_app(&mut state, &context, frame()).await;
+            let again = ops::send_app(&mut state, &context, frame()).await;
             assert!(
-                matches!(held, Err(transport::SendError::Held { .. })),
-                "a pair that a probe proved relay-only was not held: {held:?}"
+                matches!(again, Ok(transport::Delivered::Pending(_))),
+                "a pair that a probe proved relay-only was not started: {again:?}"
             );
 
             let broadcast = Message::new_app(
@@ -2844,8 +2836,8 @@ mod first_contact_tests {
                 let sent = ops::send_app(&mut state, &context, frame).await;
 
                 assert!(
-                    !matches!(sent, Err(transport::SendError::Held { .. })),
-                    "the send to a pair on a multihop route was held: {sent:?}"
+                    sent.is_ok(),
+                    "the send to a pair on a multihop route was refused: {sent:?}"
                 );
                 assert_eq!(
                     state.direct.get(&eid),

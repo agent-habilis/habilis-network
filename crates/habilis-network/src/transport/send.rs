@@ -12,7 +12,7 @@ mod route;
 #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
 pub(crate) use deliver::resolve;
 pub(crate) use deliver::{
-    can_unicast, lane_for, note_held, note_unproven, send_best_effort, send_dialing_back,
+    can_unicast, lane_for, note_unproven, send_best_effort, send_dialing_back,
 };
 pub use deliver::{deliver, deliver_in_background, deliver_to, deliver_to_in_background};
 pub(crate) use route::directed_endpoint;
@@ -38,8 +38,7 @@ mod tests {
     use iroh::EndpointId;
 
     use super::{
-        Lane, Route, SendError, can_unicast, deliver, lane_for, note_held, note_unproven, resolve,
-        route,
+        Lane, Route, SendError, can_unicast, deliver, lane_for, note_unproven, resolve, route,
     };
     use crate::daemon::state::EventLoopState;
     use crate::protocol::messages::{AppFrameParams, Verified};
@@ -59,7 +58,7 @@ mod tests {
     use iroh_gossip::net::Gossip;
     use iroh_gossip::proto;
     use iroh_relay::server::Server;
-    use std::net::{UdpSocket, UdpSocket as std_UdpSocket};
+    use std::net::{SocketAddr, UdpSocket, UdpSocket as std_UdpSocket};
     use std::time::{Duration as std_Duration, Instant as std_Instant};
     use tokio::sync::mpsc;
     use tokio::{task, time as tokio_time};
@@ -138,13 +137,16 @@ mod tests {
         let now = clock::Instant::now();
         assert!(!state.lane_session_wanted(bob, now), "nothing is held yet");
 
-        let error = resolve(
-            &directed_msg(),
-            directed_msg().serialize().expect("serialize"),
-            &state,
-        )
-        .expect_err("a lookup-only relay holds the frame");
-        note_held(&mut state, &error);
+        assert!(
+            resolve(
+                &directed_msg(),
+                directed_msg().serialize().expect("serialize"),
+                &state,
+            )
+            .is_ok(),
+            "the stored state refused the send"
+        );
+        note_unproven(&mut state, &directed_msg());
 
         assert!(state.lane_session_wanted(bob, now), "the held frame asks");
     }
@@ -172,13 +174,16 @@ mod tests {
         state.retain_refused_endpoint(second, lane(second_endpoint));
         state.direct.insert(second_endpoint, DirectState::RelayOnly);
 
-        let error = resolve(
-            &directed_msg_to(second),
-            directed_msg_to(second).serialize().expect("serialize"),
-            &state,
-        )
-        .expect_err("a lookup-only relay holds the frame");
-        note_held(&mut state, &error);
+        assert!(
+            resolve(
+                &directed_msg_to(second),
+                directed_msg_to(second).serialize().expect("serialize"),
+                &state,
+            )
+            .is_ok(),
+            "the stored state refused the send"
+        );
+        note_unproven(&mut state, &directed_msg_to(second));
 
         assert!(
             state.lane_session_wanted(second_endpoint, clock::Instant::now()),
@@ -201,13 +206,16 @@ mod tests {
         );
         state.local_udp_transport = UdpTransport::Present;
 
-        let error = resolve(
-            &directed_msg(),
-            directed_msg().serialize().expect("serialize"),
-            &state,
-        )
-        .expect_err("a lookup-only relay holds the frame");
-        note_held(&mut state, &error);
+        assert!(
+            resolve(
+                &directed_msg(),
+                directed_msg().serialize().expect("serialize"),
+                &state,
+            )
+            .is_ok(),
+            "the stored state refused the send"
+        );
+        note_unproven(&mut state, &directed_msg());
 
         assert!(
             !state.lane_session_wanted(bob, clock::Instant::now()),
@@ -235,13 +243,16 @@ mod tests {
         state.direct.insert(bob, DirectState::RelayOnly);
         state.path_kinds.insert(bob, PathKind::Relay);
 
-        let error = resolve(
-            &directed_msg(),
-            directed_msg().serialize().expect("serialize"),
-            &state,
-        )
-        .expect_err("a lookup-only relay holds the frame");
-        note_held(&mut state, &error);
+        assert!(
+            resolve(
+                &directed_msg(),
+                directed_msg().serialize().expect("serialize"),
+                &state,
+            )
+            .is_ok(),
+            "the stored state refused the send"
+        );
+        note_unproven(&mut state, &directed_msg());
 
         assert!(
             state.lane_session_wanted(bob, clock::Instant::now()),
@@ -624,6 +635,74 @@ mod tests {
         );
         let pool = transport::UnicastPool::new(client.clone(), false);
         (pool, client, server.id(), received, router, relay)
+    }
+
+    /// **A stored `RelayOnly` does not refuse a send that the live connection can carry.**
+    ///
+    /// The state of a pair lags the connection, and the connection has the last word on the path
+    /// of a payload (`payload_path`). Here the pair is stored as relay-only while the connection to
+    /// the peer is direct on loopback, as in the moment after a pair climbs off the relay and
+    /// before its watcher reports. The send must go out and be delivered. No sleep and no race
+    /// stands in the test: the stored value is set by hand and the connection is live.
+    #[test]
+    fn a_directed_send_to_a_stored_relay_only_pair_on_a_direct_connection_is_delivered() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (frames, mut received) = mpsc::unbounded_channel();
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind the server on loopback");
+                let router = Router::builder(server.clone())
+                    .accept(transport::UNICAST_ALPN, Collect(frames))
+                    .spawn();
+                let port = server
+                    .bound_sockets()
+                    .first()
+                    .map(SocketAddr::port)
+                    .expect("the server has a bound socket");
+                let server_addr = iroh::EndpointAddr::from_parts(
+                    server.id(),
+                    [iroh::TransportAddr::Ip(SocketAddr::from((
+                        [127, 0, 0, 1],
+                        port,
+                    )))],
+                );
+                let (client, sender) = loopback_node().await;
+                let mut state = state_with_pool(&client, server_addr);
+                state.relay_transport = PayloadPath::DirectOnly;
+                state.direct.insert(server.id(), DirectState::RelayOnly);
+
+                let message = directed_msg();
+                let bytes = message.serialize().expect("serialize");
+                let delivered = deliver(&message, bytes, &state, &sender)
+                    .await
+                    .expect("the stored state refused a send that the live connection carries");
+                let Delivered::Pending(handle) = delivered else {
+                    panic!("a send to a cold peer runs on a task of its own");
+                };
+                let verdict = tokio_time::timeout(std_Duration::from_secs(10), handle)
+                    .await
+                    .expect("the send ends in time")
+                    .expect("the task reports");
+                assert!(
+                    matches!(verdict, SendVerdict::Delivered),
+                    "the verdict is delivered: {verdict}"
+                );
+                assert!(
+                    tokio_time::timeout(std_Duration::from_secs(5), received.recv())
+                        .await
+                        .is_ok_and(|frame| frame.is_some()),
+                    "the server read the frame"
+                );
+
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
     }
 
     /// **A send on a warm connection that reads relay waits one path budget, then fails.**
@@ -1092,7 +1171,7 @@ mod tests {
         for (reading, expected) in [
             (None, Route::Unicast(bob)),
             (Some(DirectState::Pending), Route::Unicast(bob)),
-            (Some(DirectState::RelayOnly), Route::Held(bob)),
+            (Some(DirectState::RelayOnly), Route::Unicast(bob)),
             (Some(DirectState::Direct), Route::Unicast(bob)),
         ] {
             match reading {
@@ -1109,6 +1188,37 @@ mod tests {
                 "the route for the reading {reading:?}"
             );
         }
+    }
+
+    /// A lane peer that a probe stored as relay-only is sent to, and the send asks for its lane
+    /// session the same way as for an unread peer. The refusal that used to carry this ask is gone,
+    /// so the ask must come from the send path itself.
+    #[test]
+    fn a_send_to_a_stored_relay_only_lane_peer_asks_for_its_session_and_is_not_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, bob) = state_knowing_a_lane_bob();
+        state.relay_transport = PayloadPath::DirectOnly;
+        state.direct.insert(bob, DirectState::RelayOnly);
+        let now = clock::Instant::now();
+        assert!(!state.lane_session_wanted(bob, now), "nothing asked yet");
+
+        assert!(
+            note_unproven(&mut state, &directed_msg()),
+            "a stored relay-only peer is unproven"
+        );
+        assert!(
+            state.lane_session_wanted(bob, now),
+            "the send path did not ask for the lane session"
+        );
+        assert!(
+            resolve(
+                &directed_msg(),
+                directed_msg().serialize().expect("serialize"),
+                &state,
+            )
+            .is_ok(),
+            "the stored state refused the send"
+        );
     }
 
     /// A send that is not held still asks for the lane session of an unproven peer that needs
@@ -1179,8 +1289,8 @@ mod tests {
         let frame = directed_msg();
         assert_eq!(
             route(&frame, &state),
-            Route::Held(bob),
-            "the premise: before the proof the send is held"
+            Route::Unicast(bob),
+            "the premise: before the proof the send is not refused"
         );
 
         assert_eq!(
@@ -1228,8 +1338,8 @@ mod tests {
         );
         assert_eq!(
             route(&frame, &state),
-            Route::Held(bob),
-            "a watched peer stays held until its watcher proves it"
+            Route::Unicast(bob),
+            "the stored state of a watched peer refuses nothing: the live connection decides"
         );
     }
 
@@ -1437,11 +1547,11 @@ mod tests {
         state.direct.insert(bob, DirectState::RelayOnly);
         let message = own_broadcast(&state);
 
-        let error = resolved_to(&test_key("bob"), &message, &state).expect_err("a held pair");
+        let resolved = resolved_to(&test_key("bob"), &message, &state);
 
         assert!(
-            matches!(error, SendError::Held { eid } if eid == bob),
-            "the directed rules hold the frame for a direct path: {error:?}"
+            matches!(resolved, Ok((eid, _)) if eid == bob),
+            "an own frame to a relay-only pair is sent: the live connection decides"
         );
     }
 }

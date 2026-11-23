@@ -394,7 +394,7 @@ An eviction closes the unicast connections of the victim with the close code `EV
 
 ### Lane peers
 
-A pair that needs the lane has no direct path without a session. On a mesh whose relay is lookup only, a frame to such a peer is held. The held frame marks the peer wanted for 60 s, and the wanted peer is offered a session. When the session attaches, the held frames are flushed. If the higher id of the pair holds the frame, it offers at once. When both ids offer together, the lower id wins: the higher id gives its offer up and answers. An idle lane peer gets no session and loses an unused one at the backstop. On a mesh whose relay carries payload, the send goes over the relay and nothing is held.
+A pair that needs the lane has no direct path without a session. On a mesh whose relay is lookup only, a send to such a peer waits for a direct path. The send marks the peer wanted for 60 s, and the wanted peer is offered a session. When the session attaches, the held frames are flushed. If the higher id of the pair holds the frame, it offers at once. When both ids offer together, the lower id wins: the higher id gives its offer up and answers. An idle lane peer gets no session and loses an unused one at the backstop. On a mesh whose relay carries payload, the send goes over the relay and nothing is held.
 
 ### The underlay leg
 

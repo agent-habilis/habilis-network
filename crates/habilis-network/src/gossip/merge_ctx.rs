@@ -62,11 +62,10 @@ use tokio::sync::oneshot;
 /// failure, and errors if the unmeshed buffer is full. A directed frame names its recipient by
 /// author key, so two live peers that use one nickname are two addressees, and neither send is
 /// refused. A caller that holds only a nickname asks `EventLoopState::key_of` first. A directed
-/// frame does not wait for the gossip overlay: an unmeshed node sends it too. A node refuses a
-/// frame to a peer whose probe proved a relay-only path, on a mesh where the relay is lookup only
-/// ([`crate::transport::SendError::Held`]). A peer with no proven path yet is dialed, and the send
-/// waits for a direct path on a task of its own, within the path-select budget. The caller retries
-/// a refused frame, and nothing is buffered.
+/// frame does not wait for the gossip overlay: an unmeshed node sends it too. A peer with no
+/// proven path, or a stored relay-only path, is dialed on a mesh where the relay is lookup only,
+/// and the send waits for a direct path on a task of its own, within the path-select budget. A
+/// peer with only the relay ends as a refusal that names the relay, and nothing is buffered.
 ///
 /// # Examples
 ///
@@ -118,15 +117,9 @@ pub async fn send_app(
         if let Some(peer) = probe::prove_addressee(state, &frame) {
             probe::open_lane_after_proof(state, context, peer);
         } else if transport::note_unproven(state, &frame) {
-            offer_for_held(state, context, &frame);
+            offer_for_parked(state, context, &frame);
         }
-        let outcome = transport::deliver(&frame, bytes, state, context.sender).await;
-        if let Err(error @ transport::SendError::Held { .. }) = &outcome {
-            // The caller retries; the lane session is asked now, so the retry can find it.
-            transport::note_held(state, error);
-            offer_for_held(state, context, &frame);
-        }
-        return outcome;
+        return transport::deliver(&frame, bytes, state, context.sender).await;
     }
     // An unmeshed node buffers a broadcast frame for the meshed edge.
     if state.pending_outbound.push((frame.clone(), bytes)) {
@@ -833,10 +826,10 @@ pub(super) async fn announce_arrival(state: &mut EventLoopState, context: &Handl
     broadcast_peer_info(state, context).await;
 }
 
-/// Offer the session of the peer now, if a held frame asked for it. Without this the offer waits
+/// Offer the session of the peer now, if a parked frame asked for it. Without this the offer waits
 /// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
-/// or a pair with an IP path that reads as the relay (`note_held` marks both).
-fn offer_for_held(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
+/// or a pair with an IP path that reads as the relay (`note_unproven` marks both).
+fn offer_for_parked(state: &mut EventLoopState, context: &HandlerCtx<'_>, frame: &Verified) {
     let Some(key) = sole_addressee(&frame.kind) else {
         return;
     };
@@ -1369,9 +1362,9 @@ mod tests {
                 );
 
                 state.want_lane_session(node.bob, clock::Instant::now());
-                super::offer_for_held(&mut state, &context, &frame);
+                super::offer_for_parked(&mut state, &context, &frame);
                 assert_eq!(state.webrtc_admission.in_flight(), 1, "the offer is out");
-                super::offer_for_held(&mut state, &context, &frame);
+                super::offer_for_parked(&mut state, &context, &frame);
                 assert_eq!(state.webrtc_admission.in_flight(), 1, "not a second round");
 
                 state.webrtc_admission.close();
@@ -1391,7 +1384,7 @@ mod tests {
                 let node = testing::LaneNode::start().await;
                 let context = node.context();
                 let mut state = node.state();
-                super::offer_for_held(&mut state, &context, &node.frame_to_bob());
+                super::offer_for_parked(&mut state, &context, &node.frame_to_bob());
                 assert_eq!(
                     state.webrtc_admission.in_flight(),
                     0,
