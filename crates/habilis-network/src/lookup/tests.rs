@@ -915,6 +915,31 @@ fn a_node_that_asks_for_a_loopback_bind_listens_on_this_host_only() {
     });
 }
 
+/// **The underlay of a node that binds loopback binds loopback too.** A node has 2 endpoints, the
+/// application endpoint and its underlay, and the second one took no bind: it listened on every
+/// interface of the host, and so did the sockets that a subnet bind added to it.
+#[test]
+#[cfg(all(feature = "multihop", feature = "iroh-test-utils"))]
+fn the_underlay_of_a_node_that_binds_loopback_binds_loopback_too() {
+    use super::peer::underlay_options;
+    use crate::lookup::Bind;
+
+    let node = TransportOpts::default().bind(Bind::Loopback);
+    assert_eq!(
+        underlay_options(node).bind,
+        Bind::Loopback,
+        "the underlay of a loopback node listens beyond the host"
+    );
+    let without_udp = TransportOpts {
+        udp: false,
+        ..TransportOpts::default()
+    };
+    assert!(
+        !underlay_options(without_udp).udp,
+        "the underlay keeps the udp of the node"
+    );
+}
+
 #[test]
 fn a_holder_of_our_identity_that_serves_no_alpn_yet_is_not_a_foreign_mesh() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {

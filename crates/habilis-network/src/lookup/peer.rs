@@ -275,6 +275,20 @@ pub(crate) fn build_webrtc_handle(
     habilis_network_iroh_webrtc_transport::WebRtcHandle::hub(local)
 }
 
+/// The options of the underlay endpoint of a node: the `udp` of the node, and where the node
+/// listens. The underlay is an endpoint of the node, so a node that listens on this host only
+/// listens on this host only with its underlay too.
+#[cfg(feature = "multihop")]
+pub(crate) fn underlay_options(options: super::TransportOpts) -> super::TransportOpts {
+    let underlay = super::TransportOpts {
+        udp: options.udp,
+        ..super::TransportOpts::default()
+    };
+    #[cfg(feature = "iroh-test-utils")]
+    let underlay = underlay.bind(options.bind);
+    underlay
+}
+
 /// A fresh random identity. Every endpoint of one peer is built from the one
 /// key this returns, so that a peer is one peer on every path.
 fn mint_secret() -> SecretKey {
@@ -375,10 +389,7 @@ pub(crate) async fn build_peer_multihop_with(
             admission: admission_leg,
             // The underlay has IP sockets only when the node does: a node run without `udp`
             // has no IP on any of its endpoints, and its underlay rides WebRTC and the relay.
-            options: super::TransportOpts {
-                udp: options.udp,
-                ..super::TransportOpts::default()
-            },
+            options: underlay_options(options),
             ..super::TransportHandles::default()
         },
     )
