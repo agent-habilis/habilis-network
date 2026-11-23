@@ -21,7 +21,8 @@ use super::membership_app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::beacon;
 #[cfg(feature = "iroh-test-utils")]
-use crate::lookup::{Bind, TransportOpts};
+use crate::lookup::Bind;
+use crate::lookup::TransportOpts;
 use n0_future::time;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use std::sync::atomic;
@@ -291,9 +292,15 @@ pub async fn join<S: NodeSink + 'static>(
     }
 
     let (inbound_tx, inbound) = mpsc::channel(INBOUND_CAP);
-    let params = SetupParams::new(author, sink).max_connections(options.max_connections);
+    // One way to build the transports of a node, with and without the test feature: the default
+    // options, and the bind of a test where the feature exists. A later option of `JoinOptions`
+    // that sets the transports goes here, in this one place, for both builds.
+    let transports = TransportOpts::default();
     #[cfg(feature = "iroh-test-utils")]
-    let params = params.transports(TransportOpts::default().bind(options.bind));
+    let transports = transports.bind(options.bind);
+    let params = SetupParams::new(author, sink)
+        .max_connections(options.max_connections)
+        .transports(transports);
     let config = setup_mesh(kind, params).await?;
 
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]

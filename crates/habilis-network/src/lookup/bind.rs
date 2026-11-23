@@ -5,8 +5,8 @@
 ///
 /// A test that runs on one machine has no use for the network, and an endpoint that listens on it is
 /// reached by any host on it: a handshake from another machine can land in a test and fail it. A node
-/// that is [`Bind::Loopback`] listens on `127.0.0.1` only and advertises that one address, whichever
-/// lookups its mesh names.
+/// that is [`Bind::Loopback`] listens on the loopback interfaces only, `127.0.0.1` and `[::1]`, and
+/// advertises those addresses, whichever lookups its mesh names.
 ///
 /// # Examples
 ///
@@ -24,6 +24,6 @@ pub enum Bind {
     /// Every interface of the machine.
     #[default]
     AllInterfaces,
-    /// The loopback interface only.
+    /// The loopback interfaces only: `127.0.0.1` and `[::1]`.
     Loopback,
 }
