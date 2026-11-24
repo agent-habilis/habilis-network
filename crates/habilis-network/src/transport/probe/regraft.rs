@@ -102,6 +102,47 @@ pub(crate) fn isolated_candidate(
     next_fill(state, max_connections, rendezvous_id, now, pick)
 }
 
+/// Why `address` is, or is not, a candidate of a fill or a retry pass, for the log: the first
+/// filter that drops it, in the order of the passes, or `candidate`.
+fn candidate_reason(
+    state: &EventLoopState,
+    address: &iroh::EndpointAddr,
+    rendezvous_id: EndpointId,
+    now: Instant,
+) -> &'static str {
+    if address.id == rendezvous_id {
+        "rendezvous"
+    } else if state.linked_endpoints.contains(&address.id) {
+        "linked"
+    } else if state.direct.get(&address.id) == Some(&DirectState::Pending) {
+        "pending"
+    } else if state.relink_on_cooldown(address.id, now) {
+        "cooldown"
+    } else if state.graft_blocked(address.id, now) {
+        "blocked"
+    } else {
+        "candidate"
+    }
+}
+
+/// The reason of each known member, as `short id=reason` words, for a debug line that names the
+/// filter that left a node with nobody to ask.
+pub(crate) fn candidate_reasons(
+    state: &EventLoopState,
+    rendezvous_id: EndpointId,
+    now: Instant,
+) -> String {
+    let words: Vec<String> = state
+        .member_addresses()
+        .iter()
+        .map(|address| {
+            let reason = candidate_reason(state, address, rendezvous_id, now);
+            format!("{}={reason}", address.id.fmt_short())
+        })
+        .collect();
+    words.join(" ")
+}
+
 /// A node that lost every link asks one other known peer per reclaim tick (400 ms) while the
 /// fast window is open, with a low priority request that evicts nobody. The lost peers are
 /// asked by the regraft, and they are full; the heal tick, 15 s later, was the first attempt to
@@ -116,6 +157,14 @@ pub(crate) async fn refill_isolated(state: &mut EventLoopState, context: &Handle
         now,
         pick,
     ) else {
+        if state.isolated_refill_due(now) {
+            tracing::debug!(
+                target: transport::LOG_TARGET,
+                local = %context.endpoint.id().fmt_short(),
+                members = %candidate_reasons(state, context.rendezvous_id, now),
+                "no link left: nobody to ask"
+            );
+        }
         return;
     };
     tracing::info!(target: transport::LOG_TARGET, peer = %address.id, "no link left: asking another known peer");

@@ -622,6 +622,12 @@ impl UnicastPool {
                     return;
                 };
                 let now = PoolInstant::now();
+                let local: String = inner
+                    .endpoint
+                    .as_ref()
+                    .map_or_else(String::new, |endpoint| {
+                        endpoint.id().fmt_short().to_string()
+                    });
                 inner.conns.lock().await.retain(|eid, pooled| {
                     let idle = match pooled.hold {
                         Hold::Probed(ended) => {
@@ -641,7 +647,7 @@ impl UnicastPool {
                         }
                     };
                     if idle {
-                        tracing::debug!(target: LOG_TARGET, %eid, "closing an idle pooled unicast connection");
+                        tracing::debug!(target: LOG_TARGET, %local, %eid, "closing an idle pooled unicast connection");
                         pooled.connection.close(IDLE.into(), b"idle");
                     }
                     !idle
@@ -1185,6 +1191,14 @@ impl UnicastPool {
             .admission
             .get()
             .is_none_or(|admission| admission.has_room(eid))
+    }
+
+    /// The peers that hold a unit now, for a debug line.
+    pub(crate) fn unit_holders(&self) -> String {
+        self.inner
+            .admission
+            .get()
+            .map_or_else(String::new, SignalAdmission::holders)
     }
 
     /// Take a unit for a dial that no send asked for, or refuse it when the node is at its

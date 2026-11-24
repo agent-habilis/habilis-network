@@ -531,6 +531,23 @@ impl SignalAdmission {
         self.lock().ceiling.set_rendezvous(peer);
     }
 
+    /// The endpoint that this table serves, once `set_local` named it.
+    pub(crate) fn local(&self) -> Option<EndpointId> {
+        self.lock().local
+    }
+
+    /// The short ids of the peers that hold a connection or a session, for a debug line.
+    pub(crate) fn holders(&self) -> String {
+        let inner = self.lock();
+        let quic: Vec<EndpointId> = inner.ceiling.quic_peers();
+        let session: Vec<EndpointId> = inner.ceiling.session_peers();
+        format!(
+            "quic=[{}] session=[{}]",
+            short_list(&quic),
+            short_list(&session)
+        )
+    }
+
     /// The endpoint that this table serves. The pin of a peer reaches its path selector.
     pub(crate) fn set_local(&self, local: EndpointId) {
         self.lock().local = Some(local);
@@ -742,4 +759,13 @@ impl SignalAdmission {
     pub(crate) fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().expect("signal admission poisoned")
     }
+}
+
+/// The short ids of `peers`, joined by commas.
+fn short_list(peers: &[EndpointId]) -> String {
+    let mut shorts: Vec<String> = Vec::new();
+    for peer in peers {
+        shorts.push(peer.fmt_short().to_string());
+    }
+    shorts.join(",")
 }

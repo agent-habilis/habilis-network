@@ -24,6 +24,7 @@ use crate::util::consts::MAX_MESSAGE_SIZE;
 use crate::util::tuning::DIRECT_IDLE_BACKSTOP;
 
 use super::acknowledgement::Acknowledgement;
+use super::admission::SignalAdmission;
 use super::payload_path::{PROBE_DEADLINE, refuse_unless_direct};
 use super::webrtc::close_code::{IDLE, UNICAST_RELAY_REFUSED};
 use super::{LOG_TARGET, PayloadPath};
@@ -78,12 +79,12 @@ pub(crate) struct UnicastAcceptor {
     idle: Duration,
     /// The table whose ceiling the accepted connections count against: a stream that is being
     /// read marks its connection busy.
-    admission: Option<super::admission::SignalAdmission>,
+    admission: Option<SignalAdmission>,
 }
 
 impl UnicastAcceptor {
     /// Report the streams of this acceptor to `admission`.
-    pub(crate) fn admission(mut self, admission: super::admission::SignalAdmission) -> Self {
+    pub(crate) fn admission(mut self, admission: SignalAdmission) -> Self {
         self.admission = Some(admission);
         self
     }
@@ -209,6 +210,15 @@ impl ProtocolHandler for UnicastAcceptor {
         )
         .await
         {
+            let local: Option<iroh::EndpointId> =
+                self.admission.as_ref().and_then(SignalAdmission::local);
+            let local_short: Option<String> = local.map(|id| id.fmt_short().to_string());
+            tracing::debug!(
+                target: LOG_TARGET,
+                local = ?local_short,
+                remote = %connection.remote_id().fmt_short(),
+                "unicast connection refused: no direct path"
+            );
             return Ok(());
         }
         // Each accepted bidirectional stream carries exactly one frame, and its two steps go back
