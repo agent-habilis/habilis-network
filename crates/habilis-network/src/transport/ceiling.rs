@@ -1254,6 +1254,124 @@ mod tests {
         );
     }
 
+    /// A node at its ceiling holds a connection that it dialed through multihop. A unit frees up, and
+    /// a send finds the connection unusable for a moment, so the dial of the peer is planned again
+    /// with a route. The connection is open and it is the pin: the plan changes nothing. Before the
+    /// fix the plan dropped the pin, reserved the free unit and went direct, and the open
+    /// connection stayed with a pool that said pinned and a ledger that said not.
+    #[test]
+    fn a_replan_with_a_route_keeps_the_pin_of_a_peer_whose_pinned_connection_is_open() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        let first = testing::endpoint_id(1);
+        ceiling.register_quic(first, start);
+        ceiling.register_quic(testing::endpoint_id(2), at(start, 1));
+        let peer = testing::endpoint_id(3);
+        assert_eq!(
+            ceiling.plan_dial(peer, true),
+            DialPlan::Multihop,
+            "the node is at its ceiling, so the dial rides multihop"
+        );
+        ceiling.register_quic(peer, at(start, 2));
+        ceiling.unregister_quic(first);
+        assert_eq!(ceiling.units(), 1, "a unit is free");
+
+        let plan = ceiling.plan_dial(peer, true);
+
+        assert_eq!(
+            plan,
+            DialPlan::Multihop,
+            "the pinned connection is open: the peer stays on multihop"
+        );
+        assert!(ceiling.pinned(peer), "the pin stays");
+        assert!(ceiling.is_extra(peer), "the connection takes no unit");
+        assert!(
+            !ceiling.reserved.contains(&peer),
+            "no unit is reserved for the peer"
+        );
+    }
+
+    /// The same replan with no route. The connection is still the pin: the watcher closes a pinned
+    /// connection that has no route (`close_pinned_without_route`, which reads
+    /// `pinned_connected`), and it cannot if the plan has dropped the pin.
+    #[test]
+    fn a_replan_with_no_route_leaves_the_pinned_connection_for_the_watcher_to_close() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        let first = testing::endpoint_id(1);
+        ceiling.register_quic(first, start);
+        ceiling.register_quic(testing::endpoint_id(2), at(start, 1));
+        let peer = testing::endpoint_id(3);
+        assert_eq!(
+            ceiling.plan_dial(peer, true),
+            DialPlan::Multihop,
+            "the node is at its ceiling, so the dial rides multihop"
+        );
+        ceiling.register_quic(peer, at(start, 2));
+        ceiling.unregister_quic(first);
+
+        let plan = ceiling.plan_dial(peer, false);
+
+        assert_eq!(
+            plan,
+            DialPlan::Multihop,
+            "the open connection is reused: the plan does not go direct"
+        );
+        assert_eq!(
+            ceiling.pinned_connected(),
+            vec![peer],
+            "the watcher still finds the pinned connection, and closes it if no route comes back"
+        );
+        assert!(
+            !ceiling.reserved.contains(&peer),
+            "no unit is reserved for the peer"
+        );
+    }
+
+    /// The loss of the pin does not depend on how many units are free at the replan.
+    #[test]
+    fn a_replan_keeps_the_pin_of_an_open_pinned_connection_whatever_the_free_units() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let holders = [testing::endpoint_id(1), testing::endpoint_id(2)];
+        let peer = testing::endpoint_id(3);
+        for free in 0..=holders.len() {
+            let mut ceiling = Ceiling::new(2);
+            for holder in holders {
+                ceiling.register_quic(holder, start);
+            }
+            assert_eq!(
+                ceiling.plan_dial(peer, true),
+                DialPlan::Multihop,
+                "the node is at its ceiling, so the dial rides multihop"
+            );
+            ceiling.register_quic(peer, at(start, 5));
+            let freed = holders.iter().take(free);
+            for holder in freed {
+                ceiling.unregister_quic(*holder);
+            }
+            assert_eq!(
+                ceiling.units(),
+                holders.len() - free,
+                "{free} units are free"
+            );
+
+            let plan = ceiling.plan_dial(peer, true);
+
+            assert_eq!(
+                plan,
+                DialPlan::Multihop,
+                "{free} free units: the open pinned connection stays on multihop"
+            );
+            assert!(
+                ceiling.pinned(peer) && ceiling.is_extra(peer),
+                "{free} free units: the pin and the extra stay"
+            );
+        }
+    }
+
     #[test]
     fn several_new_neighbors_name_each_victim_once() {
         let _guard = ::habilis_network_test_tracing::init();
