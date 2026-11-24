@@ -178,6 +178,7 @@ async fn run_checked<Driver: NodeDriver>(
         runtime.live_count.take(),
         &rendezvous.rendezvous_params,
     );
+    let relay_refused_rx = wire_relay_refused(&state);
 
     let (rendezvous_state, rival_probe, rung_reports) = start_rendezvous(
         &mut state,
@@ -279,6 +280,7 @@ async fn run_checked<Driver: NodeDriver>(
         direct_rx,
         path_rx,
         send_started_rx,
+        relay_refused_rx,
         owned,
         owned_files,
     }))
@@ -505,6 +507,15 @@ fn initial_state(
         },
         started,
     )
+}
+
+/// The peers that close a gossip dial of ours as relay-only report to the receiver that this
+/// returns, through the sink of the admission table. The channel never closes: the table holds
+/// the sender for the life of the loop.
+fn wire_relay_refused(state: &EventLoopState) -> mpsc::UnboundedReceiver<probe::RelayRefused> {
+    let (sink, refused) = mpsc::unbounded_channel();
+    state.webrtc_admission.set_relay_refused_sink(sink);
+    refused
 }
 
 /// Wires the transports into the state, and returns the receivers of the three channels that
@@ -939,6 +950,8 @@ struct EventLoop<Driver: NodeDriver> {
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
     /// The endpoints of the directed sends that start. Never closes, like `direct_rx`.
     send_started_rx: mpsc::UnboundedReceiver<EndpointId>,
+    /// The peers that closed a gossip dial of ours as relay-only. Never closes, like `direct_rx`.
+    relay_refused_rx: mpsc::UnboundedReceiver<probe::RelayRefused>,
     /// Closed with the rendezvous as the loop ends.
     owned: OwnedEndpoints,
     /// Removed when the loop ends clean.
@@ -997,6 +1010,7 @@ struct Loop<'node, Driver: NodeDriver> {
     direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
     send_started_rx: mpsc::UnboundedReceiver<EndpointId>,
+    relay_refused_rx: mpsc::UnboundedReceiver<probe::RelayRefused>,
     anchors: TickAnchors,
     resubscribe_attempts: u32,
     owned: OwnedEndpoints,
@@ -1204,6 +1218,23 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state.idle.ext.other += 1;
         let context = self.parts.handler_ctx(&self.sender);
         gossip::directed_send_started(&mut self.state, &context, peer);
+    }
+
+    fn relay_refused(&mut self, refused: probe::RelayRefused) {
+        self.state.idle.ext.relay_refused += 1;
+        let local = self.parts.handler_ctx(&self.sender).endpoint.id();
+        let probe::RefusalEffect {
+            outcome,
+            stamp_cleared,
+        } = self.state.note_relay_refused(refused.peer);
+        tracing::debug!(
+            target: transport::LOG_TARGET,
+            local = %local.fmt_short(),
+            peer = %refused.peer.fmt_short(),
+            outcome,
+            stamp_cleared,
+            "a peer closed our gossip dial as relay-only"
+        );
     }
 
     async fn path_change(&mut self, change: probe::PathChange) {
@@ -1667,6 +1698,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         direct_rx,
         path_rx,
         send_started_rx,
+        relay_refused_rx,
         owned,
         owned_files,
     } = loop_state;
@@ -1751,6 +1783,7 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         direct_rx,
         path_rx,
         send_started_rx,
+        relay_refused_rx,
         anchors,
         resubscribe_attempts,
         owned,
@@ -1821,6 +1854,7 @@ async fn run_loop<Driver: NodeDriver>(
             }
             Some(change) = lp.path_rx.recv() => { lp.path_change(change).await; },
             Some(peer) = lp.send_started_rx.recv() => { lp.directed_send_started(peer); },
+            Some(refused) = lp.relay_refused_rx.recv() => { lp.relay_refused(refused); },
             frame = recv_opt(&mut lp.unicast_rx) => match frame {
                 Some(frame) => { lp.unicast(frame).await; },
                 None => { lp.unicast_rx = None; },

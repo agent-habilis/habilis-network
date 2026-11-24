@@ -88,6 +88,7 @@ impl SignalAdmission {
                 we_evicted: ceiling::EvictionBackoff::default(),
                 denied: HashSet::new(),
                 proven_sink: None,
+                relay_refused_sink: None,
                 path_sink: None,
                 gossip: None,
                 closed_on_rung: HashMap::new(),
@@ -697,6 +698,14 @@ impl SignalAdmission {
     /// The event loop's channel for the dialed gossip links that left a direct path.
     pub(crate) fn set_path_sink(&self, sink: mpsc::UnboundedSender<probe::PathChange>) {
         self.lock().path_sink = Some(sink);
+    }
+
+    pub(crate) fn set_relay_refused_sink(&self, sink: mpsc::UnboundedSender<probe::RelayRefused>) {
+        self.lock().relay_refused_sink = Some(sink);
+    }
+
+    pub(crate) fn relay_refused_sink(&self) -> Option<mpsc::UnboundedSender<probe::RelayRefused>> {
+        self.lock().relay_refused_sink.clone()
     }
 
     pub(crate) fn path_sink(&self) -> Option<mpsc::UnboundedSender<probe::PathChange>> {

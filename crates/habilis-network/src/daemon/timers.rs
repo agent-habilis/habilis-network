@@ -133,6 +133,7 @@ pub(crate) async fn tick_state_refresh(
         idle_ext_unicast = ext.unicast,
         idle_ext_chunk = ext.chunk,
         idle_ext_path_rx = ext.path_rx,
+        idle_ext_relay_refused = ext.relay_refused,
         idle_ext_address = ext.address,
         idle_ext_direct_rx = ext.direct_rx,
         idle_ext_rung_change = ext.rung_change,

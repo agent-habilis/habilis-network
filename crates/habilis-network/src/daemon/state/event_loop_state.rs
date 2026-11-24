@@ -655,6 +655,10 @@ pub struct EventLoopState {
     link_cap: Option<usize>,
     /// When a graft last fell back to a `Join` for a starved node.
     pub(crate) join_fallback_at: Option<Instant>,
+    /// The peer that the last starved `Join` went to, kept beside the stamp above: the stamp is
+    /// cleared when that peer closes the dial as relay-only, because a `Join` that reached nobody
+    /// causes no churn and must not cost the node its next one.
+    pub(crate) join_target: Option<EndpointId>,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
     pub(crate) graft_backoff: graft_backoff::GraftBackoff,
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
@@ -1140,6 +1144,7 @@ impl EventLoopState {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             redials: redial::Redials::default(),
             join_fallback_at: None,
+            join_target: None,
             graft_backoff: graft_backoff::GraftBackoff::default(),
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
@@ -1554,8 +1559,49 @@ impl EventLoopState {
         let due = self.starved_join_ready(now);
         if due {
             self.join_fallback_at = Some(now);
+            // The target of the Join before this one does not belong to this stamp.
+            self.join_target = None;
         }
         due
+    }
+
+    /// The `Join` that [`Self::starved_join_due`] stamped goes to `peer`. The stamp and the target
+    /// are written only here and there, in that order, so a target never outlives its stamp: the
+    /// stamp clears the target of the previous `Join` when it is written.
+    pub(crate) fn note_join_target(&mut self, peer: EndpointId) {
+        self.join_target = Some(peer);
+    }
+
+    /// `peer` closed a gossip link that we dialed with the relay-refused code: the pair has no
+    /// direct path now. A peer that reads `Direct` becomes `RelayOnly`, so that the next retry
+    /// probes it and sends it no graft. A peer that is linked now is newer proof than an old close,
+    /// and a peer that is `Pending` or `RelayOnly` already reads as unproven. When `peer` is the
+    /// target of the pending `Join`, that `Join` reached nobody, so its stamp is cleared.
+    pub(crate) fn note_relay_refused(&mut self, peer: EndpointId) -> probe::RefusalEffect {
+        if self.linked_endpoints.contains(&peer) {
+            return probe::RefusalEffect {
+                outcome: "ignored: linked",
+                stamp_cleared: false,
+            };
+        }
+        let outcome = match self.direct.get_mut(&peer) {
+            Some(verdict @ DirectState::Direct) => {
+                *verdict = DirectState::RelayOnly;
+                "demoted"
+            }
+            Some(DirectState::Pending) => "ignored: pending",
+            Some(DirectState::RelayOnly) => "ignored: relay-only",
+            None => "ignored: unknown",
+        };
+        let stamp_cleared = self.join_target == Some(peer);
+        if stamp_cleared {
+            self.join_target = None;
+            self.join_fallback_at = None;
+        }
+        probe::RefusalEffect {
+            outcome,
+            stamp_cleared,
+        }
     }
 
     /// [`Self::starved_join_due`] without the stamp: whether a fallback would be due at `now`.

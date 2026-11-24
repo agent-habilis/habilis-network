@@ -84,6 +84,7 @@ pub(crate) fn graft_request(
             links_short = state.links_short,
             "graft: a starved node asks with a Join"
         );
+        state.note_join_target(peer);
         GraftRequest::Join
     } else if paced && state.graft_backoff.is_blocked(&peer, now) {
         tracing::debug!(target: transport::LOG_TARGET, %peer, "graft skipped: the peer refused lately");

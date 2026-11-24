@@ -38,6 +38,9 @@ pub(crate) struct Inner {
     pub(crate) proven_sink: Option<mpsc::UnboundedSender<probe::DirectOutcome>>,
     /// Where the relay watch of a dialed gossip link reports to the event loop, set with the sink above.
     pub(crate) path_sink: Option<mpsc::UnboundedSender<probe::PathChange>>,
+    /// Where the close of a dialed gossip link by a peer that refuses it as relay-only is reported to
+    /// the event loop, set with the sinks above.
+    pub(crate) relay_refused_sink: Option<mpsc::UnboundedSender<probe::RelayRefused>>,
     /// The gossip transport of the endpoint, when the mesh has `gossip`. The table sees every
     /// connection, so it tells the handle which peers are established and which pairs a higher
     /// rung carries (see [`Inner::sync_gossip`]).

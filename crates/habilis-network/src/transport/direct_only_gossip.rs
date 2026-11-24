@@ -134,9 +134,34 @@ pub(super) fn watch_relay_policy(
     gossip_conn: &Connection,
     path_sink: Option<mpsc::UnboundedSender<super::probe::PathChange>>,
 ) {
+    watch_relay_policy_and_refusal(gossip_conn, path_sink, None);
+}
+
+/// [`watch_relay_policy`] for a link that we dialed: when the peer ends it with the relay-refused
+/// code, the pair has no direct path now, and `refused_sink` tells the loop. The close comes from
+/// `WeakConnectionHandle::closed`, taken while the caller still holds the connection: it gets the
+/// close and its reason even when every handle is dropped before the close, so the report does
+/// not depend on who drops first, and the future keeps no link alive. A close that is not the
+/// peer's own relay-refused close (ours, idle, eviction, shutdown) reports nothing.
+pub(super) fn watch_relay_policy_and_refusal(
+    gossip_conn: &Connection,
+    path_sink: Option<mpsc::UnboundedSender<super::probe::PathChange>>,
+    refused_sink: Option<mpsc::UnboundedSender<super::probe::RelayRefused>>,
+) {
     use futures_util::StreamExt as _;
     let weak = gossip_conn.weak_handle();
     let mut events = gossip_conn.path_events();
+    if let Some(sink) = refused_sink.filter(|_| gossip_conn.side().is_client()) {
+        let peer = gossip_conn.remote_id();
+        let closed = weak.closed();
+        task::spawn(async move {
+            if let Some(closed) = closed.await
+                && super::probe::is_relay_refusal(&closed.reason)
+            {
+                let _ = sink.send(super::probe::RelayRefused { peer });
+            }
+        });
+    }
     task::spawn(async move {
         let mut on_relay_since: Option<Instant> = None;
         loop {
@@ -205,9 +230,9 @@ mod watcher_tests {
     use crate::lookup;
     #[cfg(feature = "iroh-test-utils")]
     use crate::lookup::test_relay;
+    use crate::transport::probe;
     use iroh::endpoint::presets;
     use std::future::{self, Future};
-    #[cfg(feature = "iroh-test-utils")]
     use tokio::sync::mpsc;
     #[cfg(feature = "iroh-test-utils")]
     use tokio::time;
@@ -232,6 +257,181 @@ mod watcher_tests {
                         connection: Connection,
                     ) -> impl Future<Output = Result<(), AcceptError>> + Send {
                         super::watch_relay_policy(&connection, None);
+                        future::ready(Ok(()))
+                    }
+                }
+                let bind = || async {
+                    iroh::Endpoint::builder(presets::Minimal)
+                        .relay_mode(iroh::RelayMode::Disabled)
+                        .bind()
+                        .await
+                        .expect("bind a loopback endpoint")
+                };
+                let server = bind().await;
+                let router = Router::builder(server.clone())
+                    .accept(ALPN, WatchAndDrop)
+                    .spawn();
+                let client = bind().await;
+                lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
+
+                let connection = client.connect(server.id(), ALPN).await.expect("connect");
+                let closed =
+                    tokio_time::timeout(Duration::from_secs(10), connection.closed()).await;
+
+                assert!(
+                    closed.is_ok(),
+                    "the connection stayed up after its handler dropped it: the watcher holds it"
+                );
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
+    }
+
+    /// A link that we dialed and that the peer ends with the relay-refused code is reported once,
+    /// and a link that the peer ends with another code is not. The watch holds the connection
+    /// weakly, so that the caller's handle decides how long the link lives.
+    #[test]
+    fn a_peer_that_ends_our_link_with_the_relay_refused_code_is_reported_and_no_other_close_is() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use crate::transport::probe::RelayRefused;
+
+                const ALPN: &[u8] = b"habilis-mesh/test-refusal/0";
+
+                #[derive(Debug, Clone)]
+                struct CloseWith(u32);
+                impl ProtocolHandler for CloseWith {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        tokio_time::sleep(Duration::from_millis(300)).await;
+                        connection.close(self.0.into(), b"test");
+                        connection.closed().await;
+                        Ok(())
+                    }
+                }
+                let bind = || async {
+                    iroh::Endpoint::builder(presets::Minimal)
+                        .relay_mode(iroh::RelayMode::Disabled)
+                        .bind()
+                        .await
+                        .expect("bind a loopback endpoint")
+                };
+                for (code, reported) in [(super::GOSSIP_RELAY_REFUSED_CODE, true), (5, false)] {
+                    let server = bind().await;
+                    let router = Router::builder(server.clone())
+                        .accept(ALPN, CloseWith(code))
+                        .spawn();
+                    let client = bind().await;
+                    lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
+                    let connection = client.connect(server.id(), ALPN).await.expect("connect");
+                    let (sink, mut reports) = mpsc::unbounded_channel();
+                    super::watch_relay_policy_and_refusal(&connection, None, Some(sink));
+                    // The caller holds its handle only inside a read that ends at the close and
+                    // then drops it, as the gossip transport does: the report must not depend on
+                    // who drops first.
+                    tokio::spawn(async move {
+                        connection.closed().await;
+                        drop(connection);
+                    });
+
+                    let report = tokio_time::timeout(Duration::from_secs(3), reports.recv()).await;
+                    match (reported, report) {
+                        (true, Ok(Some(RelayRefused { peer }))) => assert_eq!(
+                            peer,
+                            server.id(),
+                            "the report names the peer that ended the link"
+                        ),
+                        // The watch ended and dropped its sink with nothing sent.
+                        (false, Ok(None) | Err(_)) => {}
+                        (_, other) => {
+                            panic!("code {code}: expected reported = {reported}, got {other:?}")
+                        }
+                    }
+                    router.shutdown().await.expect("shutdown");
+                    client.close().await;
+                }
+            },
+        );
+    }
+
+    /// The contract that the report of a refusal rests on, pinned so that a later bump of iroh
+    /// cannot break it without a failing test: a future taken from `weak.closed()` while a strong
+    /// handle exists gets the close and its reason after the caller dropped its last handle. (In
+    /// this iroh the endpoint still holds the closed connection then, so `weak.upgrade()` still
+    /// gives a connection: the report does not depend on that, and a read through an upgrade
+    /// would depend on it.)
+    #[test]
+    fn a_weak_close_future_keeps_the_reason_after_the_last_handle_is_dropped() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                const ALPN: &[u8] = b"habilis-mesh/test-weak-closed/0";
+
+                #[derive(Debug, Clone)]
+                struct CloseRefused;
+                impl ProtocolHandler for CloseRefused {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        tokio_time::sleep(Duration::from_millis(300)).await;
+                        connection.close(super::GOSSIP_RELAY_REFUSED_CODE.into(), b"test");
+                        connection.closed().await;
+                        Ok(())
+                    }
+                }
+                let bind = || async {
+                    iroh::Endpoint::builder(presets::Minimal)
+                        .relay_mode(iroh::RelayMode::Disabled)
+                        .bind()
+                        .await
+                        .expect("bind a loopback endpoint")
+                };
+                let server = bind().await;
+                let router = Router::builder(server.clone())
+                    .accept(ALPN, CloseRefused)
+                    .spawn();
+                let client = bind().await;
+                lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
+                let connection = client.connect(server.id(), ALPN).await.expect("connect");
+
+                let weak = connection.weak_handle();
+                let closed = weak.closed();
+                connection.closed().await;
+                drop(connection);
+
+                let closed = closed
+                    .await
+                    .expect("the future was taken with a strong handle, so it gets the close");
+                assert!(
+                    probe::is_relay_refusal(&closed.reason),
+                    "the reason of the peer's close is kept: {:?}",
+                    closed.reason
+                );
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
+    }
+
+    /// The reporting watch, as the plain one, keeps no link open that gossip has dropped.
+    #[test]
+    fn the_refusal_watcher_does_not_keep_a_connection_alive() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                const ALPN: &[u8] = b"habilis-mesh/test-refusal-watch/0";
+
+                #[derive(Debug, Clone)]
+                struct WatchAndDrop;
+                impl ProtocolHandler for WatchAndDrop {
+                    fn accept(
+                        &self,
+                        connection: Connection,
+                    ) -> impl Future<Output = Result<(), AcceptError>> + Send {
+                        let (sink, _reports) = mpsc::unbounded_channel();
+                        super::watch_relay_policy_and_refusal(&connection, None, Some(sink));
                         future::ready(Ok(()))
                     }
                 }

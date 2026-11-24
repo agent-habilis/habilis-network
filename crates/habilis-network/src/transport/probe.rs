@@ -21,6 +21,7 @@ mod path_action;
 mod path_change;
 mod path_kind;
 mod regraft;
+mod relay_refused;
 mod step;
 mod watchers;
 pub(crate) use direct_outcome::DirectOutcome;
@@ -33,6 +34,7 @@ pub(crate) use path_action::path_action;
 pub(crate) use path_change::PathChange;
 pub(crate) use path_kind::PathKind;
 pub(crate) use regraft::{refill_isolated, regraft_due};
+pub(crate) use relay_refused::{RefusalEffect, RelayRefused, is_relay_refusal};
 pub(crate) use step::step;
 pub(crate) use watchers::{
     ensure_watchers, mark_proven, nudge_climbing_pairs, nudge_known, nudge_webrtc_riders,

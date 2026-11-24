@@ -96,6 +96,8 @@ pub(crate) struct ExternalArms {
     /// The chunk requests that the event loop answered.
     pub chunk: u64,
     pub path_rx: u64,
+    /// The peers that closed a gossip dial of ours as relay-only.
+    pub relay_refused: u64,
     pub address: u64,
     pub direct_rx: u64,
     pub rung_change: u64,
@@ -134,6 +136,7 @@ impl ExternalArms {
             + self.unicast
             + self.chunk
             + self.path_rx
+            + self.relay_refused
             + self.address
             + self.direct_rx
             + self.rung_change
