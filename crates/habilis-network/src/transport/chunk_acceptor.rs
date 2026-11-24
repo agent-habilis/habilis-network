@@ -155,6 +155,7 @@ impl ProtocolHandler for ChunkAcceptor {
         )
         .await
         {
+            payload_path::log_accept_refused("chunk", None, &connection);
             return Ok(());
         }
         let peer = connection.remote_id();

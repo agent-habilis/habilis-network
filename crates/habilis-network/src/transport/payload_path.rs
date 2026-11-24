@@ -317,6 +317,24 @@ pub async fn refuse_unless_direct(
     false
 }
 
+/// The debug line of an acceptor that refused `connection` as relay-only: which acceptor, which
+/// node (when it knows its own id) and which dialer. [`RELAY_REFUSED`] has no node id, since a
+/// `Connection` has none.
+pub(crate) fn log_accept_refused(
+    acceptor: &'static str,
+    local: Option<iroh::EndpointId>,
+    connection: &Connection,
+) {
+    let local_short: String = local.map_or_else(String::new, |id| id.fmt_short().to_string());
+    tracing::debug!(
+        target: LOG_TARGET,
+        acceptor,
+        local = %local_short,
+        remote = %connection.remote_id().fmt_short(),
+        "connection refused: no direct path"
+    );
+}
+
 /// [`refuse_unless_direct`] as a guard: waits up to `deadline` for the punch
 /// a fresh connection is still making, and on refusal returns the error after
 /// closing `conn` with `close_code`.

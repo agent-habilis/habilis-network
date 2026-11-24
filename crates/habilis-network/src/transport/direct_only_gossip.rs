@@ -15,7 +15,8 @@ use n0_future::time::Instant;
 
 use super::PayloadPath;
 use super::payload_path::{
-    GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, refuse_unless_direct, selected_is_direct,
+    GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, log_accept_refused, refuse_unless_direct,
+    selected_is_direct,
 };
 
 use n0_future::{task, time as n0future_time};
@@ -30,6 +31,8 @@ pub(crate) struct DirectOnlyGossip {
     /// this node's own id: the lower id of a pair offers, and the gate treats
     /// the offerer and the answerer differently.
     session_gate: Option<(WebRtcHandle, super::SignalAdmission, iroh::EndpointId)>,
+    /// This node's own id, for the log line of a refusal.
+    local: Option<iroh::EndpointId>,
 }
 
 impl DirectOnlyGossip {
@@ -42,7 +45,14 @@ impl DirectOnlyGossip {
             inner,
             relay_transport,
             session_gate,
+            local: None,
         }
+    }
+
+    /// Name the node that this acceptor serves, for the log.
+    pub(crate) fn local(mut self, local: iroh::EndpointId) -> Self {
+        self.local = Some(local);
+        self
     }
 }
 
@@ -81,6 +91,7 @@ impl ProtocolHandler for DirectOnlyGossip {
         )
         .await
         {
+            log_accept_refused("gossip", self.local, &connection);
             return Ok(());
         }
         if !self.relay_transport.relay_allowed() {

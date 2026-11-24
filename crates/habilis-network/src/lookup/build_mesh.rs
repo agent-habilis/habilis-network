@@ -73,15 +73,14 @@ pub(crate) fn build_mesh(
     )> = gated.map(|(handle, admission, _)| (handle.clone(), admission.clone(), local));
     // Every router serves the nudge, the beacon's too: a session that attaches to the rendezvous
     // is followed by a nudge, and it does its work only when the connect completes.
+    let gossip_acceptor = transport::DirectOnlyGossip::new(
+        gossip.clone(),
+        PayloadPath::from(relay_transport),
+        session_gate,
+    )
+    .local(local);
     let mut builder = Router::builder(endpoint)
-        .accept(
-            GOSSIP_ALPN,
-            transport::DirectOnlyGossip::new(
-                gossip.clone(),
-                PayloadPath::from(relay_transport),
-                session_gate,
-            ),
-        )
+        .accept(GOSSIP_ALPN, gossip_acceptor)
         .accept(webrtc::NUDGE_ALPN, webrtc::NudgeAcceptor);
     // A peer also accepts inbound unicast; the rendezvous/beacon endpoint
     // passes `None` (it is not a peer and carries no unicast traffic).

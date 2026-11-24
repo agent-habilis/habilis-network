@@ -102,26 +102,35 @@ pub(crate) fn isolated_candidate(
     next_fill(state, max_connections, rendezvous_id, now, pick)
 }
 
-/// Why `address` is, or is not, a candidate of a fill or a retry pass, for the log: the first
-/// filter that drops it, in the order of the passes, or `candidate`.
+/// Every filter of a fill or a retry pass that drops `address`, joined by `+`, or `candidate`
+/// when none does. The passes differ (the fill has no `pending` filter), so each flag that holds
+/// is named and the reader picks the filter of the pass that he reads.
 fn candidate_reason(
     state: &EventLoopState,
     address: &iroh::EndpointAddr,
     rendezvous_id: EndpointId,
     now: Instant,
-) -> &'static str {
-    if address.id == rendezvous_id {
-        "rendezvous"
-    } else if state.linked_endpoints.contains(&address.id) {
-        "linked"
-    } else if state.direct.get(&address.id) == Some(&DirectState::Pending) {
-        "pending"
-    } else if state.relink_on_cooldown(address.id, now) {
-        "cooldown"
-    } else if state.graft_blocked(address.id, now) {
-        "blocked"
+) -> String {
+    let flags: [(bool, &str); 5] = [
+        (address.id == rendezvous_id, "rendezvous"),
+        (state.linked_endpoints.contains(&address.id), "linked"),
+        (
+            state.direct.get(&address.id) == Some(&DirectState::Pending),
+            "pending",
+        ),
+        (state.relink_on_cooldown(address.id, now), "cooldown"),
+        (state.graft_blocked(address.id, now), "blocked"),
+    ];
+    let mut held: Vec<&str> = Vec::new();
+    for (holds, name) in flags {
+        if holds {
+            held.push(name);
+        }
+    }
+    if held.is_empty() {
+        "candidate".to_owned()
     } else {
-        "candidate"
+        held.join("+")
     }
 }
 

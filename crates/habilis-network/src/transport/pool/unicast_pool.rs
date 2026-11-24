@@ -622,12 +622,6 @@ impl UnicastPool {
                     return;
                 };
                 let now = PoolInstant::now();
-                let local: String = inner
-                    .endpoint
-                    .as_ref()
-                    .map_or_else(String::new, |endpoint| {
-                        endpoint.id().fmt_short().to_string()
-                    });
                 inner.conns.lock().await.retain(|eid, pooled| {
                     let idle = match pooled.hold {
                         Hold::Probed(ended) => {
@@ -647,6 +641,9 @@ impl UnicastPool {
                         }
                     };
                     if idle {
+                        let local: String = inner.endpoint.as_ref().map_or_else(String::new, |endpoint| {
+                            endpoint.id().fmt_short().to_string()
+                        });
                         tracing::debug!(target: LOG_TARGET, %local, %eid, "closing an idle pooled unicast connection");
                         pooled.connection.close(IDLE.into(), b"idle");
                     }
