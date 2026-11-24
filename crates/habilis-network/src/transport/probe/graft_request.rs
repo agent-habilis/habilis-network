@@ -71,11 +71,19 @@ pub(crate) fn graft_request(
         rendezvous: rendezvous_id,
     } = target;
     if peer == rendezvous_id {
+        tracing::debug!(target: transport::LOG_TARGET, %peer, "graft: a Join to the rendezvous");
         return GraftRequest::Join;
     }
     state.note_link_count(max_connections, now);
     if paced && state.starved_join_due(now) {
         // A `Join` is not refused, so it ignores the backoff of the peer.
+        tracing::info!(
+            target: transport::LOG_TARGET,
+            %peer,
+            linked = state.linked_endpoints.len(),
+            links_short = state.links_short,
+            "graft: a starved node asks with a Join"
+        );
         GraftRequest::Join
     } else if paced && state.graft_backoff.is_blocked(&peer, now) {
         tracing::debug!(target: transport::LOG_TARGET, %peer, "graft skipped: the peer refused lately");
