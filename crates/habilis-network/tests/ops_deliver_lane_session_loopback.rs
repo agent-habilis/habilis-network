@@ -129,6 +129,8 @@ impl Member {
     fn arrived(&mut self, text: &str) -> bool {
         let mut seen = false;
         while let Ok(Inbound {
+            nick: _,
+            key: _,
             directed,
             text: got,
             ..
