@@ -89,6 +89,8 @@ pub(crate) async fn fill_active_view(state: &mut EventLoopState, context: &Handl
 
 /// The member that a reclaim tick asks for a link when this node lost every one: the member
 /// that the fill tick would pick, and none while the node holds a link or the window is closed.
+/// The window does not close the starved `Join` of such a node: it is due 20 s after the first
+/// ask, and the window is 6 s long.
 pub(crate) fn isolated_candidate(
     state: &EventLoopState,
     max_connections: usize,
@@ -96,13 +98,20 @@ pub(crate) fn isolated_candidate(
     now: Instant,
     pick: usize,
 ) -> Option<iroh::EndpointAddr> {
+    if state.isolated_join_due(now) {
+        return join_pick(state, rendezvous_id, pick);
+    }
     if !state.isolated_refill_due(now) {
         return None;
     }
     next_fill(state, max_connections, rendezvous_id, now, pick)
 }
 
-/// One reclaim tick of a node that lost every link, as a decision: pick the member to ask.
+/// One reclaim tick of a node that lost every link, as a decision: read which `Neighbor` requests
+/// went unanswered, then pick the member to ask. The read comes first. A request that nobody
+/// answered for `GRAFT_REFUSED_AFTER` makes the `Join` of a starved node due, and a read that only
+/// the heal tick made left the `Join` up to a heal interval late. With the read on each reclaim
+/// tick, the `Join` goes out within one tick of the end of that wait.
 pub(crate) fn isolated_tick(
     state: &mut EventLoopState,
     max_connections: usize,
@@ -110,7 +119,30 @@ pub(crate) fn isolated_tick(
     now: Instant,
     pick: usize,
 ) -> Option<iroh::EndpointAddr> {
+    state.settle_graft_backoff(now);
     isolated_candidate(state, max_connections, rendezvous_id, now, pick)
+}
+
+/// The member that the starved `Join` of a node with no link goes to: a member that reads `Direct`
+/// and is not linked. The `Join` is paced by `STARVED`, so the relink cooldown of the member does
+/// not hold it.
+fn join_pick(
+    state: &EventLoopState,
+    rendezvous_id: EndpointId,
+    pick: usize,
+) -> Option<iroh::EndpointAddr> {
+    let mut members: Vec<iroh::EndpointAddr> = state
+        .member_addresses()
+        .into_iter()
+        .filter(|address| {
+            address.id != rendezvous_id
+                && !state.linked_endpoints.contains(&address.id)
+                && state.direct.get(&address.id) == Some(&DirectState::Direct)
+        })
+        .collect();
+    members.sort_unstable_by_key(|address| address.id);
+    let index = pick.checked_rem(members.len())?;
+    members.get(index).cloned()
 }
 
 /// Every filter of a fill or a retry pass that drops `address`, joined by `+`, or `candidate`

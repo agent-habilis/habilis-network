@@ -2165,6 +2165,16 @@ impl EventLoopState {
             && self.reclaim_until.is_some_and(|until| now < until)
     }
 
+    /// Whether a reclaim tick asks with the starved `Join` of a node that lost every link: the
+    /// fallback is ready (see [`Self::starved_join_ready`]). The fast reclaim window of
+    /// [`Self::isolated_refill_due`] is 6 s long, and the fallback comes 20 s after the first ask,
+    /// so the window does not hold it.
+    pub(crate) fn isolated_join_due(&self, now: Instant) -> bool {
+        self.linked_endpoints.is_empty()
+            && self.zero_links_since.is_some()
+            && self.starved_join_ready(now)
+    }
+
     /// A gossip link to `peer` is up.
     pub(crate) fn link(&mut self, peer: EndpointId) {
         self.linked_endpoints.insert(peer);
