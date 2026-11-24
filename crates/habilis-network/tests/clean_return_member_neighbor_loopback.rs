@@ -80,19 +80,21 @@ impl NodeDriver for Watcher {
     ) -> bool {
         let roster = state.roster_snapshot();
         let topology = state.topology_snapshot();
+        let rows: Vec<(String, bool)> = roster
+            .peers
+            .iter()
+            .map(|row| (row.nickname.to_string(), row.quiet))
+            .collect();
+        let neighbors: Vec<String> = topology
+            .peers
+            .into_iter()
+            .filter(|peer| peer.neighbor)
+            .filter_map(|peer| peer.nickname)
+            .collect();
         let _ = request.send(View {
             own_member: roster.own_member,
-            roster: roster
-                .peers
-                .iter()
-                .map(|row| (row.nickname.to_string(), row.quiet))
-                .collect(),
-            neighbors: topology
-                .peers
-                .into_iter()
-                .filter(|peer| peer.neighbor)
-                .filter_map(|peer| peer.nickname)
-                .collect(),
+            roster: rows,
+            neighbors,
         });
         true
     }

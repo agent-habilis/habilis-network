@@ -49,7 +49,6 @@ pub(super) async fn start(ice: &IceConfig) -> Result<Negotiating, JsepError> {
 
 #[cfg(test)]
 mod tests {
-    use super::start;
     use crate::native::ice_config::IceConfig;
 
     /// **A negotiation with the loopback-only configuration binds its socket on loopback and
@@ -57,7 +56,7 @@ mod tests {
     #[test]
     fn a_loopback_only_negotiation_binds_and_advertises_loopback() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let negotiating = start(&IceConfig::loopback_only())
+            let negotiating = super::start(&IceConfig::loopback_only())
                 .await
                 .expect("start a negotiation");
             let local = negotiating.socket.local_addr().expect("local addr");

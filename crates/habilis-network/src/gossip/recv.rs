@@ -2189,7 +2189,7 @@ mod arms_reclaim_tests {
 #[cfg(test)]
 mod first_contact_tests {
     use crate::daemon::state::{RendezvousFlag, Standing};
-    use crate::gossip::directed_send_started;
+    use crate::gossip::merge_ctx;
     use crate::lifecycle;
     use crate::protocol::{Shard, ShardGroup, UnixSecs};
     use crate::transport::UdpTransport;
@@ -2237,7 +2237,7 @@ mod first_contact_tests {
         told: &mut mpsc::UnboundedReceiver<EndpointId>,
     ) {
         while let Ok(peer) = told.try_recv() {
-            directed_send_started(state, context, peer);
+            merge_ctx::directed_send_started(state, context, peer);
         }
     }
 

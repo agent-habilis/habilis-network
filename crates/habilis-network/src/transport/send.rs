@@ -659,7 +659,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(transport::UNICAST_ALPN, Collect(frames))
                     .spawn();
-                let port = server
+                let port: u16 = server
                     .bound_sockets()
                     .first()
                     .map(SocketAddr::port)

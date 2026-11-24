@@ -923,7 +923,6 @@ fn the_application_endpoint_of_a_node_that_asks_for_a_loopback_bind_listens_on_t
 #[test]
 #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
 fn a_side_endpoint_takes_the_bind_of_the_node_and_no_other_option() {
-    use super::bind_only;
     use crate::lookup::Bind;
 
     let node = TransportOpts {
@@ -932,7 +931,7 @@ fn a_side_endpoint_takes_the_bind_of_the_node_and_no_other_option() {
     }
     .bind(Bind::Loopback);
 
-    let side = bind_only(node);
+    let side = super::bind_only(node);
 
     assert_eq!(side.bind, Bind::Loopback, "the bind of the node");
     assert!(
@@ -947,15 +946,20 @@ fn a_side_endpoint_takes_the_bind_of_the_node_and_no_other_option() {
 #[test]
 #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
 fn a_node_stays_on_this_host_when_its_mesh_or_its_bind_says_so() {
-    use super::stays_on_this_host;
     use crate::lookup::Bind;
 
     let all_interfaces = TransportOpts::default();
     let loopback = TransportOpts::default().bind(Bind::Loopback);
-    assert!(stays_on_this_host(true, all_interfaces), "a loopback mesh");
-    assert!(stays_on_this_host(false, loopback), "a loopback bind");
-    assert!(stays_on_this_host(true, loopback), "both");
-    assert!(!stays_on_this_host(false, all_interfaces), "neither");
+    assert!(
+        super::stays_on_this_host(true, all_interfaces),
+        "a loopback mesh"
+    );
+    assert!(
+        super::stays_on_this_host(false, loopback),
+        "a loopback bind"
+    );
+    assert!(super::stays_on_this_host(true, loopback), "both");
+    assert!(!super::stays_on_this_host(false, all_interfaces), "neither");
 }
 
 /// **The underlay of a node that binds loopback binds loopback too.** A node has 2 endpoints, the
@@ -964,12 +968,12 @@ fn a_node_stays_on_this_host_when_its_mesh_or_its_bind_says_so() {
 #[test]
 #[cfg(all(feature = "multihop", feature = "iroh-test-utils"))]
 fn the_underlay_of_a_node_that_binds_loopback_binds_loopback_too() {
-    use super::peer::underlay_options;
+    use super::peer;
     use crate::lookup::Bind;
 
     let node = TransportOpts::default().bind(Bind::Loopback);
     assert_eq!(
-        underlay_options(node).bind,
+        peer::underlay_options(node).bind,
         Bind::Loopback,
         "the underlay of a loopback node listens beyond the host"
     );
@@ -978,7 +982,7 @@ fn the_underlay_of_a_node_that_binds_loopback_binds_loopback_too() {
         ..TransportOpts::default()
     };
     assert!(
-        !underlay_options(without_udp).udp,
+        !peer::underlay_options(without_udp).udp,
         "the underlay keeps the udp of the node"
     );
 }
