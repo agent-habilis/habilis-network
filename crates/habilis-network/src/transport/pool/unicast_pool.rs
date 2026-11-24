@@ -80,9 +80,6 @@ pub(in crate::transport::pool) struct Pooled {
     /// On the clock the tokio runtime keeps, so a test can pause it.
     pub(in crate::transport::pool) last_used: PoolInstant,
     pub(in crate::transport::pool) hold: Hold,
-    /// The connection rides multihop for a peer that the node could not dial directly, and the
-    /// sweeper closes it after [`PoolInner::pinned_idle`].
-    pub(in crate::transport::pool) pinned: bool,
 }
 
 #[derive(Debug)]
@@ -629,7 +626,7 @@ impl UnicastPool {
                         }
                         Hold::Used | Hold::Probing => {
                             let table = inner.admission.get();
-                            let extra: bool = table.map_or(pooled.pinned, |admission| {
+                            let extra: bool = table.is_some_and(|admission| {
                                 admission.is_pinned(*eid) || admission.is_extra(*eid)
                             });
                             let idle = if extra {
@@ -738,13 +735,13 @@ impl UnicastPool {
         self.inner.dialing.lock().contains_key(&eid)
     }
 
-    /// Close the pooled connection of `eid` if it is pinned: the route that it rides is gone, and a
-    /// pinned connection has no other reason to stay. A direct connection of the peer is left
-    /// alone. Returns whether a connection was closed.
+    /// Close the pooled connection of `eid` if the ledger pins the peer: the route that it rides is
+    /// gone, and a pinned connection has no other reason to stay. A peer that the ledger does not
+    /// pin is left alone. Returns whether a connection was closed.
     pub(crate) async fn close_pinned(&self, eid: EndpointId) -> bool {
         let pinned_now = self.is_pinned_now(eid);
         let mut conns = self.inner.conns.lock().await;
-        if !pinned_now || !conns.get(&eid).is_some_and(|pooled| pooled.pinned) {
+        if !pinned_now || !conns.contains_key(&eid) {
             return false;
         }
         if let Some(pooled) = conns.remove(&eid) {
@@ -1127,7 +1124,6 @@ impl UnicastPool {
         {
             bail!("{COOLDOWN_REFUSED}");
         }
-        let pinned = planned.as_ref().is_some_and(|planned| planned.alone);
         let address: EndpointAddr = self.dial_address(eid, planned);
         #[cfg(test)]
         {
@@ -1161,7 +1157,6 @@ impl UnicastPool {
                         connection: connection.clone(),
                         last_used: PoolInstant::now(),
                         hold,
-                        pinned,
                     },
                 );
                 drop(conns);
@@ -1230,14 +1225,13 @@ impl UnicastPool {
         address
     }
 
-    /// Whether the ledger still pins `eid`: a peer that became a gossip neighbor is not pinned any
-    /// more, though its pooled connection was dialed on a route. With no table, the flag of the
-    /// pooled connection decides alone.
+    /// Whether the ledger pins `eid`: a peer that became a gossip neighbor is not pinned any more,
+    /// though its pooled connection was dialed on a route. With no table, nothing is pinned.
     fn is_pinned_now(&self, eid: EndpointId) -> bool {
         self.inner
             .admission
             .get()
-            .is_none_or(|admission| admission.is_pinned(eid))
+            .is_some_and(|admission| admission.is_pinned(eid))
     }
 
     pub(in crate::transport::pool) fn release_plan(&self, eid: EndpointId) {

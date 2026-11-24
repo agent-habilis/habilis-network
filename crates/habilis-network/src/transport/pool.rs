@@ -37,6 +37,7 @@ mod tests {
     use futures_util::future::join_all;
     use iroh::endpoint::{ConnectionError, presets};
     use iroh::{endpoint, protocol};
+    use std::collections::HashSet;
     use std::{future, mem, net};
     use tokio::sync::mpsc;
     use tokio::{runtime, task, time};
@@ -219,8 +220,12 @@ mod tests {
     #[test]
     fn a_pinned_connection_is_closed_after_a_minute_idle_and_a_direct_one_is_not() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
             let (pool, server, router, client) =
                 pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
             let connection = pool.warm_or_dial(server).await.expect("dial");
             time::pause();
 
@@ -230,10 +235,12 @@ mod tests {
                 "a direct connection keeps the idle timeout of the pool"
             );
 
+            admission.plan_dial(server, true);
+            admission.note_connection(&connection);
+            assert!(admission.is_pinned(server), "the ledger pins the peer");
             {
                 let mut conns = pool.inner.conns.lock().await;
                 let pooled = conns.get_mut(&server).expect("the connection is pooled");
-                pooled.pinned = true;
                 pooled.last_used = time::Instant::now();
             }
             advance_secs(55).await;
@@ -539,16 +546,14 @@ mod tests {
             use super::super::admission::SignalAdmission;
             let (pool, server, router, client) =
                 pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
-            let admission = SignalAdmission::new(2);
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
             pool.set_admission(admission.clone());
             let connection = pool.warm_or_dial(server).await.expect("dial");
-            pool.inner
-                .conns
-                .lock()
-                .await
-                .get_mut(&server)
-                .expect("the connection is pooled")
-                .pinned = true;
+            admission.plan_dial(server, true);
+            admission.note_connection(&connection);
+            assert!(admission.is_pinned(server), "the ledger pins the peer");
+            admission.set_neighbors(&HashSet::from([server]));
             assert!(
                 !pool.close_pinned(server).await && connection.close_reason().is_none(),
                 "the ledger does not pin the peer any more: the connection stays"
@@ -600,20 +605,19 @@ mod tests {
     #[test]
     fn a_pinned_connection_closes_when_its_route_is_gone_and_a_direct_one_stays() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
             let (pool, server, router, client) =
                 pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
             let connection = pool.warm_or_dial(server).await.expect("dial");
             assert!(
                 !pool.close_pinned(server).await && connection.close_reason().is_none(),
                 "a direct connection stays"
             );
-            pool.inner
-                .conns
-                .lock()
-                .await
-                .get_mut(&server)
-                .expect("the connection is pooled")
-                .pinned = true;
+            admission.plan_dial(server, true);
+            admission.note_connection(&connection);
             assert!(
                 pool.close_pinned(server).await,
                 "a pinned connection closes"
