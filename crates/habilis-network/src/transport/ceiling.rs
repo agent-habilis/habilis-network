@@ -1449,6 +1449,51 @@ mod tests {
         );
     }
 
+    /// The peer opens a connection to the node while the pinned dial of the node is in flight, and
+    /// a unit is free, so the connection of the peer takes it. Then the dial opens its own
+    /// connection. The sends of the node use that one, and it rides multihop alone: it decides the
+    /// entry. The peer is pinned, and the unit of the inbound connection goes back. Before, the
+    /// entry stayed a unit and the pin ended, so a connection dialed on a route alone had no pin.
+    #[test]
+    fn the_connection_of_a_pinned_dial_decides_the_entry_when_an_inbound_unit_was_open() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        let first = testing::endpoint_id(1);
+        ceiling.register_quic(first, start);
+        ceiling.register_quic(testing::endpoint_id(2), at(start, 1));
+        let peer = testing::endpoint_id(3);
+        assert_eq!(
+            ceiling.plan_dial(peer, true),
+            DialPlan::Multihop,
+            "the node is at its ceiling, so the dial rides multihop"
+        );
+        ceiling.unregister_quic(first);
+        ceiling.register_inbound(peer, at(start, 2));
+        assert_eq!(
+            ceiling.units(),
+            2,
+            "the inbound connection took the free unit"
+        );
+
+        ceiling.register_quic(peer, at(start, 3));
+
+        assert!(
+            ceiling.pinned(peer),
+            "the dial opened its connection: the peer is pinned"
+        );
+        assert_eq!(
+            ceiling.pinned_connected(),
+            vec![peer],
+            "the entry of the peer is the pinned connection"
+        );
+        assert_eq!(
+            ceiling.units(),
+            1,
+            "the unit of the inbound connection is back"
+        );
+    }
+
     #[test]
     fn several_new_neighbors_name_each_victim_once() {
         let _guard = ::habilis_network_test_tracing::init();
