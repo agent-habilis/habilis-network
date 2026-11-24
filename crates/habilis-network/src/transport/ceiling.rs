@@ -1496,6 +1496,36 @@ mod tests {
         );
     }
 
+    /// The dial of a pinned peer ends with no connection, while an extra that the peer opened
+    /// is open. The pin was for the dial: it ends with the dial, and the inbound extra stays what
+    /// it was, an extra that a unit can promote. Before, the pin outlived the dial because an
+    /// unrelated extra was open.
+    #[test]
+    fn a_pinned_dial_that_ends_takes_its_pin_with_it_when_an_inbound_extra_is_open() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(1);
+        ceiling.register_quic(testing::endpoint_id(1), start);
+        let peer = testing::endpoint_id(2);
+        assert_eq!(
+            ceiling.plan_dial(peer, true),
+            DialPlan::Multihop,
+            "the node is at its ceiling, so the dial rides multihop"
+        );
+        ceiling.register_inbound(peer, at(start, 1));
+
+        ceiling.release_dial(peer);
+
+        assert!(
+            !ceiling.pinned(peer),
+            "the dial ended: no pin holds the peer"
+        );
+        assert!(
+            ceiling.is_extra(peer),
+            "the inbound extra of the peer is what it was"
+        );
+    }
+
     #[test]
     fn several_new_neighbors_name_each_victim_once() {
         let _guard = ::habilis_network_test_tracing::init();
