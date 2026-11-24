@@ -405,14 +405,7 @@ impl Ceiling {
     /// The dial that [`Self::plan_dial`] planned ended without a connection.
     pub(crate) fn release_dial(&mut self, peer: EndpointId) {
         self.reserved.remove(&peer);
-        let planned = self.awaiting.remove(&peer);
-        // A connection of the peer that took no unit keeps the pin of the dial that ended.
-        if planned
-            && let Some(entry) = self.entries.get_mut(&peer)
-            && entry.quic == Quic::Extra
-        {
-            entry.quic = Quic::Pinned;
-        }
+        self.awaiting.remove(&peer);
     }
 
     /// Every pinned peer, planned or connected, in no order.
