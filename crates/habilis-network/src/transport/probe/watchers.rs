@@ -436,7 +436,7 @@ pub(crate) fn open_lane_after_proof(
 }
 
 /// Prove the pairs that a multihop route proves, and flush what waited for them. Runs on the sweep
-/// tick. A send to one peer runs the same rule for its addressee ([`prove_addressee`]).
+/// tick. A send to one peer runs the same rule for its addressee ([`prove_by_route`]).
 pub(crate) fn prove_routed_pairs(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let members = state.member_addresses();
     let peers: Vec<EndpointId> = members

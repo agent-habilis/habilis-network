@@ -39,7 +39,7 @@ pub(super) fn route_to_key(key: &AuthorKey, state: &EventLoopState) -> Route {
 
 /// Whether the relay is lookup only and no probe has shown a direct path to `eid`: the pair is
 /// not proven, whether it is unread, in flight or relay-only. A send does not refuse on this
-/// alone (see [`held`]); a reply that must not dial reads it, and a send that dials asks for a
+/// alone (see [`relay_only`]); a reply that must not dial reads it, and a send that dials asks for a
 /// lane session by it.
 pub(super) fn unproven(eid: EndpointId, state: &EventLoopState) -> bool {
     !state.relay_transport.relay_allowed() && state.direct.get(&eid) != Some(&DirectState::Direct)
