@@ -76,7 +76,7 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let (sink_a, _events_a) = membership::json_sink();
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
             .bind(Bind::Loopback)
             .nick(Some("alice".to_owned()))
             .lookup(vec![Lookup::Relay]);
@@ -92,15 +92,13 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
             .expect("open alice");
         let (sink_b, _events_b) = membership::json_sink();
         let mesh = alice.node.mesh_id().to_string();
-        let bob: Membership = membership::join(
-            &membership::JoinOptions::default()
-                .bind(Bind::Loopback)
-                .nick(Some("bob".to_owned()))
-                .mesh(Some(mesh)),
-            sink_b,
-        )
-        .await
-        .expect("open bob");
+        let bob_options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
+            .nick(Some("bob".to_owned()))
+            .mesh(Some(mesh));
+        let bob: Membership = membership::join(&bob_options, sink_b)
+            .await
+            .expect("open bob");
 
         let meshing = Instant::now();
         while roster_len(&alice).await != 1 || roster_len(&bob).await != 1 {

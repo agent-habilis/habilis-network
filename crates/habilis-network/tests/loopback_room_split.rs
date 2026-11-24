@@ -248,8 +248,8 @@ impl Member {
         let (sink, events) = membership::json_sink();
         let options: membership::JoinOptions = membership::JoinOptions::default()
             .bind(Bind::Loopback)
-            .nick(Some(nick.to_owned()))
-            .mesh(mesh.map(str::to_owned));
+            .nick(Some(nick.to_owned()));
+        let options = options.mesh(mesh.map(str::to_owned));
         let membership: Membership = membership::join(&options, sink)
             .await
             .expect("open a member");
@@ -718,8 +718,8 @@ async fn open_watched(nick: &str, mesh: &str) -> (Member, UnboundedReceiver<Stri
     let (sink, events) = membership::json_sink();
     let options: membership::JoinOptions = membership::JoinOptions::default()
         .bind(Bind::Loopback)
-        .nick(Some(nick.to_owned()))
-        .mesh(Some(mesh.to_owned()));
+        .nick(Some(nick.to_owned()));
+    let options = options.mesh(Some(mesh.to_owned()));
     let membership: Membership = membership::join(&options, sink)
         .await
         .expect("open a member");

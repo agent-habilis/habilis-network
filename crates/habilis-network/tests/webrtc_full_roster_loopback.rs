@@ -68,15 +68,12 @@ async fn roster_len(member: &Membership) -> usize {
 /// `WebRTC`-only mesh over a local relay, as live members.
 async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
     let relay_urls = vec![relay.to_string()];
-    let creator = open(
-        "member-00",
-        membership::JoinOptions::default()
-            .bind(Bind::Loopback)
-            .lookup(vec![Lookup::Relay])
-            .transport(vec![Transport::WebRtc])
-            .relay_urls(relay_urls),
-    )
-    .await;
+    let creator_options: membership::JoinOptions = membership::JoinOptions::default()
+        .bind(Bind::Loopback)
+        .lookup(vec![Lookup::Relay])
+        .transport(vec![Transport::WebRtc])
+        .relay_urls(relay_urls);
+    let creator = open("member-00", creator_options).await;
     let beacon_wait = Instant::now();
     while !logs().contains("beacon role active") {
         assert!(

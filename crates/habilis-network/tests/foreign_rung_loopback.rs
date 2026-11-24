@@ -111,7 +111,7 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
 
     let open = |nick: &'static str| {
         let mesh_text = mesh.to_string();
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
             .bind(Bind::Loopback)
             .mesh(Some(mesh_text))
             .nick(Some(nick.to_owned()));

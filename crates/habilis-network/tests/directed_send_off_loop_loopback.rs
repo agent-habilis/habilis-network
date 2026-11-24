@@ -71,7 +71,7 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
             .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .lookup(vec![Lookup::Relay]);
@@ -83,7 +83,7 @@ impl Member {
 
     async fn join(nick: &str, creator: &Self) -> Self {
         let mesh = creator.membership.node.mesh_id().to_string();
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
             .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .mesh(Some(mesh));

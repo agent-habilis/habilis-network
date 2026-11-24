@@ -57,8 +57,8 @@ async fn rows_named(member: &Membership, nickname: &str) -> usize {
 async fn join_as(mesh: &Mesh, nick: &str) -> Membership {
     let options: membership::JoinOptions = membership::JoinOptions::default()
         .bind(Bind::Loopback)
-        .mesh(Some(mesh.to_string()))
-        .nick(Some(nick.to_owned()));
+        .mesh(Some(mesh.to_string()));
+    let options = options.nick(Some(nick.to_owned()));
     let (sink, _events) = membership::json_sink();
     membership::join(&options, sink)
         .await

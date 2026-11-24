@@ -70,7 +70,7 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (first_sink, _first_events) = membership::json_sink();
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
             .bind(Bind::Loopback)
             .nick(Some("m0".to_owned()))
             .lookup(vec![Lookup::Relay]);
@@ -95,8 +95,8 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
             let member_options: membership::JoinOptions = membership::JoinOptions::default()
                 .bind(Bind::Loopback)
                 .nick(Some(format!("m{index}")))
-                .mesh(Some(mesh.clone()))
-                .max_connections(CAP);
+                .mesh(Some(mesh.clone()));
+            let member_options = member_options.max_connections(CAP);
             members.push(
                 membership::join(&member_options, sink)
                     .await

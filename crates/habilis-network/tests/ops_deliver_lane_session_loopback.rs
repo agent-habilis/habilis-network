@@ -46,10 +46,11 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
             .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
-            .lookup(vec![Lookup::Relay])
+            .lookup(vec![Lookup::Relay]);
+        let options = options
             .transport(vec![Transport::Udp, Transport::WebRtc])
             .relay_urls(vec![relay.to_string()]);
         Self::open(&options).await
@@ -58,16 +59,15 @@ impl Member {
     /// A member of the mesh of `creator` with the same transport list.
     async fn join_with_webrtc(nick: &str, creator: &Self, relay: &RelayUrl) -> Self {
         let mesh = creator.membership.node.mesh_id().to_string();
-        Self::open(
-            &membership::JoinOptions::default()
-                .bind(Bind::Loopback)
-                .nick(Some(nick.to_owned()))
-                .mesh(Some(mesh))
-                .lookup(vec![Lookup::Relay])
-                .transport(vec![Transport::Udp, Transport::WebRtc])
-                .relay_urls(vec![relay.to_string()]),
-        )
-        .await
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
+            .nick(Some(nick.to_owned()))
+            .mesh(Some(mesh));
+        let options: membership::JoinOptions = options
+            .lookup(vec![Lookup::Relay])
+            .transport(vec![Transport::Udp, Transport::WebRtc])
+            .relay_urls(vec![relay.to_string()]);
+        Self::open(&options).await
     }
 
     async fn roster_len(&self) -> usize {

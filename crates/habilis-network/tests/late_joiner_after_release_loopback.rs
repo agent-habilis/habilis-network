@@ -106,14 +106,11 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
             "iroh::socket::transports::relay::actor",
             "Another endpoint connected with the same endpoint id",
         );
-        let creator = open(
-            "member-00",
-            membership::JoinOptions::default()
-                .bind(Bind::Loopback)
-                .lookup(vec![Lookup::Relay])
-                .relay_urls(vec![relay.to_string()]),
-        )
-        .await;
+        let creator_options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
+            .lookup(vec![Lookup::Relay])
+            .relay_urls(vec![relay.to_string()]);
+        let creator = open("member-00", creator_options).await;
         let beacon_wait = Instant::now();
         while !logs().contains("beacon role active") {
             assert!(
