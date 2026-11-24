@@ -341,7 +341,14 @@ impl Ceiling {
     /// [`Self::register_quic`] or [`Self::release_dial`] gives the reservation back. At the ceiling,
     /// a dial that has a multihop route (`route`) pins the peer and takes no unit. At the ceiling,
     /// with no route, the dial is direct and evicts when its connection registers.
+    ///
+    /// A peer whose pinned connection is open is not planned again: the open connection is the
+    /// dial, and the plan leaves the pin and the units as they are, whatever `route` says. The
+    /// watcher closes a pinned connection that has no route, and it reads the pin.
     pub(crate) fn plan_dial(&mut self, peer: EndpointId, route: bool) -> DialPlan {
+        if self.has_pinned_connection(peer) {
+            return DialPlan::Multihop;
+        }
         self.pinned.remove(&peer);
         self.awaiting.remove(&peer);
         self.reserved.remove(&peer);
@@ -358,6 +365,16 @@ impl Ceiling {
             return DialPlan::Multihop;
         }
         DialPlan::Direct
+    }
+
+    /// Whether the dial that pinned `peer` ended in a connection that is open now.
+    fn has_pinned_connection(&self, peer: EndpointId) -> bool {
+        !self.awaiting.contains(&peer)
+            && self.pinned.contains(&peer)
+            && self
+                .entries
+                .get(&peer)
+                .is_some_and(|entry| entry.quic == Quic::Extra)
     }
 
     /// Whether a dial that no send asked for (a probe, a courtesy reply) may take a unit now: the

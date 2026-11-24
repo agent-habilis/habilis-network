@@ -67,12 +67,24 @@ impl fmt::Debug for Inner {
 }
 
 impl Inner {
-    /// Give the path selector of the endpoint the pin of `peer` as the ledger holds it now.
-    pub(crate) fn sync_pin(&self, peer: EndpointId) {
+    /// Give the path selector of the endpoint the pin of `peer` as the ledger holds it now. `site`
+    /// names the caller, for the line that a change of the pin writes.
+    pub(crate) fn sync_pin(&self, peer: EndpointId, site: &'static str) {
         let Some(local) = self.local else {
             return;
         };
-        if self.ceiling.pinned(peer) {
+        let pinned = self.ceiling.pinned(peer);
+        if pinned != habilis_network_iroh_transport_util::is_pinned(local, peer) {
+            tracing::debug!(
+                target: transport::LOG_TARGET,
+                local = %local.fmt_short(),
+                peer = %peer.fmt_short(),
+                pinned,
+                site,
+                "the pin of a peer changed"
+            );
+        }
+        if pinned {
             habilis_network_iroh_transport_util::pin(local, peer);
         } else {
             habilis_network_iroh_transport_util::unpin(local, peer);
@@ -161,7 +173,7 @@ impl Inner {
         };
         for peer in &evictions.evict {
             self.ceiling.unregister_quic(*peer);
-            self.sync_pin(*peer);
+            self.sync_pin(*peer, "eviction");
             self.ceiling.unregister_session(*peer);
             let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
             self.we_evicted.note(*peer, Instant::now(), spread);
@@ -198,7 +210,7 @@ impl Inner {
         });
         if !alive {
             self.ceiling.unregister_quic(peer);
-            self.sync_pin(peer);
+            self.sync_pin(peer, "connection gone");
         }
     }
 

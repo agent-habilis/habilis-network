@@ -559,7 +559,7 @@ impl SignalAdmission {
     pub(crate) fn plan_dial(&self, peer: EndpointId, route: bool) -> ceiling::DialPlan {
         let mut inner = self.lock();
         let plan = inner.ceiling.plan_dial(peer, route);
-        inner.sync_pin(peer);
+        inner.sync_pin(peer, "plan_dial");
         plan
     }
 
@@ -579,7 +579,7 @@ impl SignalAdmission {
     pub(crate) fn release_dial(&self, peer: EndpointId) {
         let mut inner = self.lock();
         inner.ceiling.release_dial(peer);
-        inner.sync_pin(peer);
+        inner.sync_pin(peer, "release_dial");
     }
 
     /// When `conn` closes, whatever the reason, the peer leaves the ledger unless it holds another
@@ -664,7 +664,7 @@ impl SignalAdmission {
         let mut inner = self.lock();
         let evictions = inner.ceiling.set_neighbors(neighbors, Instant::now());
         for peer in neighbors {
-            inner.sync_pin(*peer);
+            inner.sync_pin(*peer, "set_neighbors");
         }
         let victims = inner.take_victims(&evictions, "a gossip neighbor");
         drop(inner);
