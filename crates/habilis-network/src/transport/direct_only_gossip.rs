@@ -160,7 +160,7 @@ pub(super) fn watch_relay_policy_and_refusal(
     use futures_util::StreamExt as _;
     let weak = gossip_conn.weak_handle();
     let mut events = gossip_conn.path_events();
-    if let Some(sink) = refused_sink.filter(|_| gossip_conn.side().is_client()) {
+    if let Some(sink) = refused_sink {
         let peer = gossip_conn.remote_id();
         let closed = weak.closed();
         task::spawn(async move {
