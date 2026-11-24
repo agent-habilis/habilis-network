@@ -325,12 +325,15 @@ impl Ceiling {
     /// A unicast QUIC connection to `peer` is open. Returns the admission of a peer that
     /// was not a unit before.
     pub(crate) fn register_quic(&mut self, peer: EndpointId, now: Instant) -> Admission {
-        let quic = if self.awaiting.remove(&peer) {
-            Quic::Pinned
-        } else {
-            Quic::Unit
-        };
-        self.register_quic_as(peer, now, quic)
+        if !self.awaiting.remove(&peer) {
+            return self.register_quic_as(peer, now, Quic::Unit);
+        }
+        // The connection of our dial rides multihop alone and the sends of the node use it, so it
+        // decides the entry, whatever the peer opened before: the unit of an inbound connection
+        // goes back, and an extra can take it.
+        let admission = self.register_with(peer, now, |entry| entry.quic = Quic::Pinned);
+        self.promote_extras();
+        admission
     }
 
     /// A session to `peer` is open.
@@ -499,11 +502,10 @@ impl Ceiling {
             .collect()
     }
 
-    /// A unicast connection of `peer`, as a unit, as an extra or as the connection of a pinned
-    /// dial. An extra that the peer opened before our dial opened its own becomes the pinned one.
+    /// A unicast connection of `peer`, as a unit or as an extra.
     fn register_quic_as(&mut self, peer: EndpointId, now: Instant, quic: Quic) -> Admission {
         self.register_with(peer, now, |entry| {
-            if entry.quic == Quic::Absent || (quic == Quic::Pinned && entry.quic == Quic::Extra) {
+            if entry.quic == Quic::Absent {
                 entry.quic = quic;
             }
         })
