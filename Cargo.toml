@@ -161,7 +161,9 @@ iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/a
 # sends one walk that is at its end to a counted member, so that a walk that ends at the contact node
 # cannot leave the joiner with no member neighbor; the update of `url` (RUSTSEC-2026-0592); and the
 # scope of the unmaintained advisories of cargo deny.
-iroh-gossip = { version = "=0.103.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "3e9b18c8b45328b2375b8f207d0cb8af1d7d6d83", default-features = false, features = ["net"] }
+# Then PR #12 of agent-habilis/iroh-gossip (not merged): a node with no counted active peer that learns
+# a passive peer asks it with high priority, so that a lone node does not wait for the next event.
+iroh-gossip = { version = "=0.103.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "ae346f541de24682d8b9e7ab951c765e8a43cb41", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
 # and it resolves to the same crates.io release iroh itself depends on.
