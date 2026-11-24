@@ -294,6 +294,141 @@ mod tests {
         });
     }
 
+    /// The node is at its ceiling with an extra that it dialed: no unit was free or evictable, and
+    /// no route was known when it dialed. A send finds the connection unusable, a route exists now,
+    /// and the plan says: dial through multihop. The pool used to find the open connection first
+    /// and reuse it, so the plan was not made and every later send failed the same way. The
+    /// connection is not the pinned one, so the route replaces it: it closes, and the dial takes the
+    /// route. The route of the test answers nothing, so the dial itself fails.
+    #[test]
+    fn a_pinned_dial_replaces_an_open_connection_that_the_ledger_does_not_pin() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) =
+                pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            let _busy = admission.busy(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            admission.note_connection(&connection);
+            assert!(admission.is_extra(server), "no unit was free or evictable");
+            assert_eq!(pool.dials_to(server), 1, "one dial made the connection");
+
+            assert!(
+                pool.dial_and_send_in_background(server, bytes::Bytes::from_static(b"hi"), || {
+                    Some(a_route())
+                })
+                .await,
+                "a send with a route plans a dial"
+            );
+            time::timeout(Duration::from_secs(10), async {
+                while pool.is_dialing(server) {
+                    task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the dial ends");
+
+            assert!(
+                connection.close_reason().is_some(),
+                "the connection that the ledger does not pin is closed for the route"
+            );
+            assert_eq!(
+                pool.dials_to(server),
+                2,
+                "the plan dialed through the route"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// Control: the plan is a direct dial, because the peer holds a unit. The open connection is
+    /// reused and nothing is dialed, though the send has a route.
+    #[test]
+    fn a_direct_plan_reuses_an_open_connection() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) =
+                pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let admission = SignalAdmission::new(3);
+            admission.note_success(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            admission.note_connection(&connection);
+            assert!(!admission.is_extra(server), "the connection holds a unit");
+
+            assert!(
+                pool.dial_and_send_in_background(server, bytes::Bytes::from_static(b"hi"), || {
+                    Some(a_route())
+                })
+                .await,
+                "a send with a route plans a dial"
+            );
+            time::timeout(Duration::from_secs(10), async {
+                while pool.is_dialing(server) {
+                    task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the dial ends");
+
+            assert!(
+                connection.close_reason().is_none(),
+                "the connection of a unit stays"
+            );
+            assert_eq!(pool.dials_to(server), 1, "nothing is dialed");
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// Control: the ledger pins the peer and its pinned connection is open. The plan is Multihop
+    /// and the open connection is the pinned one: it is reused and nothing is dialed.
+    #[test]
+    fn a_pinned_dial_reuses_the_open_connection_that_the_ledger_pins() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) =
+                pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            let _busy = admission.busy(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            admission.plan_dial(server, true);
+            admission.note_connection(&connection);
+            assert!(
+                admission.pinned_peers().contains(&server),
+                "the ledger pins the open connection"
+            );
+
+            assert!(
+                pool.dial_and_send_in_background(server, bytes::Bytes::from_static(b"hi"), || {
+                    Some(a_route())
+                })
+                .await,
+                "a send with a route plans a dial"
+            );
+            time::timeout(Duration::from_secs(10), async {
+                while pool.is_dialing(server) {
+                    task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the dial ends");
+
+            assert!(
+                connection.close_reason().is_none(),
+                "the pinned connection stays"
+            );
+            assert_eq!(pool.dials_to(server), 1, "nothing is dialed");
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
     /// The pool counts its dials for each peer, so that a test can say that a node dialed nobody
     /// for a peer. A dial counts when it reaches the endpoint, and a send over a warm connection
     /// does not.
