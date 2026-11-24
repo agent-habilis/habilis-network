@@ -177,6 +177,40 @@ mod tests {
         );
     }
 
+    /// The state that the at-cap flake reaches (2 of 100 runs): a node with no neighbor, and every
+    /// other node full and silent. A retry at each alive tick (15 s) asks each of them with a
+    /// `Neighbor` request. The silence is read as a refusal 20 s after the first ask, and the
+    /// node, with no neighbor and a refusal read, asks with a `Join` at once. Before the fix the
+    /// clock of an ask restarted with each retry, so no refusal was read and the node asked
+    /// `Neighbor` for ever.
+    #[test]
+    fn a_node_with_no_neighbor_that_every_peer_leaves_unanswered_asks_a_join_by_the_second_retry() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = state_with_links(0);
+        let start = Instant::now();
+        let candidates = [endpoint_id(2), endpoint_id(3)];
+        let retry_every = SECOND * 15;
+
+        let mut asked: Vec<GraftRequest> = Vec::new();
+        for tick in 0..=2_u32 {
+            let now = start + retry_every * tick;
+            state.settle_graft_backoff(now);
+            for candidate in candidates {
+                asked.push(ask(&mut state, candidate, now));
+            }
+        }
+        assert!(
+            asked[..4]
+                .iter()
+                .all(|request| *request == GraftRequest::Neighbor),
+            "the first 2 retries, 0 s and 15 s: no refusal is read yet, so every ask is a Neighbor"
+        );
+        assert!(
+            asked[4..].contains(&GraftRequest::Join),
+            "the retry at 30 s: the silence of 30 s is a refusal, so the node asks with a Join: {asked:?}"
+        );
+    }
+
     /// Control: a node at G - 1 for which no ask stayed unanswered for `GRAFT_REFUSED_AFTER`
     /// keeps asking with `Neighbor`. It is not stuck, so it makes no member of a full view drop a
     /// neighbor. The test does not settle the backoff: `settle_graft_backoff` reads an ask that

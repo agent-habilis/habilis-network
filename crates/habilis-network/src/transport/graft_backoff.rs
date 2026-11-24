@@ -35,7 +35,7 @@ const JITTER: f64 = 0.2;
 
 #[derive(Debug, Clone, Copy)]
 struct Entry {
-    /// When the last `Neighbor` request went out and no answer was read yet.
+    /// When the first `Neighbor` request of the open ask went out and no answer was read yet.
     asked_at: Option<Instant>,
     /// Until when the peer is left alone.
     until: Option<Instant>,
@@ -54,8 +54,9 @@ impl GraftBackoff {
     /// A `Neighbor` request went out to `peer` at `now`.
     ///
     /// A request during the wait is not recorded: its silence is no new refusal, and it must not
-    /// double the step. A peer that was quiet for longer than the longest wait starts again at the
-    /// first wait.
+    /// double the step. A request while an earlier one is still open keeps the time of the first.
+    ///
+    /// A peer that was quiet for longer than the longest wait starts again at the first wait.
     pub(crate) fn asked(&mut self, peer: EndpointId, now: Instant) {
         let first = GRAFT_BACKOFF_FIRST;
         let longest = GRAFT_BACKOFF_MAX;
@@ -76,7 +77,10 @@ impl GraftBackoff {
             entry.until = None;
             entry.refused_at = None;
         }
-        entry.asked_at = Some(now);
+        // An ask that no link answered yet is one question: a new ask of the same peer does not
+        // restart its clock, or a peer that is asked again before `GRAFT_REFUSED_AFTER` ends is
+        // never read as refused.
+        entry.asked_at.get_or_insert(now);
     }
 
     /// Read the answers: every peer that was asked at least [`GRAFT_REFUSED_AFTER`] ago and
@@ -296,6 +300,29 @@ mod tests {
                 "spread {spread}"
             );
         }
+    }
+
+    /// An ask that no link answered is one question. A peer that is asked again at each alive
+    /// tick (15 s) is read as refused 20 s after the first ask, not after the last one: a clock
+    /// that restarts with each ask never reaches 20 s, and a silent peer is never read as refused.
+    #[test]
+    fn an_ask_repeated_each_tick_is_read_as_refused_twenty_seconds_after_the_first() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (start, peer) = (Instant::now(), testing::endpoint_id(1));
+        let mut backoff = GraftBackoff::default();
+        for tick in 0..=2_u64 {
+            let now = at(start, tick * 15);
+            backoff.settle(now, unlinked, 0.0);
+            backoff.asked(peer, now);
+        }
+        assert!(
+            backoff.has_refusal(at(start, 30)),
+            "the ask of t = 0 is 30 s old, with no link: refused"
+        );
+        assert!(
+            backoff.is_blocked(&peer, at(start, 31)),
+            "the refused peer waits"
+        );
     }
 
     /// A request that goes out during the wait is not a new ask: its silence must not double the
