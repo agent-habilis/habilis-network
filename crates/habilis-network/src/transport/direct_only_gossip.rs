@@ -95,7 +95,11 @@ impl ProtocolHandler for DirectOnlyGossip {
             return Ok(());
         }
         if !self.relay_transport.relay_allowed() {
-            watch_relay_policy(&connection, None);
+            let refused_sink = self
+                .session_gate
+                .as_ref()
+                .and_then(|(_, admission, _)| admission.relay_refused_sink());
+            watch_relay_policy_and_refusal(&connection, None, refused_sink);
         }
         self.inner
             .handle_connection(connection)
@@ -108,6 +112,15 @@ impl ProtocolHandler for DirectOnlyGossip {
             tracing::warn!(target: super::LOG_TARGET, %error, "error while shutting down gossip");
         }
     }
+}
+
+/// The watch of [`watch_relay_policy_and_refusal`] with no report of a refusal.
+#[cfg(test)]
+pub(super) fn watch_relay_policy(
+    gossip_conn: &Connection,
+    path_sink: Option<mpsc::UnboundedSender<super::probe::PathChange>>,
+) {
+    watch_relay_policy_and_refusal(gossip_conn, path_sink, None);
 }
 
 /// Keep the relay policy on a gossip connection, whichever end dialed it: one whose selected
@@ -130,19 +143,15 @@ impl ProtocolHandler for DirectOnlyGossip {
 ///
 /// Holds the connection weakly: the watcher must not keep a link open that
 /// gossip has dropped.
-pub(super) fn watch_relay_policy(
-    gossip_conn: &Connection,
-    path_sink: Option<mpsc::UnboundedSender<super::probe::PathChange>>,
-) {
-    watch_relay_policy_and_refusal(gossip_conn, path_sink, None);
-}
-
-/// [`watch_relay_policy`] for a link that we dialed: when the peer ends it with the relay-refused
-/// code, the pair has no direct path now, and `refused_sink` tells the loop. The close comes from
-/// `WeakConnectionHandle::closed`, taken while the caller still holds the connection: it gets the
-/// close and its reason even when every handle is dropped before the close, so the report does
-/// not depend on who drops first, and the future keeps no link alive. A close that is not the
-/// peer's own relay-refused close (ours, idle, eviction, shutdown) reports nothing.
+///
+/// With a `refused_sink`, the watch also reports a peer's relay-refused close. When the peer ends
+/// the link with that code, the pair has no direct path now, and the sink tells the loop. The fact
+/// is the same at both ends of the pair, so the end that dialed and the end that accepted both
+/// report it. The close comes from `WeakConnectionHandle::closed`, taken while the caller still
+/// holds the connection: it gets the close and its reason even when every handle is dropped before
+/// the close, so the report does not depend on who drops first, and the future keeps no link
+/// alive. A close that is not the peer's own relay-refused close (ours, idle, eviction, shutdown)
+/// reports nothing.
 pub(super) fn watch_relay_policy_and_refusal(
     gossip_conn: &Connection,
     path_sink: Option<mpsc::UnboundedSender<super::probe::PathChange>>,
@@ -348,6 +357,113 @@ mod watcher_tests {
                         (_, other) => {
                             panic!("code {code}: expected reported = {reported}, got {other:?}")
                         }
+                    }
+                    router.shutdown().await.expect("shutdown");
+                    client.close().await;
+                }
+            },
+        );
+    }
+
+    /// The end that accepted a gossip link reports the relay-refused close of the peer, as the end
+    /// that dialed it does, and reports no other close: the fact that the pair has no direct path
+    /// is the same at both ends. In the run of 2026-11-24 the far member accepted a link that its
+    /// peer had dialed and closed on the relay path, and it got no report, so it kept that peer as
+    /// `Direct`. The cases are the peer's relay-refused code, the peer's other codes, and a close
+    /// of our own with the relay-refused code.
+    ///
+    /// No timer decides a case. The dialer closes after the acceptor says that its watch runs. The
+    /// watch owns the only sink, and drops it when the connection is closed, so the end of the
+    /// reports is the proof that none was sent.
+    #[test]
+    fn the_end_that_accepted_a_link_reports_the_relay_refused_close_of_the_peer_and_no_other_close()
+    {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use std::sync::{Arc, Mutex};
+
+                use crate::transport::probe::RelayRefused;
+
+                const ALPN: &[u8] = b"habilis-mesh/test-refusal-accepted/0";
+
+                #[derive(Debug, Clone)]
+                struct WatchAndHold {
+                    // Arc: the router clones the handler, and the sink is taken once, by the first accept.
+                    sink: Arc<Mutex<Option<mpsc::UnboundedSender<RelayRefused>>>>,
+                    watching: mpsc::UnboundedSender<()>,
+                    close_here: Option<u32>,
+                }
+                impl ProtocolHandler for WatchAndHold {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        let sink = self.sink.lock().expect("sink lock").take();
+                        super::watch_relay_policy_and_refusal(&connection, None, sink);
+                        let _ = self.watching.send(());
+                        if let Some(code) = self.close_here {
+                            connection.close(code.into(), b"test");
+                        }
+                        connection.closed().await;
+                        Ok(())
+                    }
+                }
+                let bind = || async {
+                    iroh::Endpoint::builder(presets::Minimal)
+                        .relay_mode(iroh::RelayMode::Disabled)
+                        .bind()
+                        .await
+                        .expect("bind a loopback endpoint")
+                };
+                let refused = super::GOSSIP_RELAY_REFUSED_CODE;
+                // (code the dialer closes with, code the acceptor closes with, reported)
+                let cases = [
+                    (Some(refused), None, true),
+                    (Some(0), None, false),
+                    (Some(5), None, false),
+                    (None, Some(refused), false),
+                ];
+                for (dialer_code, acceptor_code, reported) in cases {
+                    let (sink, mut reports) = mpsc::unbounded_channel();
+                    let (watching, mut watching_rx) = mpsc::unbounded_channel();
+                    let server = bind().await;
+                    let router = Router::builder(server.clone())
+                        .accept(
+                            ALPN,
+                            WatchAndHold {
+                                // Arc: see the field; the one sink is shared by the clones of the handler.
+                                sink: Arc::new(Mutex::new(Some(sink))),
+                                watching,
+                                close_here: acceptor_code,
+                            },
+                        )
+                        .spawn();
+                    let client = bind().await;
+                    lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
+                    let connection = client.connect(server.id(), ALPN).await.expect("connect");
+                    // The watch runs on the acceptor before the dialer closes.
+                    watching_rx
+                        .recv()
+                        .await
+                        .expect("the acceptor watches the link");
+                    if let Some(code) = dialer_code {
+                        connection.close(code.into(), b"test");
+                    }
+                    // The bound is a fail-safe for a hung test: a report or the end of the reports
+                    // comes as soon as the close is read.
+                    let report = tokio_time::timeout(Duration::from_secs(30), reports.recv())
+                        .await
+                        .expect("the watch ends when the link is closed");
+                    match (reported, report) {
+                        (true, Some(RelayRefused { peer })) => assert_eq!(
+                            peer,
+                            client.id(),
+                            "the report names the peer that ended the link"
+                        ),
+                        (false, None) => {}
+                        (_, other) => panic!(
+                            "dialer {dialer_code:?}, acceptor {acceptor_code:?}: expected \
+                             reported = {reported}, got {other:?}"
+                        ),
                     }
                     router.shutdown().await.expect("shutdown");
                     client.close().await;
