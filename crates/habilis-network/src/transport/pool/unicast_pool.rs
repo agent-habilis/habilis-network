@@ -1109,8 +1109,12 @@ impl UnicastPool {
     async fn dial_now(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
         let planned = self.inner.routes.lock().remove(&eid);
         if let Some(connection) = self.open_pooled(eid, hold).await {
-            self.release_plan(eid);
-            return Ok(connection);
+            if !self.route_replaces(eid, planned.as_ref()) {
+                self.release_plan(eid);
+                return Ok(connection);
+            }
+            self.evict_if_same(eid, &connection).await;
+            connection.close(IDLE.into(), b"replaced by a route");
         }
         let Some(endpoint) = self.inner.endpoint.clone() else {
             bail!("unicast pool has no endpoint");
@@ -1223,6 +1227,18 @@ impl UnicastPool {
             address.addrs.insert(planned.route);
         }
         address
+    }
+
+    /// Whether the plan of a dial replaces the open connection of `eid`. The plan rides a route
+    /// alone, and the ledger holds no pinned connection of the peer: the open connection took no
+    /// unit and has no usable path, since the send that planned the dial found it refused. A pinned
+    /// connection that is open is the dial already, and a direct plan reuses what is open.
+    fn route_replaces(&self, eid: EndpointId, planned: Option<&PlannedRoute>) -> bool {
+        let Some(admission) = self.inner.admission.get() else {
+            return false;
+        };
+        let pinned = admission.pinned_peers();
+        planned.is_some_and(|planned| planned.alone) && !pinned.contains(&eid)
     }
 
     /// Whether the ledger pins `eid`: a peer that became a gossip neighbor is not pinned any more,
