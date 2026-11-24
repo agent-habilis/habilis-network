@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use habilis_network::membership::{self, Inspect, Membership, Request};
+use habilis_network::net::Bind;
 use habilis_network::protocol::Lookup;
 
 use habilis_network::net::test_relay;
@@ -108,6 +109,7 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
         let creator = open(
             "member-00",
             membership::JoinOptions::default()
+                .bind(Bind::Loopback)
                 .lookup(vec![Lookup::Relay])
                 .relay_urls(vec![relay.to_string()]),
         )
@@ -126,7 +128,9 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
             members.push(
                 open(
                     &format!("member-{index:02}"),
-                    membership::JoinOptions::default().mesh(Some(mesh.clone())),
+                    membership::JoinOptions::default()
+                        .bind(Bind::Loopback)
+                        .mesh(Some(mesh.clone())),
                 )
                 .await,
             );
@@ -163,7 +167,9 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
 
         let late = open(
             "member-late",
-            membership::JoinOptions::default().mesh(Some(mesh)),
+            membership::JoinOptions::default()
+                .bind(Bind::Loopback)
+                .mesh(Some(mesh)),
         )
         .await;
         let started = Instant::now();

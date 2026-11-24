@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, process};
 
 use habilis_network::membership::{self, Inspect, Membership, Request};
+use habilis_network::net::Bind;
 use habilis_network::protocol::{Mesh, MeshConfig, MeshName, Seed};
 use tokio::time;
 
@@ -55,6 +56,7 @@ async fn rows_named(member: &Membership, nickname: &str) -> usize {
 /// A member of `mesh` under `nick`.
 async fn join_as(mesh: &Mesh, nick: &str) -> Membership {
     let options: membership::JoinOptions = membership::JoinOptions::default()
+        .bind(Bind::Loopback)
         .mesh(Some(mesh.to_string()))
         .nick(Some(nick.to_owned()));
     let (sink, _events) = membership::json_sink();

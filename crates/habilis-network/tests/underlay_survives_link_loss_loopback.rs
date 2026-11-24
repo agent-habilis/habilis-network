@@ -19,6 +19,7 @@ use habilis_network::iroh::EndpointId;
 use habilis_network::membership::{
     self, Inspect, InspectTest, Linking, Membership, Messaging, Request, Routing, Ticks,
 };
+use habilis_network::net::Bind;
 use habilis_network::protocol::{Lookup, Transport};
 
 use habilis_network::net;
@@ -76,6 +77,7 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let (sink_a, _events_a) = membership::json_sink();
         let options = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some("alice".to_owned()))
             .lookup(vec![Lookup::Relay]);
         let options = options
@@ -92,6 +94,7 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
         let mesh = alice.node.mesh_id().to_string();
         let bob: Membership = membership::join(
             &membership::JoinOptions::default()
+                .bind(Bind::Loopback)
                 .nick(Some("bob".to_owned()))
                 .mesh(Some(mesh)),
             sink_b,

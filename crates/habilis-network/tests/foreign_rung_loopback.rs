@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::endpoint::presets;
 use habilis_network::membership::{self, Inspect, Membership, Request};
+use habilis_network::net::Bind;
 use habilis_network::protocol::{Mesh, MeshConfig, MeshName, Seed};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -111,6 +112,7 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
     let open = |nick: &'static str| {
         let mesh_text = mesh.to_string();
         let options = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .mesh(Some(mesh_text))
             .nick(Some(nick.to_owned()));
         async move {

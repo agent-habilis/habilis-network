@@ -15,6 +15,7 @@ use futures_util::future;
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Inbound, Inspect, Membership, Messaging, Request};
 use habilis_network::net;
+use habilis_network::net::Bind;
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time;
@@ -50,7 +51,9 @@ impl Member {
     }
 
     async fn create(nick: &'static str, relay: &RelayUrl) -> Self {
-        let named = membership::JoinOptions::default().nick(Some(nick.to_owned()));
+        let named = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
+            .nick(Some(nick.to_owned()));
         let found = named.lookup(vec![Lookup::Relay]);
         let options: membership::JoinOptions = found
             .transport(vec![Transport::Udp])
@@ -61,7 +64,9 @@ impl Member {
 
     async fn join(nick: &'static str, creator: &Self, relay: &RelayUrl) -> Self {
         let mesh = creator.membership.node.mesh_id().to_string();
-        let named = membership::JoinOptions::default().nick(Some(nick.to_owned()));
+        let named = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
+            .nick(Some(nick.to_owned()));
         let joined = named.mesh(Some(mesh));
         let options: membership::JoinOptions = joined
             .transport(vec![Transport::Udp])

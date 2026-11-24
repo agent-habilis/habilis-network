@@ -17,6 +17,7 @@
 use std::time::{Duration, Instant};
 
 use habilis_network::membership::{self, Inspect, Membership, Request, Routing};
+use habilis_network::net::Bind;
 use habilis_network::protocol::{Lookup, Transport};
 
 use habilis_network::net::test_relay;
@@ -70,6 +71,7 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (first_sink, _first_events) = membership::json_sink();
         let options = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some("m0".to_owned()))
             .lookup(vec![Lookup::Relay]);
         let relay_urls = vec![relay.to_string()];
@@ -91,6 +93,7 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
             let (sink, events) = membership::json_sink();
             sinks.push(events);
             let member_options: membership::JoinOptions = membership::JoinOptions::default()
+                .bind(Bind::Loopback)
                 .nick(Some(format!("m{index}")))
                 .mesh(Some(mesh.clone()))
                 .max_connections(CAP);
