@@ -598,6 +598,7 @@ mod tests {
     fn the_join_of_a_node_with_no_link_goes_out_one_reclaim_tick_after_the_refusal_is_due() {
         let _guard = ::habilis_network_test_tracing::init();
         let tick = Duration::from_millis(RECLAIM_MILLIS);
+        let heal_phases: Vec<u64> = (0..38).map(|step| step * RECLAIM_MILLIS).collect();
         for relay_only in 0..=3_usize {
             let mut shortest = Duration::MAX;
             let mut longest = Duration::ZERO;
@@ -607,7 +608,7 @@ mod tests {
             let mut targets: Vec<EndpointId> = Vec::new();
             for pick in 0..3 {
                 for reclaim_phase in [0, 100, 200, 300] {
-                    for heal_phase in (0..38).map(|step| step * RECLAIM_MILLIS) {
+                    for &heal_phase in &heal_phases {
                         let run = join_delay(reclaim_phase, heal_phase, relay_only, pick);
                         let case = format!(
                             "{relay_only} relay-only, pick {pick}, reclaim phase {reclaim_phase} ms, heal phase {heal_phase} ms"
@@ -668,10 +669,8 @@ mod tests {
         const WINDOW: u64 = 60_000;
         let start = Instant::now();
         let mut state = fresh_state();
-        for (index, (name, seed)) in [("one", 2), ("two", 3), ("three", 4)]
-            .into_iter()
-            .enumerate()
-        {
+        let members = [(0, "one", 2), (1, "two", 3), (2, "three", 4)];
+        for (index, name, seed) in members {
             state.names.insert(test_key(name), nick(name));
             state.bind_peer_endpoint(
                 test_key(name),
@@ -696,17 +695,17 @@ mod tests {
         let mut asks_after_join = 0;
         // What `graft_one` does with a member: it starts the relink cooldown, and asks only a
         // member that reads `Direct` (`ensure_direct`).
-        let mut graft = |state: &mut EventLoopState, peer: EndpointId, now: Instant| {
-            state.note_relink(peer, now);
+        let mut graft = |node: &mut EventLoopState, peer: EndpointId, now: Instant| {
+            node.note_relink(peer, now);
             picks += 1;
-            if state.direct.get(&peer) != Some(&DirectState::Direct) {
+            if node.direct.get(&peer) != Some(&DirectState::Direct) {
                 return;
             }
             let target = GraftTarget {
                 peer,
                 rendezvous: rendezvous(),
             };
-            match graft_request(state, target, MAX_CONNECTIONS, now, true) {
+            match graft_request(node, target, MAX_CONNECTIONS, now, true) {
                 GraftRequest::Neighbor => {
                     first_ask.get_or_insert(now);
                     if join_target == Some(peer) {
@@ -716,7 +715,7 @@ mod tests {
                 GraftRequest::Join => {
                     joins.push(now);
                     join_target.get_or_insert(peer);
-                    joins_to_direct &= state.direct.get(&peer) == Some(&DirectState::Direct);
+                    joins_to_direct &= node.direct.get(&peer) == Some(&DirectState::Direct);
                 }
                 GraftRequest::Skip => {}
             }
@@ -740,7 +739,7 @@ mod tests {
                 }
             }
         }
-        let delay = first_ask
+        let delay: Option<Duration> = first_ask
             .zip(joins.first())
             .map(|(asked, joined)| joined.duration_since(asked));
         JoinRun {
