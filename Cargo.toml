@@ -164,7 +164,7 @@ iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/a
 # Then PR #12 of agent-habilis/iroh-gossip (not merged): a node with no counted active peer that learns
 # a passive peer asks it with high priority, so that a lone node does not wait for the next event, and
 # a refused Low request is not kept as an answered one, so a High request that follows gets its answer.
-iroh-gossip = { version = "=0.103.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "76620a7d877b32cdec8621f39cf945f2b7193dc3", default-features = false, features = ["net"] }
+iroh-gossip = { version = "=0.103.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "1dca314936cfa7b83119a762ff25b439697822a1", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
 # and it resolves to the same crates.io release iroh itself depends on.
