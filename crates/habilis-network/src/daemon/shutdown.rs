@@ -16,6 +16,7 @@ mod owner;
 mod owner_pid_error;
 mod quit_params;
 
+#[cfg(all(unix, feature = "host"))]
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -28,7 +29,6 @@ use super::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
 use crate::gossip::{MergeCtx, send_tombstones};
 use crate::protocol::Message;
-#[cfg(all(unix, feature = "host"))]
 use crate::util::tuning;
 
 #[cfg(feature = "host")]
