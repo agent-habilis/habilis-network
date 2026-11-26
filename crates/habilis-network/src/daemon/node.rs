@@ -345,9 +345,10 @@ mod tests {
     use n0_future::{task, time};
 
     use super::super::event_loop::EventLoopError;
-    use super::wait_for_loop;
+    use crate::daemon::node;
 
     /// Sets the flag when the task that owns it is dropped: the task ended or was aborted.
+    // the flag is shared between the test and the task that it watches
     struct DropFlag(Arc<AtomicBool>);
 
     impl Drop for DropFlag {
@@ -358,6 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_leave_that_returns_ok_has_ended_the_loop_task() {
+        // the flag is shared between the test and the task that sets it
         let ended = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&ended);
         let loop_task = task::spawn(async move {
@@ -365,7 +367,7 @@ mod tests {
             flag.store(true, Ordering::SeqCst);
             Ok(())
         });
-        let outcome = wait_for_loop(loop_task, Duration::from_millis(50)).await;
+        let outcome = node::wait_for_loop(loop_task, Duration::from_millis(50)).await;
         assert!(
             outcome.is_err() || ended.load(Ordering::SeqCst),
             "the wait returned Ok while the loop task still ran: {outcome:?}"
@@ -374,6 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_task_that_never_ends_gives_an_error_and_is_aborted() {
+        // the flag is shared between the test and the task that owns the guard
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = DropFlag(Arc::clone(&dropped));
         let loop_task = task::spawn(async move {
@@ -382,7 +385,7 @@ mod tests {
             forever.await;
             Ok(())
         });
-        let outcome = wait_for_loop(loop_task, Duration::from_millis(50)).await;
+        let outcome = node::wait_for_loop(loop_task, Duration::from_millis(50)).await;
         time::sleep(Duration::from_millis(100)).await;
         assert!(
             outcome.is_err(),
@@ -396,6 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_task_that_ends_in_time_gives_ok_after_it_ended() {
+        // the flag is shared between the test and the task that sets it
         let ended = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&ended);
         let loop_task = task::spawn(async move {
@@ -403,7 +407,7 @@ mod tests {
             flag.store(true, Ordering::SeqCst);
             Ok(())
         });
-        let outcome = wait_for_loop(loop_task, Duration::from_secs(5)).await;
+        let outcome = node::wait_for_loop(loop_task, Duration::from_secs(5)).await;
         assert!(
             outcome.is_ok(),
             "a loop that ended in time is a clean leave: {outcome:?}"
@@ -421,7 +425,7 @@ mod tests {
                 "the loop failed",
             ))))
         });
-        let outcome = wait_for_loop(loop_task, Duration::from_secs(5)).await;
+        let outcome = node::wait_for_loop(loop_task, Duration::from_secs(5)).await;
         assert!(
             outcome.is_err(),
             "the error of the loop must reach the caller"
