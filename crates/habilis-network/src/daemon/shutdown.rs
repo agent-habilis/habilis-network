@@ -91,7 +91,7 @@ pub(super) async fn shutdown<Driver: NodeDriver>(
     .await;
     // After the broadcast, so peers get the `Left` even when logging fails.
     lifecycle::log_leaving(quit.name.as_str());
-    n0future_time::sleep(Duration::from_millis(500)).await;
+    n0future_time::sleep(tuning::LEFT_PROPAGATION).await;
 }
 /// Announce departure, and say whether the loop must hard-exit the process once it has ended.
 ///

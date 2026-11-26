@@ -1203,12 +1203,30 @@ pub const SETUP_RUNG_READ: Duration = Duration::from_millis(250);
 /// as "usually 3 seconds". 4s clears that with headroom.
 pub const RENDEZVOUS_CLOSE: Duration = Duration::from_secs(4);
 
-/// How long `Node::leave` waits for the event loop to wind down before it
-/// detaches it: the 500ms `Left` propagation sleep, then the endpoint closes,
-/// which run concurrently and so cost one [`RENDEZVOUS_CLOSE`], plus
-/// headroom. A shorter budget let `serve` return and drop the runtime while a
-/// close was still in flight, which aborts that close.
-pub const NODE_LEAVE: Duration = RENDEZVOUS_CLOSE.saturating_add(Duration::from_secs(2));
+/// The wait of the loop after it broadcast `Left`, so that the peers get the frame before the
+/// endpoints close. Part of [`NODE_LEAVE`].
+pub const LEFT_PROPAGATION: Duration = Duration::from_millis(500);
+
+/// How long `Node::leave` waits for the event loop to end: the whole of `Loop::finish` and the
+/// `Left` propagation before it, plus headroom. A node that is not closed in this time is an
+/// error, and the loop task is aborted: the node is not closed, and `leave` never says `Ok` for
+/// it.
+///
+/// The sum has 3 close budgets, not 1. `Loop::finish` awaits 3 steps in series, and each is
+/// bounded by [`RENDEZVOUS_CLOSE`]: the release of the rendezvous (its closes run concurrently,
+/// so the step costs one budget), the close of a beacon that the node shed before the quit, and
+/// the closes of the probers (spawned together, so they cost one budget). A shorter limit let
+/// `leave` return `Ok` while a close was still in flight, and the runtime that dropped next
+/// aborted the close: iroh logs `Endpoint dropped without calling Endpoint::close`. The CLI
+/// confirm wait is derived from this value.
+pub const NODE_LEAVE: Duration = LEFT_PROPAGATION
+    .saturating_add(RENDEZVOUS_CLOSE.saturating_mul(3))
+    .saturating_add(Duration::from_secs(2));
+
+const _: () = assert!(
+    NODE_LEAVE.as_millis() >= LEFT_PROPAGATION.as_millis() + 3 * RENDEZVOUS_CLOSE.as_millis(),
+    "NODE_LEAVE must cover the Left propagation and the 3 serial close budgets of Loop::finish"
+);
 
 /// Roster size (known live members) at or below which a *meshed* holder uses
 /// the brisk lone cadence ([`RIVAL_RECHECK`]) instead of the slow

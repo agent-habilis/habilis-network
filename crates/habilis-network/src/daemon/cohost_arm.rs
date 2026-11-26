@@ -48,8 +48,8 @@ use crate::util::tuning;
 /// of its own, and so do the rung probes that are still out: each closes a
 /// prober endpoint of its own, which a departure would drop open. The
 /// endpoints of the node close with them. All of these close
-/// concurrently, so the whole release costs one close budget, which is what
-/// `NODE_LEAVE` is sized for.
+/// concurrently, so the whole release costs one close budget. `NODE_LEAVE` adds the
+/// 2 steps of `Loop::finish` that follow it.
 pub(super) async fn release_rendezvous(
     rendezvous: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
