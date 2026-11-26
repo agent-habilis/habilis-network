@@ -758,6 +758,91 @@ mod tests {
         );
     }
 
+    /// **A pinned peer that opens a connection to us is released from the selector while it holds
+    /// it.** The selector keeps one selected path for each remote, so a pin that holds the remote
+    /// to multihop leaves the direct connection of that peer with no selected path, and the gate
+    /// of its acceptor refuses it. The pin of the ledger stays, the pin of the selector goes, and
+    /// it returns when the connection closes.
+    #[cfg(feature = "iroh-test-utils")]
+    #[test]
+    fn a_pinned_peer_that_dials_us_is_released_from_the_selector_while_it_holds_it() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                use habilis_network_iroh_transport_util as selector;
+                use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+                #[derive(Debug, Clone, Copy)]
+                struct Hold;
+                impl ProtocolHandler for Hold {
+                    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                        connection.closed().await;
+                        Ok(())
+                    }
+                }
+                async fn until(mut condition: impl FnMut() -> bool) -> bool {
+                    let started = tokio_Instant::now();
+                    while !condition() {
+                        if started.elapsed() > Duration::from_secs(10) {
+                            return false;
+                        }
+                        time::sleep(Duration::from_millis(50)).await;
+                    }
+                    true
+                }
+                let (relay_url, _relay_server) =
+                    test_relay::spawn_plain().await.expect("local relay");
+                let admission = SignalAdmission::new(1);
+                let server = Fixture::bind(&relay_url, Some(admission.connection_hook())).await;
+                let router = Router::builder(server.clone())
+                    .accept(super::super::UNICAST_ALPN, Hold)
+                    .spawn();
+                let client = Fixture::bind(&relay_url, None).await;
+                let (local, pinned) = (server.id(), client.id());
+                admission.set_local(local);
+                admission.note_success(peer(1));
+                let units = admission.direct_units();
+                assert_eq!(
+                    admission.plan_dial(pinned, true),
+                    DialPlan::Multihop,
+                    "the peer is pinned"
+                );
+                assert!(
+                    selector::is_pinned(local, pinned),
+                    "the selector holds the remote to multihop"
+                );
+
+                let relayed = iroh::EndpointAddr::new(local).with_relay_url(relay_url.clone());
+                let connection = client
+                    .connect(relayed, super::super::UNICAST_ALPN)
+                    .await
+                    .expect("the pinned peer dials us");
+                assert!(
+                    until(|| !selector::is_pinned(local, pinned)).await,
+                    "the selector pin goes while the peer holds a connection that it opened"
+                );
+                assert!(
+                    admission.is_pinned(pinned),
+                    "the ledger still says pinned: no unit, counted toward twice the ceiling"
+                );
+                assert_eq!(
+                    (admission.direct_units(), admission.over_ceiling()),
+                    (units, 0),
+                    "the release of the selector pin takes no unit and evicts nobody"
+                );
+
+                connection.close(0u32.into(), b"done");
+                assert!(
+                    until(|| selector::is_pinned(local, pinned)).await,
+                    "the selector pin returns when the connection of the peer closes"
+                );
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
+    }
+
     /// The offer of a pinned peer is refused: this node rides multihop for the pair, and a session
     /// would take a unit, or evict a peer, at the ceiling that pinned it. The remote side of the pair
     /// is not pinned on its own side, so it reads the pair as proven and offers. Our own offer is a

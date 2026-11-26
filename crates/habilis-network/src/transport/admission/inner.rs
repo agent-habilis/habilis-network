@@ -76,7 +76,10 @@ impl Inner {
         let Some(local) = self.local else {
             return;
         };
-        let pinned = self.ceiling.pinned(peer);
+        // The selector keeps one selected path for each remote. A peer that holds a live direct
+        // connection that it opened to us has a direct path, so the selector must not hold the
+        // remote to multihop: the pin of the ledger stays and the selector pin goes.
+        let pinned = self.ceiling.pinned(peer) && !self.holds_inbound(peer);
         if pinned != habilis_network_iroh_transport_util::is_pinned(local, peer) {
             tracing::debug!(
                 target: transport::LOG_TARGET,
@@ -92,6 +95,18 @@ impl Inner {
         } else {
             habilis_network_iroh_transport_util::unpin(local, peer);
         }
+    }
+
+    /// Whether `peer` holds an open connection that it opened to us, of any protocol.
+    fn holds_inbound(&self, peer: EndpointId) -> bool {
+        self.slots.get(&peer).is_some_and(|slot| {
+            slot.conns
+                .iter()
+                .filter_map(WeakConnectionHandle::upgrade)
+                .any(|connection| {
+                    connection.close_reason().is_none() && !connection.side().is_client()
+                })
+        })
     }
 
     /// Release every pin of this table from the path selector.

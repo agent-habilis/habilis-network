@@ -497,6 +497,7 @@ impl SignalAdmission {
         } else {
             inner.ceiling.register_inbound(peer, Instant::now())
         };
+        inner.sync_pin(peer, "inbound connection");
         let victims = inner.take_victims(&evictions, "a connection");
         if !inner.sampler_running {
             inner.sampler_running = true;
@@ -593,6 +594,9 @@ impl SignalAdmission {
             let peer = connection.remote_id();
             let mut inner = admission.lock();
             inner.drop_quic_without_connection(peer);
+            // The connection that this peer opened may have been the one that kept the selector
+            // pin off: read the pin again.
+            inner.sync_pin(peer, "connection closed");
             if let ConnectionError::ApplicationClosed(close) = reason
                 && close.error_code.into_inner() == u64::from(webrtc::close_code::EVICTED)
             {
