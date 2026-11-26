@@ -121,11 +121,12 @@ fn text_of(from: &str, to: &str) -> String {
 fn a_directed_send_at_the_cap_on_udp_alone_that_answers_ok_arrives() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::transport=info");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        // Open fault, not this test's subject: the relay reports that another endpoint connected
-        // with the same endpoint id. Measured once, with 10 members on one relay at a cap of 2:
-        // about 3 of 4 runs, with and without the acknowledgement of a unicast frame. It is not
-        // measured again with 15 members at a cap of 8: this allow hides it from the 5 runs of the
-        // move, so they cannot count it.
+        // The relay can report that another endpoint connected with the same endpoint id. Measured
+        // cause: 2 or more members re-claim the rendezvous within a few ms after its holder
+        // left, the rival check sheds all but the lowest id in 0.36 to 0.39 s (4 of 5 double
+        // claims, 16 members), and this WARN is the trace of that overlap. A claim race at
+        // formation (a holder that is bound and not serving yet answers the probe with a refusal)
+        // is by the code, and not seen in this test.
         habilis_network_test_tracing::allow_warn(
             "iroh::socket::transports::relay::actor",
             "Another endpoint connected with the same endpoint id",
