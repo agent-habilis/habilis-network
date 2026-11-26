@@ -1,20 +1,29 @@
 //! A node at its cap of direct connections reaches a new peer through a connected peer, and it
 //! evicts nobody.
 //!
-//! Four native members on a local relay, with the list `udp,webrtc,multihop`. Alice has a cap of 2
-//! and holds two gossip neighbors. The gossip view is random, so the test reads which two: the third
-//! member is the far one, and it can reach one neighbor only (the hub): IP and `WebRTC` are cut
-//! between the far member and each of alice and the other neighbor, on the application endpoints
-//! and on the underlays. A send from alice to the far member has no free unit, and the route
-//! alice > hub > far exists, so the dial must take that route and pin the peer.
+//! Ten native members on a local relay, with the list `udp,webrtc,multihop`. Every member has the
+//! minimum cap of 8, so alice holds 8 gossip neighbors and one member is left out of her view. The
+//! gossip view is random, so the test reads which 8: the member outside her view is the far one,
+//! and a neighbor of alice that holds the far member in its own view is the hub. IP and `WebRTC`
+//! are cut between the far member and each of alice and the 7 other neighbors, on the application
+//! endpoints and on the underlays, and the relay too between alice and the far member. A send from
+//! alice to the far member has no free unit, and the route alice > hub > far exists, so the dial
+//! must take that route and pin the peer.
+//!
+//! The setup has up to 3 tries. A try is void only when the far member is a neighbor of alice at
+//! the read before the send, while the frames go, or at the read of the snapshot that the asserts
+//! use: the view of a node changes during a run, and a member that the hub reaches can enter it.
+//! A void try prints both views and leaves all its members, and the next try builds a new mesh. The
+//! asserts run in full on the first try that held, and the eviction assert reads the log of that
+//! try only. Three void tries fail the test.
 //!
 //! What the run shows:
 //! - both frames arrive, and bob forwards cells for them;
 //! - no member evicts a connection at its ceiling;
 //! - the snapshot of alice shows dave on the multihop path, pinned, with bob as the first hop, and
-//!   3 connections of the 4 that twice the cap allows;
-//! - alice counts 2 direct units, none over the cap, after the send. A direct dial to dave would
-//!   take a third unit, and an eviction would take one of bob and carol.
+//!   9 connections of the 16 that twice the cap allows;
+//! - alice counts 8 direct units, none over the cap, after the send. A direct dial to dave would
+//!   take a ninth unit, and an eviction would take one of her neighbors.
 //!
 //! What it does not show: that the connection of alice to dave carries no IP path. The unit tests
 //! of the pin set and of the selectors do. This test shows that the node does not dial direct.
@@ -34,14 +43,21 @@ use habilis_network::net;
 use habilis_network::net::Bind;
 use habilis_network::protocol::{Lookup, Transport};
 use habilis_network::topology::{PathLabel, TopologySnapshot};
+use habilis_network::util::tuning::MIN_MAX_CONNECTIONS;
 use habilis_network_iroh_multihop_transport::MultihopCounters;
+use habilis_network_iroh_webrtc_transport::Rung;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time;
 
+/// The cap of every member: the minimum. It sets the size of the gossip view of each one, so alice
+/// holds a full view when she has this many neighbors, and a mesh needs more members than the cap.
+const CAP: usize = MIN_MAX_CONNECTIONS;
+/// The joiners. Alice and these 9 make 10 members, one more than the cap plus the creator.
+const JOINERS: [&str; 9] = [
+    "bob", "carol", "dave", "erin", "frank", "grace", "heidi", "ivan", "judy",
+];
 /// Long enough for the cuts to take effect, for the gossip view to settle, and for the topology to
 /// hold the route.
-/// The cap of the three joiners. It sets the size of their gossip view, as the cap of alice does.
-const JOINER_CAP: usize = 2;
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
 /// The WARN that the underlay logs for a hop that stays on the relay for longer than the stuck limit.
 const STUCK_TARGET: &str = "habilis_network_iroh_multihop_transport::underlay";
@@ -49,9 +65,9 @@ const STUCK_TEXT: &str =
     "multihop underlay stays on the relay: this hop is not advertised as a link";
 /// How long the snapshot may take to show the path of a peer after its first frame.
 const LABEL_DEADLINE: Duration = Duration::from_secs(60);
-/// The line that an eviction at the ceiling logs, on the transport target.
 /// The cause that the eviction line carries when a gossip neighbor took the unit.
 const NEIGHBOR_CAUSE: &str = "cause=\"a gossip neighbor\"";
+/// The line that an eviction at the ceiling logs, on the transport target.
 const EVICTION_LINE: &str = "evicting a direct connection at the ceiling";
 
 struct Member {
@@ -171,6 +187,14 @@ impl Member {
             .expect("the loop answers")
     }
 
+    /// The endpoint id of this member on the application endpoint.
+    async fn endpoint_id(&self) -> iroh::EndpointId {
+        self.membership
+            .request(|reply| Request::InspectTest(InspectTest::EndpointId { reply }))
+            .await
+            .expect("the loop answers")
+    }
+
     /// The short endpoint id of this member, as the eviction lines of the transport name it.
     async fn short_id(&self) -> String {
         let id = self
@@ -253,20 +277,47 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
     }
 }
 
-/// IP between the two, on the application endpoints and on the underlays, both ways.
-async fn cut_ip_between(first: &Member, second: &Member) {
-    first.block_ip_to(second.ports()).await;
-    second.block_ip_to(first.ports()).await;
-    for (from, to) in [(first, second), (second, first)] {
-        habilis_network_iroh_webrtc_transport::block_ip_to(from.underlay_id(), to.underlay_ports());
+/// The far member and each member of `others` have no direct path left: `WebRTC` refused on both
+/// ends, and IP blocked on both ends, on the application endpoints and on the underlays. The block
+/// of a node REPLACES its earlier set, so each node gets one call with every port it must not
+/// reach: the far member the union of the ports of all `others`, and each other member the ports
+/// of the far member.
+async fn cut_far_from(far: &Member, far_nick: &str, others: &[(&str, &Member)]) {
+    let mut far_app_ports: Vec<u16> = Vec::new();
+    let mut far_underlay_ports: Vec<u16> = Vec::new();
+    for (other_nick, other) in others {
+        other.deny_peer(far_nick).await;
+        far.deny_peer(other_nick).await;
+        far_app_ports.extend(other.ports());
+        far_underlay_ports.extend(other.underlay_ports());
+        other.block_ip_to(far.ports()).await;
+        habilis_network_iroh_webrtc_transport::block_ip_to(
+            other.underlay_id(),
+            far.underlay_ports(),
+        );
     }
+    far.block_ip_to(far_app_ports).await;
+    habilis_network_iroh_webrtc_transport::block_ip_to(far.underlay_id(), far_underlay_ports);
 }
 
-/// `WebRTC` and IP both ways: the pair has no direct path left.
-async fn cut_between(first: &Member, second: &Member, first_nick: &str, second_nick: &str) {
-    first.deny_peer(second_nick).await;
-    second.deny_peer(first_nick).await;
-    cut_ip_between(first, second).await;
+/// The relay too, both ways, on the application endpoints and on the underlays: the pair has no
+/// direct path and no relay path. The far member can still enter the view of alice over a route
+/// through the hub, and then the try is void.
+async fn cut_relay_between(first: &Member, second: &Member) {
+    for (from, to) in [(first, second), (second, first)] {
+        habilis_network_iroh_webrtc_transport::block_rung_to(
+            from.endpoint_id().await,
+            Rung::Relay,
+            to.endpoint_id().await,
+            true,
+        );
+        habilis_network_iroh_webrtc_transport::block_rung_to(
+            from.underlay_id(),
+            Rung::Relay,
+            to.underlay_id(),
+            true,
+        );
+    }
 }
 
 /// What the members counted, for the message of a failure.
@@ -382,19 +433,19 @@ fn assert_far_is_pinned_through_hub(snapshot: &TopologySnapshot, far: &str, hub:
             snapshot.direct_units,
             snapshot.over_ceiling
         ),
-        (2, 2, 0),
+        (CAP, CAP, 0),
         "alice is at its cap and not over it: {snapshot:?}"
     );
     assert_eq!(
         (snapshot.connected_peers, snapshot.connected_cap),
-        (3, 4),
+        (CAP + 1, 2 * CAP),
         "the pinned connection counts toward 2N: {snapshot:?}"
     );
 }
 
-/// Alice holds a full ceiling: two gossip neighbors for 2 units. The gossip view is random, so the
-/// test waits until the same two stay for three reads, and the member of `nicks` that is not one of
-/// them is the far one.
+/// Alice holds a full ceiling: `CAP` gossip neighbors for `CAP` units. The gossip view is random, so
+/// the test waits until the same neighbors stay for three reads, and the member of `nicks` that is
+/// not one of them is the far one.
 async fn far_member(alice: &Member, nicks: &[&str]) -> String {
     let started = Instant::now();
     let mut previous: Vec<String> = Vec::new();
@@ -403,24 +454,275 @@ async fn far_member(alice: &Member, nicks: &[&str]) -> String {
         let snapshot = alice.snapshot().await;
         let names: Vec<&str> = neighbor_nicks(&snapshot);
         let neighbors: Vec<String> = names.iter().map(|nick| (*nick).to_owned()).collect();
-        let settled = snapshot.direct_units == 2
+        let settled = snapshot.direct_units == CAP
             && snapshot.over_ceiling == 0
-            && neighbors.len() == 2
+            && neighbors.len() == CAP
             && neighbors == previous;
         stable = if settled { stable + 1 } else { 0 };
         if stable >= 3 {
             let far = nicks.iter().find(|nick| !names.contains(nick));
             return far
-                .expect("three members and two neighbors leave one far")
+                .expect("nine joiners and eight neighbors leave one far")
                 .to_string();
         }
         assert!(
             started.elapsed() < STEP_DEADLINE,
-            "alice never settled with two neighbors ({neighbors:?})"
+            "alice never settled with {CAP} neighbors ({neighbors:?})"
         );
         previous = neighbors;
         time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+/// How long the test waits for a hub: a neighbor of alice that is also a gossip neighbor of the far
+/// member. A mesh of 10 at cap 8 leaves each node one member outside its view, so the shape is not
+/// fixed by the size and the run reads it.
+const HUB_DEADLINE: Duration = Duration::from_mins(1);
+
+/// A neighbor of alice that holds the far member in its own view. A run that never gets one fails,
+/// with both views in the text: a skip in silence proves nothing.
+async fn hub_of(alice: &Member, joined: &[(&str, Member)], far: &str) -> String {
+    let started = Instant::now();
+    loop {
+        let alice_view = alice.snapshot().await;
+        let alice_names: Vec<&str> = neighbor_nicks(&alice_view);
+        let mut views: Vec<String> = Vec::new();
+        for (nick, member) in joined {
+            if *nick == far || !alice_names.contains(nick) {
+                continue;
+            }
+            let view = member.snapshot().await;
+            let names: Vec<&str> = neighbor_nicks(&view);
+            if names.contains(&far) {
+                return (*nick).to_owned();
+            }
+            views.push(format!("{nick}: {names:?}"));
+        }
+        assert!(
+            started.elapsed() < HUB_DEADLINE,
+            "no hub: no neighbor of alice holds {far} in its view. alice: {alice_names:?}; \
+             neighbors of alice: {views:?}"
+        );
+        time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// The premise at a read: the far member is no neighbor of alice, and the hub still holds it.
+/// `Err` names both views: the try is void, not failed.
+async fn premise_holds(
+    alice: &Member,
+    hub: &Member,
+    far: &str,
+    hub_nick: &str,
+    when: &str,
+) -> Result<(), String> {
+    let alice_view = alice.snapshot().await;
+    let hub_view = hub.snapshot().await;
+    let alice_names: Vec<&str> = neighbor_nicks(&alice_view);
+    let hub_names: Vec<&str> = neighbor_nicks(&hub_view);
+    if !alice_names.contains(&far) && hub_names.contains(&far) {
+        return Ok(());
+    }
+    Err(format!(
+        "premise void {when}: {far} must be no neighbor of alice and a neighbor of {hub_nick}. \
+         alice: {alice_names:?}; {hub_nick}: {hub_names:?}"
+    ))
+}
+
+/// The most tries of the setup. A try is void only when the premise read finds the far member in
+/// the view of alice: the view of a node changes during a run, and a member that a hub reaches
+/// can be taken into it. A void try ends its members and the next try builds a new mesh.
+const TRIES: u32 = 3;
+
+/// Every member of a try leaves.
+async fn end_try(alice: Member, hub: Member, far: Member, joined: Vec<(&str, Member)>) {
+    let mut everyone: Vec<Member> = vec![alice, hub, far];
+    everyone.extend(joined.into_iter().map(|(_, member)| member));
+    for member in everyone {
+        let _ = member.membership.node.leave().await;
+    }
+}
+
+/// No dial for the far member took a unit at the ceiling of alice. A new gossip neighbor takes the
+/// unit of a cached peer: that is the design. An eviction that a connection or a session caused is
+/// a dial that took a unit at the cap. Only alice is bound by the rule: a joiner that sends to a
+/// peer with no route dials direct and evicts, as a send always did.
+async fn assert_no_dial_evicted(alice: &Member, logs: &str) {
+    let evictions = logs.lines().filter(|line| line.contains(EVICTION_LINE));
+    // Each eviction line names the victim and the newcomers that took the units.
+    let eviction_lines = logs.lines().filter(|line| line.contains(EVICTION_LINE));
+    for line in eviction_lines {
+        assert!(
+            line.contains("victim=") && line.contains("newcomers="),
+            "an eviction line names the victim and the newcomers: {line}"
+        );
+    }
+    let alice_local = format!("local={}", alice.short_id().await);
+    let by_dial: Vec<&str> = evictions
+        .filter(|line| line.contains(&alice_local) && !line.contains(NEIGHBOR_CAUSE))
+        .collect();
+    assert!(
+        by_dial.is_empty(),
+        "a dial evicted a direct connection at its ceiling: {}",
+        by_dial.join("\n")
+    );
+}
+
+/// The snapshot of alice once it shows the far member pinned on the multihop path through the hub,
+/// or after the label deadline, or at once when the far member is a neighbor of alice.
+async fn snapshot_with_the_pin(alice: &Member, far_nick: &str, hub_nick: &str) -> TopologySnapshot {
+    // The path of a peer reaches the snapshot when its path watcher reports it, a moment after
+    // the first frame arrives.
+    // A frame that goes while alice holds no connection to dave dials through bob and pins dave,
+    // so the frames go on until the snapshot shows the pin.
+    let label_since = Instant::now();
+    let mut snapshot = alice.snapshot().await;
+    let mut nudge = 0_u32;
+    while !(is_on_multihop(&snapshot, far_nick)
+        && is_pinned(&snapshot, far_nick)
+        && first_hop_is(&snapshot, far_nick, hub_nick))
+        && label_since.elapsed() < LABEL_DEADLINE
+        && !neighbor_nicks(&snapshot).contains(&far_nick)
+    {
+        nudge += 1;
+        let text = format!("alice nudges dave {nudge}");
+        let _ = alice.send(far_nick, &text).await;
+        time::sleep(Duration::from_millis(500)).await;
+        snapshot = alice.snapshot().await;
+    }
+    snapshot
+}
+
+/// One try of the setup and, when the premise held at both reads, all the asserts.
+async fn run_try(relay: &RelayUrl) -> Result<(), String> {
+    // The eviction assert judges the mesh of this try: the log before the mark belongs to a
+    // mesh that an earlier void try threw away.
+    let mark = habilis_network_test_tracing::captured_logs().len();
+    let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];
+    let mut alice = Member::create("alice", relay, list, CAP).await;
+    let mut joined: Vec<(&str, Member)> = Vec::new();
+    for nick in JOINERS {
+        joined.push((nick, Member::join(nick, &alice, CAP).await));
+    }
+    let mut everyone: Vec<&Member> = vec![&alice];
+    everyone.extend(joined.iter().map(|(_, member)| member));
+    assert!(
+        rosters_hold(&everyone, JOINERS.len(), Duration::from_mins(1)).await,
+        "the ten members never formed a mesh"
+    );
+    let nicks: Vec<&str> = joined.iter().map(|(nick, _)| *nick).collect();
+    let far_nick: String = far_member(&alice, &nicks).await;
+    let far_nick: &str = &far_nick;
+    let position = joined
+        .iter()
+        .position(|(nick, _)| *nick == far_nick)
+        .expect("the far member joined");
+    let hub_name: String = hub_of(&alice, &joined, far_nick).await;
+    let (_, mut dave) = joined.remove(position);
+    let hub_position = joined
+        .iter()
+        .position(|(nick, _)| *nick == hub_name)
+        .expect("the hub joined");
+    let (hub_nick, bob) = joined.remove(hub_position);
+
+    // The far member keeps the hub and loses alice and the 7 other neighbors, so that the only
+    // way from alice to it is alice > hub > far.
+    let mut others: Vec<(&str, &Member)> = vec![("alice", &alice)];
+    others.extend(joined.iter().map(|(nick, member)| (*nick, member)));
+    cut_far_from(&dave, far_nick, &others).await;
+    cut_relay_between(&alice, &dave).await;
+    habilis_network_test_tracing::allow_warn(STUCK_TARGET, STUCK_TEXT);
+    habilis_network_test_tracing::allow_relay_cell_refusal();
+
+    // The first frame goes while no route may be known yet: a send that finds no route
+    // dials as it always did, and the test waits for a route before it counts.
+    if let Err(views) = premise_holds(&alice, &bob, far_nick, hub_nick, "at the send").await {
+        end_try(alice, bob, dave, joined).await;
+        return Err(views);
+    }
+    assert!(
+        route_known(&alice, far_nick).await,
+        "alice never learned a route to dave: {}",
+        counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
+    );
+    assert!(
+        delivered(&alice, &mut dave, far_nick, "to dave through bob").await,
+        "the frame of alice never reached dave: {}",
+        counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
+    );
+    let after_send = alice.direct_units().await;
+    assert_eq!(
+        after_send,
+        (CAP, 0),
+        "alice took a unit or evicted a peer for dave: {}",
+        counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
+    );
+
+    // Both ways. The cut takes a moment to remove a direct hop between alice and dave, and
+    // until it does a frame goes the short way. Frames go on until bob has forwarded cells
+    // for them.
+    let before = bob.forwarded_cells().await;
+    let forwarding_since = Instant::now();
+    let mut round = 0_u32;
+    while bob.forwarded_cells().await == before {
+        // The far member in the view of alice sends the frames the short way: the same event as
+        // before the send, so the try is void and not failed after the step limit.
+        if let Err(views) =
+            premise_holds(&alice, &bob, far_nick, hub_nick, "while the frames go").await
+        {
+            end_try(alice, bob, dave, joined).await;
+            return Err(views);
+        }
+        assert!(
+            forwarding_since.elapsed() < STEP_DEADLINE,
+            "bob forwarded no cell for the frames of alice and dave: {}",
+            counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
+        );
+        round += 1;
+        let reply = format!("dave answers alice {round}");
+        assert!(
+            delivered(&dave, &mut alice, "alice", &reply).await,
+            "the answer of dave never reached alice: {}",
+            counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
+        );
+        let text = format!("alice to dave {round}");
+        assert!(
+            delivered(&alice, &mut dave, far_nick, &text).await,
+            "the frame of alice never reached dave: {}",
+            counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
+        );
+        time::sleep(Duration::from_secs(1)).await;
+    }
+    let after_answer = alice.direct_units().await;
+    assert_eq!(
+        after_answer,
+        (CAP, 0),
+        "the answer of dave changed the units of alice: {}",
+        counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
+    );
+
+    let snapshot = snapshot_with_the_pin(&alice, far_nick, hub_nick).await;
+    // The second premise read is the snapshot that the asserts read: a far member that the
+    // view of alice took in during the run makes the try void.
+    let alice_names: Vec<&str> = neighbor_nicks(&snapshot);
+    if alice_names.contains(&far_nick) {
+        let views = format!(
+            "premise void at the arrival: {far_nick} is a neighbor of alice. alice: {alice_names:?}"
+        );
+        end_try(alice, bob, dave, joined).await;
+        return Err(views);
+    }
+    assert_far_is_pinned_through_hub(&snapshot, far_nick, hub_nick);
+    assert!(
+        alice.dials_to(far_nick).await >= 1,
+        "a pinned connection is the result of a dial of alice, and the pool counts it"
+    );
+
+    let captured = habilis_network_test_tracing::captured_logs();
+    assert_no_dial_evicted(&alice, &captured[mark..]).await;
+
+    end_try(alice, bob, dave, joined).await;
+    Ok(())
 }
 
 #[test]
@@ -428,141 +730,19 @@ fn a_node_at_its_cap_reaches_a_new_peer_through_a_connected_one_and_evicts_nobod
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::transport=info");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
-        let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];
-        let mut alice = Member::create("alice", &relay, list, 2).await;
-        let mut joined: Vec<(&str, Member)> = Vec::new();
-        for nick in ["bob", "carol", "dave"] {
-            joined.push((nick, Member::join(nick, &alice, JOINER_CAP).await));
+        let mut voids: Vec<String> = Vec::new();
+        for attempt in 1..=TRIES {
+            match run_try(&relay).await {
+                Ok(()) => {
+                    println!("TRIES this run needed: {attempt}");
+                    return;
+                }
+                Err(views) => {
+                    println!("TRY {attempt} void: {views}");
+                    voids.push(views);
+                }
+            }
         }
-        let mut everyone: Vec<&Member> = vec![&alice];
-        everyone.extend(joined.iter().map(|(_, member)| member));
-        assert!(
-            rosters_hold(&everyone, 3, Duration::from_mins(1)).await,
-            "the four members never formed a mesh"
-        );
-        let nicks: Vec<&str> = joined.iter().map(|(nick, _)| *nick).collect();
-        let far_nick: String = far_member(&alice, &nicks).await;
-        let far_nick: &str = &far_nick;
-        let position = joined
-            .iter()
-            .position(|(nick, _)| *nick == far_nick)
-            .expect("the far member joined");
-        let (_, mut dave) = joined.remove(position);
-        let (hub_nick, bob) = joined.remove(0);
-        let (other_nick, carol) = joined.remove(0);
-
-        // The far member keeps the hub and loses alice and the other neighbor, so that the only way
-        // from alice to it is alice > hub > far.
-        cut_between(&alice, &dave, "alice", far_nick).await;
-        cut_between(&carol, &dave, other_nick, far_nick).await;
-        habilis_network_test_tracing::allow_warn(STUCK_TARGET, STUCK_TEXT);
-        habilis_network_test_tracing::allow_relay_cell_refusal();
-
-        // The first frame goes while no route may be known yet: a send that finds no route
-        // dials as it always did, and the test waits for a route before it counts.
-        assert!(
-            route_known(&alice, far_nick).await,
-            "alice never learned a route to dave: {}",
-            counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
-        );
-        assert!(
-            delivered(&alice, &mut dave, far_nick, "to dave through bob").await,
-            "the frame of alice never reached dave: {}",
-            counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
-        );
-        let after_send = alice.direct_units().await;
-        assert_eq!(
-            after_send,
-            (2, 0),
-            "alice took a unit or evicted a peer for dave: {}",
-            counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
-        );
-
-        // Both ways. The cut takes a moment to remove a direct hop between alice and dave, and
-        // until it does a frame goes the short way. Frames go on until bob has forwarded cells
-        // for them.
-        let before = bob.forwarded_cells().await;
-        let forwarding_since = Instant::now();
-        let mut round = 0_u32;
-        while bob.forwarded_cells().await == before {
-            assert!(
-                forwarding_since.elapsed() < STEP_DEADLINE,
-                "bob forwarded no cell for the frames of alice and dave: {}",
-                counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
-            );
-            round += 1;
-            let reply = format!("dave answers alice {round}");
-            assert!(
-                delivered(&dave, &mut alice, "alice", &reply).await,
-                "the answer of dave never reached alice: {}",
-                counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
-            );
-            let text = format!("alice to dave {round}");
-            assert!(
-                delivered(&alice, &mut dave, far_nick, &text).await,
-                "the frame of alice never reached dave: {}",
-                counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
-            );
-            time::sleep(Duration::from_secs(1)).await;
-        }
-        let after_answer = alice.direct_units().await;
-        assert_eq!(
-            after_answer,
-            (2, 0),
-            "the answer of dave changed the units of alice: {}",
-            counters_of(&[("alice", &alice), (hub_nick, &bob), (far_nick, &dave)]).await
-        );
-
-        // The path of a peer reaches the snapshot when its path watcher reports it, a moment after
-        // the first frame arrives.
-        // A frame that goes while alice holds no connection to dave dials through bob and pins dave,
-        // so the frames go on until the snapshot shows the pin.
-        let label_since = Instant::now();
-        let mut snapshot = alice.snapshot().await;
-        let mut nudge = 0_u32;
-        while !(is_on_multihop(&snapshot, far_nick)
-            && is_pinned(&snapshot, far_nick)
-            && first_hop_is(&snapshot, far_nick, hub_nick))
-            && label_since.elapsed() < LABEL_DEADLINE
-        {
-            nudge += 1;
-            let text = format!("alice nudges dave {nudge}");
-            let _ = alice.send(far_nick, &text).await;
-            time::sleep(Duration::from_millis(500)).await;
-            snapshot = alice.snapshot().await;
-        }
-        assert_far_is_pinned_through_hub(&snapshot, far_nick, hub_nick);
-        assert!(
-            alice.dials_to(far_nick).await >= 1,
-            "a pinned connection is the result of a dial of alice, and the pool counts it"
-        );
-
-        let logs = habilis_network_test_tracing::captured_logs();
-        // A new gossip neighbor takes the unit of a cached peer: that is the design. An eviction
-        // that a connection or a session caused is a dial that took a unit at the cap.
-        let evictions = logs.lines().filter(|line| line.contains(EVICTION_LINE));
-        // Each eviction line names the victim and the newcomers that took the units.
-        let eviction_lines = logs.lines().filter(|line| line.contains(EVICTION_LINE));
-        for line in eviction_lines {
-            assert!(
-                line.contains("victim=") && line.contains("newcomers="),
-                "an eviction line names the victim and the newcomers: {line}"
-            );
-        }
-        // Only alice is bound by the rule: a joiner that sends to a peer with no route dials direct
-        // and evicts, as a send always did.
-        let alice_local = format!("local={}", alice.short_id().await);
-        let by_dial: Vec<&str> = evictions
-            .filter(|line| line.contains(&alice_local) && !line.contains(NEIGHBOR_CAUSE))
-            .collect();
-        assert!(
-            by_dial.is_empty(),
-            "a dial evicted a direct connection at its ceiling: {}",
-            by_dial.join("\n")
-        );
-
-        for member in [alice, bob, carol, dave] {
-            let _ = member.membership.node.leave().await;
-        }
+        panic!("premise void in {TRIES} tries: {voids:?}");
     });
 }
