@@ -17,7 +17,7 @@
 //!   `EagerProbed` members can still claim inside each other's probe
 //!   window and bind duplicate same-id copies (each capturing its own
 //!   bootstrap dial); the event loop's periodic rival re-check shed
-//!   (`daemon::event_loop::shed_rival_beacon_if_due`) re-arbitrates, so
+//!   (`daemon::cohost_arm::shed_rival_beacon_if_due`) re-arbitrates, so
 //!   the single-co-host invariant holds *eventually*, not at claim time.
 //! - **Private:** a deterministic loopback port *ladder* (no
 //!   pkarr/DNS). One member per mesh is the beacon, the holder of the
