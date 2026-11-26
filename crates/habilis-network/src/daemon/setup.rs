@@ -3371,10 +3371,10 @@ mod tests {
                 ])
                 .env(FORK_GAP_CHILD, "1");
             let output = again.output().expect("run the test binary");
+            let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
-                output.status.success(),
-                "the restart failed in its own process: {}{}",
-                String::from_utf8_lossy(&output.stdout),
+                output.status.success() && stdout.contains("1 passed"),
+                "the restart failed in its own process, or the filter matched no test: {stdout}{}",
                 String::from_utf8_lossy(&output.stderr)
             );
             return;
