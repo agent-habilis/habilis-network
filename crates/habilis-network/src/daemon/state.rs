@@ -861,7 +861,7 @@ mod tests {
         );
     }
 
-    /// The winner keeps its beacon. Its re-check is pushed one steady round, not dropped: a
+    /// The winner keeps its beacon. Its re-check is pushed to the fast base, not dropped: a
     /// holder that never re-checks never finds a co-host it does not know of.
     #[test]
     fn a_flag_from_a_higher_holder_pushes_our_re_check_out() {
@@ -893,9 +893,83 @@ mod tests {
         let next = state
             .next_rival_recheck
             .expect("the re-check is pushed out, not dropped");
-        assert!(next > now, "a steady round out, not due");
+        assert!(next > now, "pushed to the fast base, not due");
         assert_eq!(state.rival_recheck_rounds, 2, "the rounds stay");
         assert_eq!(state.rival_recheck_deferrals, 1, "the deferrals stay");
+    }
+
+    /// The winner of an arbitration in a meshed room re-checks at the fast base, not at the steady
+    /// cadence of 300 to 600 s: a node that claimed alone, and that the relay serves in our place,
+    /// sends no flag to us, and only our own re-check can find it. The push only postpones: a
+    /// re-check that is armed later than the fast base is not brought nearer.
+    #[test]
+    fn a_flag_from_a_higher_holder_brings_our_re_check_to_the_brisk_base_in_a_meshed_room() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        for byte in 1..=9u8 {
+            state.peers.insert(AuthorKey::from([byte; 32]));
+        }
+        let now = Instant::now();
+        let flag = RivalFlag {
+            proven: true,
+            held: true,
+        };
+        let signer = AuthorKey::from([9u8; 32]);
+
+        state.note_rival_beacon_flag(low, signer, high, flag, now);
+
+        let next = state.next_rival_recheck.expect("the re-check is armed");
+        assert!(
+            next <= now + brisk_wait(),
+            "the winner re-checks within the fast base, got {:?} out",
+            next.saturating_duration_since(now)
+        );
+
+        // The push is once per holder: the same holder's flag again does not move the time.
+        let first = state.next_rival_recheck;
+        state.note_rival_beacon_flag(low, signer, high, flag, now + Duration::from_secs(5));
+        assert_eq!(
+            state.next_rival_recheck, first,
+            "a second flag of the same holder does not move the re-check again"
+        );
+    }
+
+    /// A holder that learned no rival keeps its schedule: the brisk push must not leak into the plain case.
+    #[test]
+    fn a_holder_that_learned_no_rival_keeps_its_re_check() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        for byte in 1..=9u8 {
+            state.peers.insert(AuthorKey::from([byte; 32]));
+        }
+        let now = Instant::now();
+        let steady = now + Duration::from_secs(400);
+        state.next_rival_recheck = Some(steady);
+
+        state.note_rival_beacon_flag(
+            low,
+            AuthorKey::from([9u8; 32]),
+            high,
+            RivalFlag {
+                proven: true,
+                held: false,
+            },
+            now,
+        );
+
+        assert_eq!(
+            state.next_rival_recheck,
+            Some(steady),
+            "a flag that says nothing is held leaves the re-check alone"
+        );
     }
 
     /// The longest wait that the first round of a re-check can have: its fast base plus the

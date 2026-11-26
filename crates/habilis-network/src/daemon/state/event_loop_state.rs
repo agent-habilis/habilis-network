@@ -2216,13 +2216,10 @@ impl EventLoopState {
         } else if newly {
             // Once per holder, so that a holder that sends its flag again and again cannot keep
             // our re-check away. Pushed, not dropped: a holder that never re-checks never finds
-            // a co-host it does not know of.
-            let pushed = now
-                + cohost_arm::next_recheck_delay(
-                    self.rival_recheck_rounds.max(1),
-                    self.peers.len(),
-                    own,
-                );
+            // a co-host it does not know of. Pushed to the fast base, not to the steady cadence:
+            // a node that claimed alone and that the relay serves in our place sends us no flag,
+            // and only our own re-check can find it.
+            let pushed = now + cohost_arm::next_recheck_delay(0, self.peers.len(), own);
             self.next_rival_recheck = Some(
                 self.next_rival_recheck
                     .map_or(pushed, |due| due.max(pushed)),

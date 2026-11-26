@@ -602,7 +602,14 @@ pub(super) fn schedule_rival_recheck(
     if !rival_recheck_applies(policy, params.bind_ports.is_empty()) {
         return;
     }
-    let delay = next_recheck_delay(state.rival_recheck_rounds, state.peers.len(), endpoint.id());
+    // A holder with no peer is an island or the first node of a room: its fast first check would
+    // shed the one beacon that a member can find and graft to, so it takes the steady cadence.
+    let round = if state.peers.is_empty() {
+        state.rival_recheck_rounds.max(1)
+    } else {
+        state.rival_recheck_rounds
+    };
+    let delay = next_recheck_delay(round, state.peers.len(), endpoint.id());
     state.next_rival_recheck = Some(Instant::now() + delay);
 }
 /// The rival re-check itself: at the scheduled deadline, **release** the
@@ -2056,6 +2063,109 @@ mod tests {
             assert!(
                 state.address_book.get_endpoint_info(params.id).is_none(),
                 "the book still names the beacon that was shed"
+            );
+        });
+    }
+
+    /// A holder with no peer is an island or the first node of a room: its first re-check does not
+    /// come at the fast base, because its shed would end the one beacon that a member can find
+    /// and graft to. It takes the steady cadence of a node that has met nobody. A holder with a
+    /// roster keeps the fast base, the tie-break of simultaneous claimants.
+    #[test]
+    fn a_holder_with_no_peer_takes_the_steady_first_re_check() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let params = public_params();
+            let endpoint = loopback_endpoint().await;
+            let fast_end = tuning::rival_recheck_first() + tuning::RIVAL_RECHECK_OFFSET_SPAN;
+
+            let mut lone = testing::fresh_state();
+            let lone_before = clock::Instant::now();
+            super::schedule_rival_recheck(&mut lone, CoHostPolicy::EagerProbed, &params, &endpoint);
+            let lone_due = lone.next_rival_recheck.expect("a re-check is armed");
+            assert!(
+                lone_due >= lone_before + tuning::rival_recheck(),
+                "a holder with no peer re-checks at the steady cadence, got {:?} out",
+                lone_due.saturating_duration_since(lone_before)
+            );
+
+            let mut meshed = testing::fresh_state();
+            meshed.peers.insert(protocol::AuthorKey::from([1u8; 32]));
+            let meshed_before = clock::Instant::now();
+            super::schedule_rival_recheck(
+                &mut meshed,
+                CoHostPolicy::EagerProbed,
+                &params,
+                &endpoint,
+            );
+            let meshed_due = meshed.next_rival_recheck.expect("a re-check is armed");
+            assert!(
+                meshed_due <= clock::Instant::now() + fast_end,
+                "a holder with a roster keeps the fast base, got {:?} out",
+                meshed_due.saturating_duration_since(meshed_before)
+            );
+            endpoint.close().await;
+        });
+    }
+
+    /// The creator never sheds. A higher rival's flag arms a time on it (the push of
+    /// `note_rival_beacon_flag` does not ask the policy), and only the consumer keeps it from
+    /// acting: a holder of another policy with the same due time sheds.
+    #[test]
+    fn a_creator_that_learns_a_higher_rival_does_not_shed() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let params = public_params();
+            let own = iroh::SecretKey::from_bytes(&[1; 32]).public();
+            let other = iroh::SecretKey::from_bytes(&[2; 32]).public();
+            let (low, high) = if own < other {
+                (own, other)
+            } else {
+                (other, own)
+            };
+            let peer = iroh::SecretKey::generate().public();
+
+            let mut outcome = Vec::new();
+            for policy in [CoHostPolicy::Eager, CoHostPolicy::Deferred] {
+                let arm = super::CohostArm {
+                    policy,
+                    params: &params,
+                    started: clock::Instant::now(),
+                };
+                let mut state = testing::fresh_state();
+                state
+                    .rendezvous_flags
+                    .insert(state::RendezvousFlag::HostsRendezvous);
+                state.note_rival_beacon_flag(
+                    low,
+                    protocol::AuthorKey::from([9u8; 32]),
+                    high,
+                    RivalFlag {
+                        proven: true,
+                        held: true,
+                    },
+                    clock::Instant::now(),
+                );
+                assert!(state.next_rival_recheck.is_some(), "the flag armed a time");
+                state.next_rival_recheck = Some(clock::Instant::now());
+                let mut rendezvous = Some(beacon::Rendezvous::for_test(
+                    loopback_endpoint().await,
+                    None,
+                ));
+                let shed = super::shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous, peer);
+                outcome.push((policy, shed, rendezvous.is_some()));
+                // Close what is left, so that no endpoint is dropped open at the end of the run.
+                super::wait_for_shed_close(&mut state).await;
+                if let Some(held) = rendezvous.take() {
+                    held.shed_and_wait().await;
+                }
+            }
+
+            assert_eq!(
+                outcome,
+                vec![
+                    (CoHostPolicy::Eager, false, true),
+                    (CoHostPolicy::Deferred, true, false)
+                ],
+                "the creator keeps its beacon and a member with the same due time sheds"
             );
         });
     }
