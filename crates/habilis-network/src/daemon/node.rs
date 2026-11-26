@@ -395,12 +395,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_task_that_ends_in_time_gives_ok() {
-        let loop_task = task::spawn(async { Ok(()) });
+    async fn a_task_that_ends_in_time_gives_ok_after_it_ended() {
+        let ended = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ended);
+        let loop_task = task::spawn(async move {
+            time::sleep(Duration::from_millis(100)).await;
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
+        });
         let outcome = wait_for_loop(loop_task, Duration::from_secs(5)).await;
         assert!(
             outcome.is_ok(),
             "a loop that ended in time is a clean leave: {outcome:?}"
+        );
+        assert!(
+            ended.load(Ordering::SeqCst),
+            "Ok came before the loop task ended: the wait returned early"
         );
     }
 
