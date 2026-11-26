@@ -1,14 +1,15 @@
 //! The sessions of the multihop underlay do not churn when a node knows more members than its cap.
 //!
-//! Four members without `udp`, and `max_connections` 2, so the cap of every underlay is 2 and every
-//! member knows three others. The underlay of a node without `udp` wants a session to each known
-//! member. A session of the underlay is a route edge, so its table refuses a newcomer at the cap and
-//! evicts nobody; when it evicted, the evicted member was dialed again and the sessions swung (measured
-//! on c4e507c: 1, 2 and 2 evictions in the three windows). The test counts the evictions in three
-//! windows of a minute, after the mesh has settled, and expects none in the last one, and the same
-//! number of sessions in the last two windows.
+//! Ten members without `udp`, and the minimum `max_connections` of 8, so the cap of every underlay
+//! is 8 and every member knows nine others. The underlay of a node without `udp` wants a session
+//! to each known member. A session of the underlay is a route edge, so its table refuses a newcomer
+//! at the cap and evicts nobody; when it evicted, the evicted member was dialed again and the
+//! sessions swung (measured on c4e507c: 1, 2 and 2 evictions in the three windows, with a cap of 2
+//! on 4 members). The test counts the evictions in three windows of a minute, after the mesh has
+//! settled, and expects none in the last one, and the same number of sessions in the last two
+//! windows.
 //!
-//! It does not assert that every member holds a session: a cap of 2 on 4 members can leave a node
+//! It does not assert that every member holds a session: a cap of 8 on 10 members can leave a node
 //! whose partners are all full with none, and above the cap a pair routes through others. The rule
 //! promises no eviction and a stable count, and the test asserts that.
 
@@ -19,11 +20,12 @@ use std::time::{Duration, Instant};
 use habilis_network::membership::{self, Inspect, Membership, Request, Routing};
 use habilis_network::net::Bind;
 use habilis_network::protocol::{Lookup, Transport};
+use habilis_network::util::tuning::MIN_MAX_CONNECTIONS;
 
 use habilis_network::net::test_relay;
 use tokio::time;
-const MEMBERS: usize = 4;
-const CAP: usize = 2;
+const MEMBERS: usize = 10;
+const CAP: usize = MIN_MAX_CONNECTIONS;
 const MESH_DEADLINE: Duration = Duration::from_mins(3);
 const SETTLE: Duration = Duration::from_secs(30);
 const WINDOW: Duration = Duration::from_mins(1);

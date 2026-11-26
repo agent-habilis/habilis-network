@@ -1,8 +1,10 @@
-//! With the list `udp` alone and a cap of 2, a directed message that a send reported as sent
-//! arrives.
+//! With the list `udp` alone and the minimum cap of 8, a directed message that a send reported as
+//! sent arrives.
 //!
-//! Ten native members on a local relay (the relay is a lookup only). Each has a cap of 2, so each
-//! holds two gossip neighbors, and a directed send to any other member needs a dial at the ceiling.
+//! Fifteen native members on a local relay (the relay is a lookup only). Each has a cap of 8, so
+//! each holds 8 of the 14 others as gossip neighbors, and a directed send to any of the 6 others
+//! needs a dial at the ceiling. With ten members only one member is outside the view of each node,
+//! and a node whose ceiling is full of gossip neighbors has no connection to evict for it.
 //! There is no multihop route, so the dial is direct and evicts a connection. Each ordered pair
 //! sends one message, with no retry. A send that answers `Ok` and a message that never arrives is
 //! a silent loss, and the test names each one.
@@ -17,12 +19,14 @@ use habilis_network::membership::{self, Inbound, Inspect, Membership, Messaging,
 use habilis_network::net;
 use habilis_network::net::Bind;
 use habilis_network::protocol::{Lookup, Transport};
+use habilis_network::util::tuning::MIN_MAX_CONNECTIONS;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time;
 
-const CAP: usize = 2;
-const NICKS: [&str; 10] = [
-    "ann", "ben", "cat", "dan", "eve", "fay", "gus", "hal", "ivy", "jon",
+const CAP: usize = MIN_MAX_CONNECTIONS;
+const NICKS: [&str; 15] = [
+    "ann", "ben", "cat", "dan", "eve", "fay", "gus", "hal", "ivy", "jon", "kim", "lee", "max",
+    "ned", "oli",
 ];
 const MESH_DEADLINE: Duration = Duration::from_mins(1);
 /// How long the receivers get, after the last send, to read the messages.
@@ -117,9 +121,11 @@ fn text_of(from: &str, to: &str) -> String {
 fn a_directed_send_at_the_cap_on_udp_alone_that_answers_ok_arrives() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network::transport=info");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        // Open fault, not this test's subject: with 10 members on one relay, the relay reports that
-        // another endpoint connected with the same endpoint id, in about 3 of 4 runs, with and
-        // without the acknowledgement of a unicast frame.
+        // Open fault, not this test's subject: the relay reports that another endpoint connected
+        // with the same endpoint id. Measured once, with 10 members on one relay at a cap of 2:
+        // about 3 of 4 runs, with and without the acknowledgement of a unicast frame. It is not
+        // measured again with 15 members at a cap of 8: this allow hides it from the 5 runs of the
+        // move, so they cannot count it.
         habilis_network_test_tracing::allow_warn(
             "iroh::socket::transports::relay::actor",
             "Another endpoint connected with the same endpoint id",
@@ -141,13 +147,14 @@ fn a_directed_send_at_the_cap_on_udp_alone_that_answers_ok_arrives() {
             }
             assert!(
                 started.elapsed() < MESH_DEADLINE,
-                "the ten members never formed a mesh"
+                "the fifteen members never formed a mesh"
             );
             time::sleep(Duration::from_millis(500)).await;
         }
 
         // One send for each ordered pair, no retry. The answer of each send is kept.
-        // All the sends of one sender go at once: each needs a dial at the ceiling.
+        // All the sends of one sender go at once: a send to a member outside the view needs a
+        // dial at the ceiling.
         let mut answers: Vec<(&str, &str, Result<(), String>)> = Vec::new();
         for from in &members {
             let sends = members
