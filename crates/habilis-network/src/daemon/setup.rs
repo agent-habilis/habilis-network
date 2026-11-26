@@ -3340,10 +3340,16 @@ mod tests {
         });
     }
 
+    /// The test binary runs the fork-gap test again, in a process of its own, with this variable set.
+    #[cfg(all(unix, feature = "host"))]
+    const FORK_GAP_CHILD: &str = "HABILIS_TEST_FORK_GAP_CHILD";
+
     /// A restart waits out a child that another thread spawns. Between its fork and its exec the child holds a
     /// copy of every descriptor of this process, the lock file too, so the lock stays held for a moment after its
     /// holder drops. Each test of this binary that spawns a child opens that gap, and a restart that tried the
-    /// lock once failed in it. Here the child stays in the gap for 1 s.
+    /// lock once failed in it. Here the child stays in the gap for 1 s. The body runs in a process of its own: the
+    /// child of a gap holds a copy of every descriptor of its parent, so in the process of the other tests it
+    /// would hold the key locks that they take at the same time.
     #[cfg(all(unix, feature = "host"))]
     #[expect(
         unsafe_code,
@@ -3354,6 +3360,25 @@ mod tests {
         use std::io::{self, Read as _, Write as _};
         use std::os::unix::process::CommandExt as _;
         use std::time::Duration;
+        if env::var_os(FORK_GAP_CHILD).is_none() {
+            let mut again = process::Command::new(env::current_exe().expect("the test binary"));
+            again
+                .args([
+                    "--exact",
+                    "daemon::setup::tests::a_restart_waits_out_a_child_that_holds_a_copy_of_the_lock_until_its_exec",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(FORK_GAP_CHILD, "1");
+            let output = again.output().expect("run the test binary");
+            assert!(
+                output.status.success(),
+                "the restart failed in its own process: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let dir = TempDir::new("habilis-key-lock-fork-gap");
             let state = dir.path().join("session.json");
