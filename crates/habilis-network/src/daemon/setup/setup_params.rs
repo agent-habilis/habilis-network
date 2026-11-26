@@ -33,8 +33,8 @@ pub struct SetupParams {
     pub author: Nickname,
     /// The cap on the direct connections of the node: gossip neighbors, `WebRTC` sessions and
     /// unicast connections together. It is also the size of the gossip active view. The default is
-    /// [`tuning::MAX_CONNECTIONS`](crate::util::tuning::MAX_CONNECTIONS). A number below
-    /// [`tuning::MIN_MAX_CONNECTIONS`](crate::util::tuning::MIN_MAX_CONNECTIONS), `0` too, is a setup
+    /// [`tuning::MAX_CONNECTIONS`]. A number below
+    /// [`tuning::MIN_MAX_CONNECTIONS`], `0` too, is a setup
     /// error: nothing raises it.
     pub max_connections: usize,
     /// The consumer's per-user runtime base (see
