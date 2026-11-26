@@ -13,8 +13,8 @@
 //! - `MESH_TRAFFIC=off`: no directed messages, gossip only. With traffic on, every
 //!   node sends one directed message per second to every roster peer, which is one
 //!   unicast connection per peer, the worst case.
-//! - `MESH_MAX_CONNECTIONS`: the cap on the direct connections. `0`, or unset, takes the
-//!   engine default.
+//! - `MESH_MAX_CONNECTIONS`: the cap on the direct connections. Unset takes the engine
+//!   default of 16. A number below 8, `0` too, is a setup error.
 //! - `MESH_TRAFFIC_UNTIL_SECS=180`: the directed messages stop after that many seconds.
 //!   With `MESH_BLOCK_UDP_AFTER_SECS` and `MESH_TRANSPORTS=udp,webrtc,multihop` this is
 //!   the run of the idle detach: sessions to members that are not neighbors must go.
@@ -50,7 +50,7 @@ use habilis_network::membership::{
 };
 use habilis_network::protocol::{Lookup, Nickname, Transport};
 use habilis_network::runtime::{Node, SetupParams, SignalHandling, setup_mesh};
-use habilis_network::util::resident_memory;
+use habilis_network::util::{resident_memory, tuning};
 use tokio::sync::{mpsc, oneshot};
 
 use habilis_network::net::test_relay;
@@ -284,7 +284,10 @@ async fn main() -> anyhow::Result<()> {
     let (kind, author) = resolve_kind(&options, None)?;
 
     let (inbound_tx, mut inbound) = mpsc::channel(INBOUND_CAP);
-    let max_connections = usize::try_from(env_number("MESH_MAX_CONNECTIONS")).unwrap_or(0);
+    let raw_cap: Option<String> = env::var("MESH_MAX_CONNECTIONS").ok();
+    let max_connections: usize = raw_cap
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(tuning::MAX_CONNECTIONS);
     let config: runtime::EventLoopConfig = setup_mesh(
         kind,
         SetupParams::new(author.clone(), SilentSink::default()).max_connections(max_connections),

@@ -624,15 +624,19 @@ struct Assembled {
     prober_closes: Vec<oneshot::Receiver<()>>,
 }
 
-/// `max_connections` with `0` taken as the default. Every option set (`Opts`, the C
-/// struct, the browser object, a caller's own `SetupParams`) ends in
-/// [`setup_mesh`], so this is the one place where that has to hold.
-fn resolve_max_connections(max_connections: usize) -> usize {
-    if max_connections == 0 {
-        tuning::MAX_CONNECTIONS
-    } else {
-        max_connections
+/// Accepts a cap on connections that holds at least [`tuning::MIN_MAX_CONNECTIONS`]. A lower
+/// number, `0` too, is an error that names the minimum and the value: nothing raises it. Every option
+/// set (`Opts`, the C struct, the browser object, a caller's own `SetupParams`) ends in
+/// [`setup_mesh`], and an injected endpoint ends in [`InjectedEndpoint::bind`], so these two entries
+/// call this one function.
+fn check_max_connections(max_connections: usize) -> Result<(), SetupError> {
+    if max_connections < tuning::MIN_MAX_CONNECTIONS {
+        return Err(SetupError::MaxConnectionsBelowMinimum {
+            value: max_connections,
+            minimum: tuning::MIN_MAX_CONNECTIONS,
+        });
     }
+    Ok(())
 }
 
 /// # Errors
@@ -660,6 +664,7 @@ pub async fn setup_mesh(
     kind: SetupKind,
     params: SetupParams,
 ) -> Result<EventLoopConfig, SetupError> {
+    check_max_connections(params.max_connections)?;
     // `Box::pin` keeps the assembly future off the frame of every caller that awaits it, so those
     // callers stay under clippy's `large_futures` threshold. The size depends on the target, so
     // boxing the one await is more robust than shaving fields.
@@ -1579,7 +1584,6 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     )?;
     let key_lock = hold_member_key(early_state.as_deref())?;
     let endpoint_owner = owner_of(injected.as_ref());
-    let max_connections = resolve_max_connections(max_connections);
     // The localhost binding is owned + bound by the caller; the engine only needs
     // the resolved port for the `ready` event. `Some(0)` (ephemeral) is resolved
     // caller-side and passed back in here as the real port.
@@ -3954,15 +3958,13 @@ mod tests {
         });
     }
 
-    // `max_connections` comes from the caller, and `0` takes the default. Every option set
-    // (`Opts`, the C struct, the browser object) ends in `setup_mesh`, so this is
-    // the one place that has to hold.
+    // `max_connections` comes from the caller and is the cap as it is, with no clamp. Every option
+    // set (`Opts`, the C struct, the browser object) ends in `setup_mesh`, so this is the one place
+    // that has to hold.
     #[test]
-    fn the_cap_follows_the_params_and_zero_takes_the_default() {
+    fn the_cap_follows_the_params() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            use crate::util::tuning::MAX_CONNECTIONS;
-
-            for (max_connections, want) in [(0, MAX_CONNECTIONS), (5, 5)] {
+            for (max_connections, want) in [(8, 8), (16, 16)] {
                 let options = membership::JoinOptions::default();
                 let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
                 let config = super::setup_mesh(
@@ -3992,6 +3994,77 @@ mod tests {
                 }
             }
         });
+    }
+
+    // The cap has a minimum of 8, and every number below it, `0` too, is an error that names the
+    // minimum and the value. No value is raised to the minimum.
+    #[test]
+    fn a_cap_under_the_minimum_is_a_setup_error_that_names_the_minimum_and_the_value() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            for max_connections in 0..8_usize {
+                let options = membership::JoinOptions::default();
+                let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+                let error = super::setup_mesh(
+                    kind,
+                    super::SetupParams::new(author, embed::SilentSink)
+                        .max_connections(max_connections),
+                )
+                .await
+                .expect_err("a cap under 8 is refused at setup");
+                assert!(
+                    matches!(
+                        error,
+                        super::SetupError::MaxConnectionsBelowMinimum { value, minimum }
+                            if value == max_connections && minimum == tuning::MIN_MAX_CONNECTIONS
+                    ),
+                    "the error holds the value {max_connections} and the minimum: {error:?}"
+                );
+            }
+        });
+    }
+
+    // The second entry: an injected endpoint makes its own admission table from the cap, so it
+    // refuses a cap under the minimum with the same error as `setup_mesh`, before it binds.
+    #[test]
+    fn an_injected_endpoint_with_a_cap_under_the_minimum_is_refused_at_bind() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let secret = iroh::SecretKey::from_bytes(&[93; 32]);
+            for max_connections in [0, 7] {
+                let error = super::InjectedEndpoint::bind(
+                    &LookupOpts::loopback(),
+                    secret.clone(),
+                    Vec::new(),
+                    lookup::TransportHandles {
+                        webrtc: Some(lookup::build_webrtc_handle(secret.public())),
+                        ..lookup::TransportHandles::default()
+                    },
+                    max_connections,
+                )
+                .await
+                .expect_err("a cap under 8 is refused at bind");
+                assert!(
+                    matches!(
+                        error,
+                        super::SetupError::MaxConnectionsBelowMinimum { value, minimum }
+                            if value == max_connections && minimum == tuning::MIN_MAX_CONNECTIONS
+                    ),
+                    "the error holds the value {max_connections} and the minimum: {error:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn the_text_of_a_cap_under_the_minimum_is_pinned() {
+        let error = super::SetupError::MaxConnectionsBelowMinimum {
+            value: 7,
+            minimum: tuning::MIN_MAX_CONNECTIONS,
+        };
+        assert_eq!(
+            error.to_string(),
+            "max connections is 7: the lowest value is 8 (the default is 16)",
+            "the text names the value, the minimum and the default"
+        );
     }
 
     // The default of the one bound: 16 direct connections, gossip neighbors, `WebRTC` sessions

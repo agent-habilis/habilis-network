@@ -182,10 +182,10 @@ describe('wire opts', () => {
     expect(() => joinWire({})).toThrow('join needs a topic or an id')
     expect(() => joinWire({ topic: 't', id: 'm' })).toThrow('not both')
     expect(joinWire({ topic: 't' })).toMatchObject({ topic: 't', mesh: null, lookup: null })
-    expect(joinWire({ id: 'm', nick: 'ana', maxConnections: 3 })).toMatchObject({
+    expect(joinWire({ id: 'm', nick: 'ana', maxConnections: 12 })).toMatchObject({
       mesh: 'm',
       nick: 'ana',
-      maxConnections: 3,
+      maxConnections: 12,
     })
   })
 
@@ -198,12 +198,26 @@ describe('wire opts', () => {
       lookup: null,
       transport: null,
       relayUrls: null,
-      maxConnections: 0,
+      maxConnections: 16,
     })
     expect(createWire({ lookup: ['mdns', 'dht', 'relay'], name: 'salon' })).toMatchObject({
       lookup: 'mdns,dht,relay',
       name: 'salon',
     })
+  })
+
+  test('an absent cap is 16 and an explicit 0 goes to the engine as 0, which refuses it', () => {
+    expect(joinWire({ topic: 't' }).maxConnections).toBe(16)
+    expect(createWire({}).maxConnections).toBe(16)
+    expect(joinWire({ topic: 't', maxConnections: 0 }).maxConnections).toBe(0)
+    expect(createWire({ maxConnections: 0 }).maxConnections).toBe(0)
+  })
+
+  test('a cap that is not a whole number of 0 or more is refused before the wire', () => {
+    for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => joinWire({ topic: 't', maxConnections: bad })).toThrow('max connections')
+      expect(() => createWire({ maxConnections: bad })).toThrow('max connections')
+    }
   })
 
   test('relay ladder and transport policy', () => {

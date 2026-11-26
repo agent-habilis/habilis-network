@@ -116,6 +116,46 @@ fn a_bad_mesh_id_fails_with_a_reason() {
 }
 
 #[test]
+fn a_cap_of_0_is_refused_with_the_field_the_value_and_the_minimum() {
+    let nick = CString::new("solo").expect("no interior NUL");
+    let mut options = create_opts(&nick);
+    options.max_connections = 0;
+
+    let handle = open(&options);
+    assert!(handle.is_null(), "a cap of 0 must not open a handle");
+    let error = last_error().expect("a refusal must leave a reason in the error slot");
+    assert!(
+        error.contains("max connections") && error.contains(" 0") && error.contains('8'),
+        "the reason must name the field, the value 0 and the minimum 8, got: {error}"
+    );
+    assert!(
+        error.contains("the default is 16"),
+        "the reason must say how to get the default, got: {error}"
+    );
+}
+
+#[test]
+fn an_untouched_struct_opens_with_the_default_cap_of_16() {
+    let nick = CString::new("solo").expect("no interior NUL");
+    let options = create_opts(&nick);
+    assert_eq!(
+        options.max_connections, 16,
+        "the struct default is the engine default"
+    );
+
+    let handle = open(&options);
+    assert!(
+        !handle.is_null(),
+        "the default cap must open: {:?}",
+        last_error()
+    );
+    // SAFETY: `handle` is the live handle that `open` returned, closed once.
+    unsafe {
+        habilis_network_mesh_close(handle);
+    }
+}
+
+#[test]
 fn null_arguments_are_errors_not_crashes() {
     // Each rejected call is checked on the spot: a call clears the error slot on
     // entry, so only the most recent outcome is ever in there.

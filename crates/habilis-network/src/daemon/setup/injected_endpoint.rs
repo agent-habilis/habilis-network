@@ -79,7 +79,7 @@ impl InjectedEndpoint {
     /// direct connections, as in [`SetupParams::max_connections`](super::SetupParams::max_connections).
     ///
     /// # Errors
-    /// `transports` has no `WebRTC` handle, or it already has an admission table
+    /// `max_connections` is below the minimum, `0` too. `transports` has no `WebRTC` handle, or it already has an admission table
     /// (this method makes the one). A handle was made from a key other than the one
     /// that `secret` derives, or the endpoint does not bind.
     pub async fn bind(
@@ -89,6 +89,7 @@ impl InjectedEndpoint {
         transports: lookup::TransportHandles,
         max_connections: usize,
     ) -> Result<Self, SetupError> {
+        super::check_max_connections(max_connections)?;
         Self::bind_checked(lookups, secret, alpns, transports, max_connections)
             .await
             .map_err(SetupError::internal)

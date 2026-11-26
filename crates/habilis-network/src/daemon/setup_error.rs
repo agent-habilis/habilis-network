@@ -6,6 +6,7 @@ use std::fmt;
 use crate::invite::InviteError;
 use crate::protocol::UnlockError;
 use crate::resolver::ResolveError;
+use crate::util::tuning;
 use habilis_network_protocol::ConfigError;
 
 /// Why a mesh cannot be set up.
@@ -45,6 +46,13 @@ pub enum SetupError {
     MeshAndTopic,
     /// The topic string is empty or whitespace.
     EmptyTopic,
+    /// The cap on connections is below the minimum, `0` too. The setup does not raise it.
+    MaxConnectionsBelowMinimum {
+        /// The cap that the caller gave.
+        value: usize,
+        /// The lowest cap that the engine accepts.
+        minimum: usize,
+    },
     /// A cause no caller acts on. The text and the chain are the cause's own.
     Internal(Box<dyn Error + Send + Sync>),
 }
@@ -71,6 +79,11 @@ impl fmt::Display for SetupError {
             Self::Config(error) => fmt::Display::fmt(error, formatter),
             Self::MeshAndTopic => formatter.write_str("pass only one of mesh / topic"),
             Self::EmptyTopic => formatter.write_str("topic string must not be empty"),
+            Self::MaxConnectionsBelowMinimum { value, minimum } => write!(
+                formatter,
+                "max connections is {value}: the lowest value is {minimum} (the default is {})",
+                tuning::MAX_CONNECTIONS
+            ),
             Self::Internal(error) => fmt::Display::fmt(error.as_ref(), formatter),
         }
     }
@@ -89,7 +102,8 @@ impl Error for SetupError {
             Self::PasswordRequired
             | Self::InviteNoPassword
             | Self::MeshAndTopic
-            | Self::EmptyTopic => return None,
+            | Self::EmptyTopic
+            | Self::MaxConnectionsBelowMinimum { .. } => return None,
         };
         inner.source()
     }

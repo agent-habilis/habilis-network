@@ -1242,11 +1242,23 @@ pub const RIVAL_RECHECK_OFFSET_SPAN: Duration = Duration::from_secs(8);
 /// D from a memory budget" in `docs/perf/direct-peer-memory.md`. It was 64,
 /// which kept meshes of up to 65 free of churn at 50 to 100 MB per node, and then 32. G is a
 /// count bound only: `HyParView` still accepts a high-priority join at a full
-/// view and drops a random member. This is the default for the public
-/// `--max-connections` cap, and `0` asks for it. The passive (healing/shuffle) pool is
-/// derived as 2x the live view. Set `--max-connections` *small* to deliberately
-/// reproduce the gossip-churn leak at any node count.
+/// view and drops a random member. A caller that does not name a cap gets this
+/// default. A cap below [`MIN_MAX_CONNECTIONS`] is an error.
+/// The passive (healing/shuffle) pool is derived as 2x the live view.
 pub const MAX_CONNECTIONS: usize = 16;
+
+/// The lowest cap on direct connections that the engine accepts. A lower number, `0` too, is an
+/// error at setup, and the engine does not raise it.
+///
+/// The rule that lets a member leave the rendezvous needs [`RENDEZVOUS_RELEASE_LINKS`] member
+/// links, so a node with a smaller view never leaves it. On real hosts, a cap of 2 left one end
+/// with a link that the other end did not hold, for 60 s or more. The cause is not known.
+pub const MIN_MAX_CONNECTIONS: usize = 8;
+
+const _: () = assert!(
+    MIN_MAX_CONNECTIONS <= MAX_CONNECTIONS && MIN_MAX_CONNECTIONS > RENDEZVOUS_RELEASE_LINKS,
+    "the minimum cap is at most the default and above the release count of the rendezvous"
+);
 
 /// How often the direct-peer slot table drops the connections that are gone and
 /// the peers that nothing holds. One timer per admission table, not one task

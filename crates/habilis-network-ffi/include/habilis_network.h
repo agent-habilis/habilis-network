@@ -48,11 +48,13 @@ typedef struct habilis_network_mesh habilis_network_mesh;
  * `transport` is what payload may ride, `relay_urls` is which relay. A joiner
  * inherits all three from the id; a topic fixes `lookup` to all three lookups.
  *
- * String fields are NUL-terminated or NULL. `max_connections == 0` takes the engine's
- * default cap on the direct connections (16): the gossip neighbors, the WebRTC
- * sessions and the unicast connections together. It is also the size of the gossip
- * active view. A newcomer past the cap evicts the least valuable peer that is not
- * a gossip neighbor.
+ * String fields are NUL-terminated or NULL. `max_connections` is the cap on the direct
+ * connections: the gossip neighbors, the WebRTC sessions and the unicast connections
+ * together. The engine default is 16. A value below 8, 0 included, makes
+ * habilis_network_mesh_open return NULL, and habilis_network_last_error names the
+ * value and the minimum. A zero-filled struct is therefore an error: set the field.
+ * The cap is also the size of the gossip active view. A newcomer past the cap
+ * evicts the least valuable peer that is not a gossip neighbor.
  */
 typedef struct {
   const char *mesh;

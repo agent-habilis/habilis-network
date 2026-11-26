@@ -82,8 +82,8 @@ export function parseChatArgs(argv: string[]): ChatArgs {
   let maxConnections: number | undefined
   if (values['max-connections'] !== undefined) {
     maxConnections = Number(values['max-connections'])
-    if (!Number.isInteger(maxConnections) || maxConnections < 1) {
-      throw new Error('--max-connections takes a positive integer')
+    if (!Number.isInteger(maxConnections)) {
+      throw new Error('--max-connections takes an integer')
     }
   }
 

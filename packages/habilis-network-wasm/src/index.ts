@@ -12,7 +12,7 @@
 
 export * from 'habilis-network-api'
 
-import { openMesh } from 'habilis-network-api'
+import { checkMaxConnections, openMesh } from 'habilis-network-api'
 import type { CreateOpts, JoinOpts, Mesh } from 'habilis-network-api'
 
 import { openWasm } from './backend.ts'
@@ -44,7 +44,7 @@ export async function join(opts: JoinOpts & WasmOpts): Promise<Mesh> {
       nick: opts.nick,
       transport: opts.transport ?? [],
       relayUrls: opts.relayUrls ?? [],
-      maxConnections: opts.maxConnections ?? 0,
+      ...maxConnectionsKey(opts.maxConnections),
     },
     opts,
   )
@@ -60,10 +60,15 @@ export async function create(opts: CreateOpts & WasmOpts): Promise<Mesh> {
       lookup: opts.lookup ?? [],
       transport: opts.transport ?? [],
       relayUrls: opts.relayUrls ?? [],
-      maxConnections: opts.maxConnections ?? 0,
+      ...maxConnectionsKey(opts.maxConnections),
     },
     opts,
   )
+}
+
+/** The engine default applies when the key is absent, so the browser sends none for an absent cap. */
+function maxConnectionsKey(value: number | undefined): { maxConnections?: number } {
+  return value === undefined ? {} : { maxConnections: checkMaxConnections(value) }
 }
 
 async function open(meshOpts: Record<string, unknown>, extras: WasmOpts): Promise<Mesh> {

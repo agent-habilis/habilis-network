@@ -13,6 +13,7 @@ import {
   type Mesh,
   type MeshBackend,
   type Opener,
+  maxConnectionsWire,
   openMesh,
 } from 'habilis-network-api'
 import { libraryPath } from './discover.ts'
@@ -186,7 +187,7 @@ export function joinWire(opts: JoinOpts): WireOpts {
     lookup: null,
     transport: listWire(opts.transport),
     relayUrls: listWire(opts.relayUrls),
-    maxConnections: opts.maxConnections ?? 0,
+    maxConnections: maxConnectionsWire(opts.maxConnections),
   }
 }
 
@@ -199,7 +200,7 @@ export function createWire(opts: CreateOpts): WireOpts {
     lookup: listWire(opts.lookup),
     transport: listWire(opts.transport),
     relayUrls: listWire(opts.relayUrls),
-    maxConnections: opts.maxConnections ?? 0,
+    maxConnections: maxConnectionsWire(opts.maxConnections),
   }
 }
 
