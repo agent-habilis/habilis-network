@@ -319,14 +319,34 @@ The split keeps bootstrap alive after the creator leaves: any member can take th
 | Co-hosts | Every member, permanently | One beacon: the holder of the lowest live rung |
 
 Two members can claim the beacon role inside each other's probe window.
-A periodic re-arbitration sheds the rival copy, so the single-beacon invariant holds eventually, not at claim time.
-A public holder that knows no member waits on the alone tier of the re-check (`RIVAL_RECHECK_ALONE`, 3600 s, plus up to the same again as jitter).
-A sign of a second group brings the next re-check back to the first-round delay and starts the rounds again from it.
-The first round waits `RIVAL_RECHECK_FIRST` (12 s) plus an offset of up to `RIVAL_RECHECK_OFFSET_SPAN` (8 s) from the endpoint id.
+A holder of a public rendezvous keeps its beacon and asks, every heal interval (15 s), which member serves the id on the rung of its own beacon.
+The beacon answers on its own ALPN, `habilis-mesh/beacon-who/1`, with the endpoint id of the member that serves it.
+The answer is `Ours`, `Rival(id)`, `Reached` or `Unknown`.
+`Reached` means that a connection came up and no valid frame followed.
+`Unknown` means that nothing was reached.
+A holder acts on `Rival`, and on three answers of `Reached` or `Unknown` in a row.
+It acts on no other answer.
+A rival with a lower id keeps the rendezvous, so the holder yields.
+A rival with a higher id loses it, so the holder claims again: it binds a new beacon, and then closes the old one.
+After two claims against the same rival, the holder yields to it, so a relay that keeps the older claim cannot hold two groups apart for ever.
+Three answers of `Reached` or `Unknown` in a row also make it claim again.
+Two answers of `Ours` in a row end a contest.
+The model in `beacon/holder_contest.rs` ends a contest of k holders within k + 2 asks, on each rule that a relay can use to pick the claim that it serves.
+A flag from a proven holder with a lower id brings the next ask to now.
+A sign of a second group brings the next ask to now too.
 Two things are a sign: a member that links to the beacon and that the holder does not know, and a LAN member that the holder is not linked to.
-A sign counts once per `RIVAL_RECHECK_MESHED` (300 s), so a burst of arrivals does not shed the beacon again and again.
-A node that nobody approaches keeps the long wait.
-A loopback mesh and the creator have no re-check armed, so a sign changes nothing for them.
+Flags and signs share one limit: the ask moves once per heal interval, so a burst of arrivals does not ask again and again.
+A flag never makes a holder yield by itself: the answer of the ask decides.
+A holder on another rung than the rival reads `Ours` and stays.
+The ladder rule above then brings the higher rung down, and the two holders meet on one rung.
+A loopback mesh and the creator have no ask armed, so a sign changes nothing for them.
+The ask costs one throwaway endpoint for each heal interval (240 an hour), and it never rebinds the beacon.
+The old rule shed and rebound the beacon on a timer, and a rebind is the suspected road into a `recvmsg` spin.
+A permanently alone topic peer made about 138 rebinds an hour before the ramp existed, and about 8 an hour with the 300 s cap.
+Measured on a local relay, one run each: a lone holder over 1 hour used about 20 s of CPU, against about 17 s an hour for the old rule over 20 minutes, with no spin, and its file descriptors (37) and UDP sockets (12) stayed flat. 1300 asks, 1000 at low load and 300 at a load of up to 96, all read `Ours`, and the descriptors did not grow.
+A local relay has no loss and no fault, so the rate of `Unknown` on a real relay is not known from that data.
+A claim again binds a new endpoint with a new `WebRTC` handle, so a browser tab that negotiates with the old beacon loses the round.
+The tab offers again when its rendezvous link drops, and again on the next heal tick. A session that it still holds is detached on the second tick, so the loss is at most 2 heal intervals (30 s) and one round (read, not measured).
 On a LAN, a member that sees a member of its mesh asks it to be a neighbor, at most 8 times a minute (`MAX_LAN_GRAFTS_PER_MINUTE` in `gossip/lan.rs`).
 The mDNS record does not change again, so no event comes for a request that was refused or lost.
 A member that was asked and is still not a neighbor is asked again from the heal tick: after `RETRY_FIRST` (60 s), then every `RETRY_STEADY` (300 s).
@@ -373,7 +393,7 @@ A holder checks the ladder at every heal tick:
 - A holder asks whether its own rung still answers as `Ours`. It sheds its beacon on the second consecutive reading that is not `Ours`, never on the first, and then claims again. The check does not see a beacon whose endpoint answers while its gossip is wedged.
 - The holder of rung 0 is never asked to yield: the lowest live rung wins.
 
-A loopback mesh has no timed rival re-check. The two checks above are its repair of a second beacon, which can stand up when a host is too loaded to answer.
+A loopback mesh has no periodic ask. The two checks above are its repair of a second beacon, which can stand up when a host is too loaded to answer.
 
 ## 6. The engine at run time
 

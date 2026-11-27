@@ -3,9 +3,8 @@
 //! must still mesh. The loopback twin cannot cover this: a loopback mesh
 //! has no relay, no beacon claim race, and direct addresses known up front.
 //!
-//! The webrtc-lane variant is `#[ignore]`d: it needs a real JSEP round and
-//! rides the beacon's shed cadence, which makes it timing-sensitive under a
-//! parallel suite. Run it solo; the mesh e2e suite exercises the same path
+//! The webrtc-lane variant is `#[ignore]`d: it needs a real JSEP round, which
+//! makes it timing-sensitive under a parallel suite. Run it solo; the mesh e2e suite exercises the same path
 //! against a real browser.
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
@@ -193,7 +192,7 @@ fn two_ip_peers_link_through_the_gated_rendezvous() {
 
 /// The browser-shaped case, natively: a peer with no IP transports must
 /// still link — its rendezvous link rides the beacon's `WebRTC` lane.
-#[ignore = "timing-sensitive: a JSEP round per beacon shed; run solo with --ignored"]
+#[ignore = "timing-sensitive: a real JSEP round; run solo with --ignored"]
 #[test]
 fn a_webrtc_only_peer_links_through_the_beacon_lane() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network=info");
@@ -222,7 +221,7 @@ fn a_webrtc_only_peer_links_through_the_beacon_lane() {
         .await;
         // Stagger like a real join: the first node claims the beacon, the second
         // finds it held. Simultaneous starts race both into the claim and leave
-        // two same-id rendezvous copies shedding each other for the whole test.
+        // two same-id rendezvous copies that must first settle by the contest.
         time::sleep(Duration::from_secs(10)).await;
         let bob_transports: TransportOpts = TransportOpts::default()
             .udp(false)

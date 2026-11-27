@@ -37,7 +37,6 @@ use super::{Args, Skip, build};
 
 use habilis_network::net::test_relay;
 use habilis_network::runtime::BROWSER_HAS_NO_PATH;
-use habilis_network::util::tuning;
 use tokio::runtime::Builder;
 use tokio::time::{Instant, Instant as tokio_Instant};
 
@@ -520,21 +519,6 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     build::build_browser_peer()?;
 
     init_logging();
-    // The cells stagger the browser behind the native side's `beacon role
-    // active`, so the native peer always claims round 0 — and a rival
-    // re-check that sheds a healthy two-member beacon mid-cell forces the
-    // browser through a full JSEP+graft rebuild that eats the cell budget
-    // (observed: shed at T+30s, re-claim at T+150s, pair session attached
-    // one second before the deadline). Park the re-check beyond any cell:
-    // the matrix measures the mesh's steady state, and same-id split repair
-    // has the engine's own tests. In-process only — the browser side never
-    // claims under the stagger, so its defaults stay untouched.
-    tuning::init(
-        tuning::Tuning::DEFAULTS
-            .rival_recheck_first(Duration::from_hours(1))
-            .rival_recheck(Duration::from_hours(1))
-            .rival_recheck_meshed(Duration::from_hours(1)),
-    );
     let runtime = Builder::new_multi_thread()
         .enable_all()
         .build()

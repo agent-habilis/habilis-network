@@ -43,7 +43,6 @@ use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
 
 use habilis_network::net::test_relay;
-use habilis_network::util::tuning;
 use std::fs;
 use tokio::time::{Instant, Instant as tokio_Instant};
 use tokio::{runtime, time};
@@ -451,14 +450,6 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     build::build_browser_peer()?;
 
     init_logging();
-    // As in the mesh suite: the beacon re-check is parked beyond the cell, which measures the mesh's
-    // steady state.
-    tuning::init(
-        tuning::Tuning::DEFAULTS
-            .rival_recheck_first(Duration::from_hours(1))
-            .rival_recheck(Duration::from_hours(1))
-            .rival_recheck_meshed(Duration::from_hours(1)),
-    );
     let runtime = runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

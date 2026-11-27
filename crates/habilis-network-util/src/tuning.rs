@@ -409,14 +409,6 @@ pub struct Tuning {
     pub directory_expiry: Duration,
     /// Whether a directory advertiser keeps its mesh unlisted.
     pub directory_private: bool,
-    /// How soon the first rival check runs after a probed claim.
-    pub rival_recheck_first: Duration,
-    /// How often a lone public beacon holder rechecks for a rival.
-    pub rival_recheck: Duration,
-    /// How often a meshed public beacon holder rechecks for a rival.
-    pub rival_recheck_meshed: Duration,
-    /// The cap of the ramping recheck interval of a beacon holder with no peers (a topic peer that stays alone).
-    pub rival_recheck_alone: Duration,
     /// How often a node revisits the rendezvous to meet split islands.
     pub rendezvous_periodic_return: Duration,
     /// Whether a topic mesh looks up peers over mDNS only.
@@ -442,27 +434,6 @@ impl Tuning {
     #[must_use]
     pub fn backfill_interval(mut self, backfill_interval: Duration) -> Self {
         self.backfill_interval = backfill_interval;
-        self
-    }
-
-    /// Set how long the first rival recheck waits.
-    #[must_use]
-    pub fn rival_recheck_first(mut self, rival_recheck_first: Duration) -> Self {
-        self.rival_recheck_first = rival_recheck_first;
-        self
-    }
-
-    /// Set how long each rival recheck waits.
-    #[must_use]
-    pub fn rival_recheck(mut self, rival_recheck: Duration) -> Self {
-        self.rival_recheck = rival_recheck;
-        self
-    }
-
-    /// Set how long each rival recheck waits once meshed.
-    #[must_use]
-    pub fn rival_recheck_meshed(mut self, rival_recheck_meshed: Duration) -> Self {
-        self.rival_recheck_meshed = rival_recheck_meshed;
         self
     }
 
@@ -542,13 +513,6 @@ impl Tuning {
         self.rendezvous_periodic_return = rendezvous_periodic_return;
         self
     }
-
-    /// Set the rival recheck interval for a lone member.
-    #[must_use]
-    pub fn rival_recheck_alone(mut self, rival_recheck_alone: Duration) -> Self {
-        self.rival_recheck_alone = rival_recheck_alone;
-        self
-    }
 }
 
 impl Tuning {
@@ -566,10 +530,6 @@ impl Tuning {
         advertise_interval: ADVERTISE_INTERVAL,
         directory_expiry: DIRECTORY_EXPIRY,
         directory_private: false,
-        rival_recheck_first: RIVAL_RECHECK_FIRST,
-        rival_recheck: RIVAL_RECHECK,
-        rival_recheck_meshed: RIVAL_RECHECK_MESHED,
-        rival_recheck_alone: RIVAL_RECHECK_ALONE,
         rendezvous_periodic_return: RENDEZVOUS_PERIODIC_RETURN,
         topic_mdns_only: false,
         peerinfo_refresh_min: PEERINFO_REFRESH_MIN,
@@ -956,106 +916,6 @@ pub fn directory_expiry() -> Duration {
     current().directory_expiry
 }
 
-/// First shed of an `EagerProbed` public beacon after a probed claim — see
-/// [`RIVAL_RECHECK_FIRST`] for the rationale.
-/// Hidden flag `--rival-recheck-first-secs` (tests converge in seconds).
-/// Clamped to `>= 1 s`.
-pub const RIVAL_RECHECK_FIRST: Duration = Duration::from_secs(12);
-
-/// The live value, after any CLI override of [`RIVAL_RECHECK_FIRST`].
-///
-/// # Examples
-///
-/// The first rival recheck is always positive.
-///
-/// ```
-/// use habilis_network_util::tuning::rival_recheck_first;
-/// use std::time::Duration;
-///
-/// assert!(rival_recheck_first() > Duration::ZERO);
-/// ```
-#[must_use]
-pub fn rival_recheck_first() -> Duration {
-    current().rival_recheck_first.max(Duration::from_secs(1))
-}
-
-/// Steady shed cadence for a lone `EagerProbed` public beacon holder —
-/// see [`RIVAL_RECHECK`]. Hidden flag
-/// `--rival-recheck-secs`. Clamped to `>= 1 s`.
-pub const RIVAL_RECHECK: Duration = Duration::from_secs(30);
-
-/// The live value, after any CLI override of [`RIVAL_RECHECK`].
-///
-/// # Examples
-///
-/// The rival recheck is always positive.
-///
-/// ```
-/// use habilis_network_util::tuning::rival_recheck;
-/// use std::time::Duration;
-///
-/// assert!(rival_recheck() > Duration::ZERO);
-/// ```
-#[must_use]
-pub fn rival_recheck() -> Duration {
-    current().rival_recheck.max(Duration::from_secs(1))
-}
-
-/// Steady shed cadence while meshed (island-vs-island backstop) — see
-/// [`RIVAL_RECHECK_MESHED`]. Hidden flag
-/// `--rival-recheck-meshed-secs`. Clamped to `>= 1 s`.
-pub const RIVAL_RECHECK_MESHED: Duration = Duration::from_mins(5);
-
-/// The live value, after any CLI override of [`RIVAL_RECHECK_MESHED`].
-///
-/// # Examples
-///
-/// The meshed rival recheck is always positive.
-///
-/// ```
-/// use habilis_network_util::tuning::rival_recheck_meshed;
-/// use std::time::Duration;
-///
-/// assert!(rival_recheck_meshed() > Duration::ZERO);
-/// ```
-#[must_use]
-pub fn rival_recheck_meshed() -> Duration {
-    current().rival_recheck_meshed.max(Duration::from_secs(1))
-}
-
-/// Shed cadence ceiling for a holder with an **empty roster** — the tier
-/// `daemon::cohost_arm::next_recheck_delay` picks when `roster == 0`.
-///
-/// [`RIVAL_RECHECK_MESHED`] is priced for two multi-member islands, and
-/// the geometric ramp caps there for every small roster. A node that knows no
-/// peer at all has nothing to reconcile: the brisk early rounds still run,
-/// and they are what repairs a double-claim, but once a run of probes has
-/// found no rival the only thing a 300s cap buys is a public-endpoint rebind
-/// every ~7 minutes, forever. Measured on a permanently-alone topic peer:
-/// ~138 rebinds/hour before the ramp existed, ~8/hour with the 300s cap, and
-/// the rebind is the suspected road into a `recvmsg` spin. At 3600 the ramp
-/// converges to a ~1.5h mean interval.
-///
-/// Hidden flag `--rival-recheck-alone-secs`. Clamped to `>= 1 s`.
-pub const RIVAL_RECHECK_ALONE: Duration = Duration::from_hours(1);
-
-/// The live value, after any CLI override of [`RIVAL_RECHECK_ALONE`].
-///
-/// # Examples
-///
-/// The alone rival recheck is always positive.
-///
-/// ```
-/// use habilis_network_util::tuning::rival_recheck_alone;
-/// use std::time::Duration;
-///
-/// assert!(rival_recheck_alone() > Duration::ZERO);
-/// ```
-#[must_use]
-pub fn rival_recheck_alone() -> Duration {
-    current().rival_recheck_alone.max(Duration::from_secs(1))
-}
-
 /// Topic meshes are the public preset; the `--topic-mdns-only` flag narrows
 /// their lookups to mDNS (no DHT, no relay). **Test-only** (hidden flag): the
 /// beacon-claim race is otherwise unreachable in CI (no public relay), same
@@ -1227,27 +1087,6 @@ const _: () = assert!(
     NODE_LEAVE.as_millis() >= LEFT_PROPAGATION.as_millis() + 3 * RENDEZVOUS_CLOSE.as_millis(),
     "NODE_LEAVE must cover the Left propagation and the 3 serial close budgets of Loop::finish"
 );
-
-/// Roster size (known live members) at or below which a *meshed* holder uses
-/// the brisk lone cadence ([`RIVAL_RECHECK`]) instead of the slow
-/// [`RIVAL_RECHECK_MESHED`] backstop.
-///
-/// The slow cadence is priced for the case it was written for: two
-/// **multi-member** islands, where a shed's beacon blip costs a healthy gossip
-/// something and the split is rare. A two-tab mesh left behind by a departed
-/// origin is neither — the split is the routine outcome of that departure, and
-/// a shed there disturbs almost nobody. So the tier is chosen by how much a
-/// shed actually costs, which is roster size, not by the meshed flag alone.
-///
-/// A pure const with no flag, like [`RIVAL_RECHECK_OFFSET_SPAN`]: it
-/// picks between two cadences that already have their own knobs.
-pub const RIVAL_RECHECK_SMALL_ROSTER: usize = 4;
-
-/// Span of the deterministic per-node phase offset added to the first shed,
-/// derived from the peer endpoint id. Orders simultaneous claimants so
-/// the earlier-offset node sheds first, finds the other's still-held beacon,
-/// and yields — a tie-break, not a delay knob, so no flag.
-pub const RIVAL_RECHECK_OFFSET_SPAN: Duration = Duration::from_secs(8);
 
 /// `HyParView` **active view** capacity (G): the number of direct gossip
 /// neighbors (open QUIC links) each member keeps per topic. A mesh of G + 1
