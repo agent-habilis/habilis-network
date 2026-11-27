@@ -59,10 +59,10 @@ use crate::{beacon, gossip, lifecycle};
 
 use super::app::NodeDriver;
 use super::cohost_arm::{
-    CohostArm, apply_holder_answer, claims_at_startup, maybe_cohost, maybe_reclaim,
-    note_rival_holds, offer_to_the_new_holder, probes_before_claim, reads_ladder_while_unmeshed,
-    release_rendezvous, schedule_rival_recheck, shed_rival_beacon_if_due,
-    start_holder_probe_if_due, verdict_after_known_holders,
+    CohostArm, apply_holder_answer, arm_holder_probe, claims_at_startup, maybe_cohost,
+    maybe_reclaim, note_rival_holds, offer_to_the_new_holder, probes_before_claim,
+    reads_ladder_while_unmeshed, release_rendezvous, start_holder_probe_if_due,
+    verdict_after_known_holders,
 };
 #[cfg(feature = "host")]
 use super::config::RuntimeConfig;
@@ -629,7 +629,7 @@ async fn start_rendezvous(
         .await
             == beacon::Held::Claimed;
         if claimed {
-            schedule_rival_recheck(state, cohost, rendezvous_params, endpoint);
+            arm_holder_probe(state, cohost, rendezvous_params);
         }
     } else if !rendezvous_params.bind_ports.is_empty() {
         // A member that does not claim at startup walks first on the reclaim ticker, and its book
@@ -1090,8 +1090,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
                 if arrived != self.parts.endpoint.id()
                     && !self.state.known_endpoints.contains(&arrived)
                 {
-                    self.state
-                        .note_second_group_sign(self.parts.endpoint.id(), Instant::now());
+                    self.state.note_second_group_sign(Instant::now());
                 }
             }
         }
@@ -1430,6 +1429,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
                 self.probe_verdict(beacon::holder_is_there(answer)).await;
             }
             beacon::ProbePurpose::OfHolder => {
+                self.state.idle.ext.holder_ask += 1;
                 let context = self.parts.handler_ctx(&self.sender);
                 let arm = CohostArm {
                     policy: self.cohost,
@@ -1490,24 +1490,13 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             )
             .await;
             if claimed {
-                // Still from the brisk base: two joiners that start
-                // together both read free twice and claim in the same
-                // instant, and the first re-check is what merges that
-                // split.
-                schedule_rival_recheck(
-                    &mut self.state,
-                    self.cohost,
-                    &self.rendezvous_params,
-                    self.parts.endpoint,
-                );
+                // Two joiners that start together both read free twice and claim in the same
+                // instant; the first ask of who serves the rendezvous merges that split.
+                arm_holder_probe(&mut self.state, self.cohost, &self.rendezvous_params);
                 // The new rendezvous never dials us; the reclaim tick re-grafts it.
                 self.state.arm_reclaim(Instant::now());
                 offer_to_the_new_holder(&mut self.state, &self.parts.handler_ctx(&self.sender));
             } else if found_rival {
-                // A rival holds the identity: this arbitration epoch is
-                // settled, so a later claim (the rival died) starts the
-                // re-check backoff from its brisk base again.
-                self.state.rival_recheck_rounds = 0;
                 note_rival_holds(&mut self.state, &self.parts.handler_ctx(&self.sender));
             }
         }
@@ -1580,15 +1569,8 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             params: &self.rendezvous_params,
             started: self.started,
         };
-        // The rival re-check shed rides this ticker, NOT the heal tick:
-        // simultaneous joiners' heal tickers align, and a shed deadline
-        // quantized to a shared multi-second boundary re-synchronizes
-        // the very sheds whose ms-scale phase offsets must differ for
-        // one holder to catch the other still up (observed lockstep:
-        // both shed within 5ms, both probe into the gap, both re-bind,
-        // forever). At this cadence the offsets survive; the next tick
-        // (~RECLAIM_INTERVAL later, after the dropped endpoint has
-        // unmapped) runs the re-probe via `maybe_reclaim`.
+        // The ask of who serves the rendezvous rides this ticker and not the heal tick: its deadline
+        // comes from the claim of each holder, so the asks of 2 holders are not aligned.
         start_holder_probe_if_due(
             &mut self.state,
             &arm,
@@ -1597,21 +1579,14 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             context.endpoint.id(),
         )
         .await;
-        if !shed_rival_beacon_if_due(
+        maybe_reclaim(
             &mut self.state,
+            &context,
             &arm,
             &mut self.rendezvous,
-            context.endpoint.id(),
-        ) {
-            maybe_reclaim(
-                &mut self.state,
-                &context,
-                &arm,
-                &mut self.rendezvous,
-                &mut self.rival_probe,
-            )
-            .await;
-        }
+            &mut self.rival_probe,
+        )
+        .await;
         read_ladder_while_unmeshed(
             &mut self.state,
             &self.rendezvous_params,

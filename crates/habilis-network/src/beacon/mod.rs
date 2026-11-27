@@ -45,7 +45,6 @@ mod beacon_who;
 mod bind;
 pub(crate) mod claim;
 mod contest;
-mod dependents;
 mod held;
 mod holder_contest;
 mod lookups;
@@ -57,7 +56,6 @@ mod rung_probe;
 mod rung_watch;
 pub(crate) use beacon_who::{BEACON_WHO_ALPN, BeaconWho, WhoAnswer, ask_who};
 pub(crate) use contest::{Contest, claim_after_probe, releasable};
-pub(crate) use dependents::Dependents;
 pub(crate) use held::{Held, Walk, read_busy_rungs, read_ladder, walk_ladder};
 pub(crate) use holder_contest::{ContestAction, HolderContest};
 pub(crate) use lookups::beacon_lookups;
@@ -68,7 +66,7 @@ pub(crate) use rival_probe::{
 };
 pub(crate) use rung_ladder::{
     forget_rungs, forget_rungs_in_book, refresh_holder_rung, rendezvous_addr,
-    rendezvous_addr_offering, rung_of,
+    rendezvous_addr_offering,
 };
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub(crate) use rung_probe::set_blind_rung_probes;

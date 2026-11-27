@@ -139,6 +139,7 @@ pub(crate) async fn tick_state_refresh(
         idle_ext_rung_change = ext.rung_change,
         idle_ext_rung_report = ext.rung_report,
         idle_ext_probe_verdict = ext.probe_verdict,
+        idle_ext_holder_ask = ext.holder_ask,
         idle_ext_ipc = ext.ipc,
         idle_ext_http = ext.http,
         idle_ext_session = ext.session,

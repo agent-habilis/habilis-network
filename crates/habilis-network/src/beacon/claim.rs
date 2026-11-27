@@ -258,7 +258,6 @@ pub(crate) async fn claim_holder(
         task,
         monitor,
         endpoint: rendezvous_endpoint,
-        lane,
         arrivals,
         released: false,
         generation,

@@ -21,7 +21,7 @@ pub(crate) async fn on_lan_event(
         LanEvent::Seen(address) => {
             let linked = state.linked_endpoints.contains(&address.id);
             if !linked {
-                state.note_second_group_sign(context.endpoint.id(), Instant::now());
+                state.note_second_group_sign(Instant::now());
             }
             if state.lan_grafts.plan(&address, linked, Instant::now()) {
                 ask(address, state, context).await;
@@ -287,13 +287,13 @@ mod tests {
                 .rendezvous_flags
                 .insert(RendezvousFlag::HostsRendezvous);
             let far = Instant::now() + Duration::from_hours(1);
-            state.next_rival_recheck = Some(far);
+            state.next_holder_probe = Some(far);
 
             super::on_lan_event(LanEvent::Seen(member(1)), &mut state, &context).await;
 
             assert!(
-                state.next_rival_recheck.is_some_and(|next| next < far),
-                "the re-check came back from an hour out"
+                state.next_holder_probe.is_some_and(|next| next < far),
+                "the ask came back from an hour out"
             );
             node.stop_gossip().await;
             node.endpoint.close().await;
@@ -314,16 +314,16 @@ mod tests {
                 .rendezvous_flags
                 .insert(RendezvousFlag::HostsRendezvous);
             let far = Instant::now() + Duration::from_hours(1);
-            state.next_rival_recheck = Some(far);
+            state.next_holder_probe = Some(far);
             let address = member(1);
             state.linked_endpoints.insert(address.id);
 
             super::on_lan_event(LanEvent::Seen(address), &mut state, &context).await;
 
             assert_eq!(
-                state.next_rival_recheck,
+                state.next_holder_probe,
                 Some(far),
-                "the lan neighbor leaves the re-check time at its far value"
+                "the lan neighbor leaves the ask time at its far value"
             );
             node.stop_gossip().await;
             node.endpoint.close().await;

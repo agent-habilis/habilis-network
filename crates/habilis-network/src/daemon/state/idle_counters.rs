@@ -103,6 +103,7 @@ pub(crate) struct ExternalArms {
     pub rung_change: u64,
     pub rung_report: u64,
     pub probe_verdict: u64,
+    pub holder_ask: u64,
     pub ipc: u64,
     pub http: u64,
     pub session: u64,
@@ -142,6 +143,7 @@ impl ExternalArms {
             + self.rung_change
             + self.rung_report
             + self.probe_verdict
+            + self.holder_ask
             + self.ipc
             + self.http
             + self.session

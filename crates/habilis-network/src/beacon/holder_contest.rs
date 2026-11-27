@@ -28,6 +28,18 @@ pub(crate) enum ContestAction {
     YieldTo(EndpointId),
 }
 
+impl ContestAction {
+    /// The word of the action in the log line of the holder probe. A parser reads this word, not the
+    /// `Debug` text; the words are pinned by a test.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Self::Stay => "stay",
+            Self::ClaimAgain => "claim_again",
+            Self::YieldTo(_) => "yield",
+        }
+    }
+}
+
 /// What a holder remembers between two answers.
 #[derive(Debug, Default)]
 pub(crate) struct HolderContest {
@@ -308,6 +320,35 @@ mod tests {
         let count = u32::try_from(count).expect("a small count");
         let older = if old_answers { 1 + RECLAIM_PERIODS } else { 0 };
         count + 2 + older
+    }
+
+    /// The words of the log line of the holder probe are a contract with the parsers of the soak and
+    /// of the analysers: a test fails if one changes, so that no parser reads a renamed word as zero.
+    #[test]
+    fn the_words_of_the_log_line_of_the_holder_probe_are_pinned() {
+        let id = SecretKey::from_bytes(&[3u8; 32]).public();
+        let answers = [
+            (WhoAnswer::Ours, "ours", ""),
+            (WhoAnswer::Rival(id), "rival", ""),
+            (WhoAnswer::Reached("a cause"), "reached", "a cause"),
+            (
+                WhoAnswer::Unknown("another cause"),
+                "unknown",
+                "another cause",
+            ),
+        ];
+        for (answer, kind, cause) in answers {
+            assert_eq!(answer.kind(), kind, "the word of {answer:?}");
+            assert_eq!(answer.cause(), cause, "the cause of {answer:?}");
+        }
+        let actions = [
+            (ContestAction::Stay, "stay"),
+            (ContestAction::ClaimAgain, "claim_again"),
+            (ContestAction::YieldTo(id), "yield"),
+        ];
+        for (action, word) in actions {
+            assert_eq!(action.word(), word, "the word of {action:?}");
+        }
     }
 
     /// **The contest ends with 1 holder on every rule of the relay, in the bound of the note.**

@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::util::clock::Instant;
 use crate::util::tuning::RENDEZVOUS_CLOSE;
 
-use super::{Dependents, rung_of};
+use super::rung_ladder;
 
 use crate::{lookup, transport};
 use n0_future::{task, time};
@@ -52,11 +52,6 @@ pub(crate) struct Rendezvous {
     /// dead beacon lingers as a zombie until the idle timeout, stalling the
     /// post-shed re-graft.
     pub(crate) endpoint: Endpoint,
-    /// The beacon's own `WebRTC` answerer: the handle a tab's session to the
-    /// rendezvous attaches to, and the admission its negotiations hold a
-    /// slot in. The peer endpoint has its own pair, which says nothing about
-    /// who depends on the beacon. `None` where the beacon carries no lane.
-    pub(crate) lane: RendezvousLane,
     /// The members that linked to this beacon, as its gossip task saw them come up. The holder
     /// reads them: a member that it does not know is a sign that another group may exist.
     pub(crate) arrivals: mpsc::Receiver<EndpointId>,
@@ -75,24 +70,10 @@ pub(crate) type RendezvousLane = Option<(
 )>;
 
 impl Rendezvous {
-    /// How many peers depend on this beacon's data channel: sessions attached
-    /// to its answerer, plus rounds still negotiating one. `peer` is our own
-    /// member endpoint. `in_flight` does not name its peers, so a round counts
-    /// whoever it is with.
-    pub(crate) fn dependents(&self, peer: EndpointId) -> Dependents {
-        self.lane
-            .as_ref()
-            .map_or_else(Dependents::default, |(handle, admission)| Dependents {
-                live: handle.live_peer_ids().collect(),
-                own: vec![peer, self.endpoint.id()],
-                in_flight: admission.in_flight(),
-            })
-    }
-
     /// The index of the rung in `ladder` that this beacon is bound on: `0` is the first rung that a
     /// joiner tries. `None` when it is bound on none of them (a public beacon).
     pub(crate) fn rung_in(&self, ladder: &[u16]) -> Option<usize> {
-        rung_of(&self.endpoint, ladder)
+        rung_ladder::rung_of(&self.endpoint, ladder)
     }
 
     /// Tests only: make this beacon stop answering and keep its rung. The endpoint stays bound and
@@ -112,15 +93,13 @@ impl Rendezvous {
         arrived
     }
 
-    /// A beacon holding `endpoint` whose answerer is `lane`, for a test that
-    /// needs a held beacon without a claim.
+    /// A beacon holding `endpoint`, for a test that needs a held beacon without a claim.
     #[cfg(test)]
-    pub(crate) fn for_test(endpoint: Endpoint, lane: RendezvousLane) -> Self {
+    pub(crate) fn for_test(endpoint: Endpoint) -> Self {
         Self {
             task: task::spawn(future::pending()),
             monitor: None,
             endpoint,
-            lane,
             arrivals: mpsc::channel(1).1,
             released: false,
             generation: lookup::Generation::next(),

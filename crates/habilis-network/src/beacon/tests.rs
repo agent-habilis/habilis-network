@@ -7,8 +7,8 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 
 use super::{
-    Contest, ProbePurpose, Rendezvous, RendezvousParams, RivalProbe, WhoAnswer, claim, dependents,
-    releasable, rendezvous_addr, rival_probe, rung_ladder, spawn_rival_probe,
+    Contest, ProbePurpose, Rendezvous, RendezvousParams, RivalProbe, WhoAnswer, claim, releasable,
+    rendezvous_addr, rival_probe, rung_ladder, spawn_rival_probe,
 };
 use crate::util::clock::Instant;
 use iroh::SecretKey;
@@ -875,29 +875,6 @@ fn the_holder_with_the_lower_member_id_keeps_the_beacon() {
     assert!(!contest(low, low), "an id never yields to itself");
 }
 
-/// Observed on both holders of a split topic: the one session counted as a
-/// dependent was the holder's own peer endpoint, so each deferred its shed
-/// for the full wait and the split stayed.
-#[test]
-fn a_session_of_our_own_endpoints_is_no_dependent() {
-    let _guard = ::habilis_network_test_tracing::init();
-    let peer = SecretKey::generate().public();
-    let beacon = SecretKey::generate().public();
-    let tab = SecretKey::generate().public();
-    let own = [peer, beacon];
-
-    assert_eq!(
-        dependents::foreign_sessions(&[peer, beacon], &own).len(),
-        0,
-        "a session of our own endpoints is no dependent"
-    );
-    assert_eq!(
-        dependents::foreign_sessions(&[peer, tab], &own),
-        [tab],
-        "a tab session counts as one foreign session"
-    );
-}
-
 /// A real endpoint that touches nothing: `LookupOpts::loopback` binds
 /// 127.0.0.1 with relay, mDNS, DHT and the portmapper all off, so these
 /// tests make zero external network calls.
@@ -944,7 +921,6 @@ async fn dead_beacon(endpoint: Endpoint) -> Rendezvous {
         task,
         monitor: None,
         endpoint,
-        lane: None,
         arrivals: mpsc::channel(1).1,
         released: false,
         generation: lookup::Generation::next(),
@@ -1185,7 +1161,6 @@ fn shed_and_wait_mid_rewalk_closes_the_monitor_probe_endpoint() {
             task: n0future_task::spawn(future::pending()),
             monitor: Some(monitor),
             endpoint,
-            lane: None,
             arrivals: mpsc::channel(1).1,
             released: false,
             generation: lookup::Generation::next(),
@@ -3024,7 +2999,6 @@ fn a_live_beacon_keeps_the_slot_and_its_endpoint() {
             task: task::spawn(future::pending()),
             monitor: None,
             endpoint: endpoint.clone(),
-            lane: None,
             arrivals: mpsc::channel(1).1,
             released: false,
             generation: lookup::Generation::next(),

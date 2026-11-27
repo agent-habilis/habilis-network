@@ -10,7 +10,6 @@ use super::{
     MeshSecrets, PingRound, Reach, RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot,
     Standing, StateInit, Syncing,
 };
-use crate::daemon::cohost_arm;
 use crate::daemon::probe_backoff::ProbeBackoff;
 use crate::daemon::reassembly::{ReassemblyStore, ShardCache, ShardIngest};
 use crate::daemon::setup::LiveCount;
@@ -885,33 +884,15 @@ pub struct EventLoopState {
     /// died — so a survivor claims the freed rendezvous port in ~1s rather
     /// than waiting for the next 15s heal tick.
     pub(crate) reclaim_until: Option<Instant>,
-    /// When `Some(deadline)`, the next rival re-check *shed* of an
-    /// `EagerProbed` public beacon: at the deadline the holder drops its
-    /// co-host and lets probe-before-claim re-arbitrate, so a same-id
-    /// rival that claimed inside our probe window is finally found and
-    /// yielded to (see `event_loop::shed_rival_beacon_if_due`). `None`
-    /// while not holding a shed-eligible beacon.
-    pub(crate) next_rival_recheck: Option<Instant>,
     /// When the holder of the beacon next asks who serves the rendezvous on its own rung (`None`
     /// while it holds nothing, or when the probe does not apply to it).
     pub(crate) next_holder_probe: Option<Instant>,
     /// What the holder remembers between two answers of that probe.
     pub(crate) holder_contest: beacon::HolderContest,
-    /// How many rival re-check sheds have run. Round 0 (the claim made at
-    /// startup, before any shed) schedules the *fast first* re-check with
-    /// the deterministic endpoint-id tie-break offset — the likeliest
-    /// rival started within seconds of us; later rounds run the steady
-    /// jittered cadence.
-    pub(crate) rival_recheck_rounds: u32,
-    /// When a sign of a second group last brought the re-check forward
-    /// ([`Self::note_second_group_sign`]).
-    pub(crate) second_group_sign_at: Option<Instant>,
+    /// When a flag or a sign last brought the next ask forward ([`Self::bring_ask_to_now`]).
+    pub(crate) ask_hurried_at: Option<Instant>,
     /// When the member last said that every rung of its ladder is held by another process.
     pub(crate) no_rung_noted_at: Option<Instant>,
-    /// Consecutive due sheds held back because a data-channel peer depends
-    /// on this beacon; see `cohost_arm::defer_shed`. Cleared by a shed and by a
-    /// fresh claim (`cohost_arm::schedule_rival_recheck`).
-    pub(crate) rival_recheck_deferrals: u32,
     /// The close of the beacon that a rival re-check just shed: when it resolves the loop
     /// re-probes the id at once, instead of at the next reclaim tick. `None` when no shed runs.
     pub(crate) beacon_closing: Option<oneshot::Receiver<()>>,
@@ -1204,13 +1185,10 @@ impl EventLoopState {
             address_book: init.address_book,
             webrtc_ice: init.webrtc_ice,
             reclaim_until: None,
-            next_rival_recheck: None,
             next_holder_probe: None,
             holder_contest: beacon::HolderContest::default(),
-            rival_recheck_rounds: 0,
-            second_group_sign_at: None,
+            ask_hurried_at: None,
             no_rung_noted_at: None,
-            rival_recheck_deferrals: 0,
             beacon_closing: None,
             seen: BoundedFifoSet::new(SEEN_IDS_CAP),
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
@@ -2193,8 +2171,10 @@ impl EventLoopState {
     }
 
     /// A member's `PeerInfo` read: `flag.held` says it holds the rendezvous. A flag from a
-    /// proven sender is remembered whether we hold the rendezvous or not; it moves our re-check
-    /// only while we hold it too.
+    /// proven sender is remembered whether we hold the rendezvous or not. When we hold it too and
+    /// the sender has a lower id, our next ask of who serves the rendezvous comes now
+    /// ([`Self::bring_ask_to_now`]): the answer decides, as for every ask. A flag is a report, and it
+    /// can be old, so it never makes a holder yield by itself.
     pub(crate) fn note_rival_beacon_flag(
         &mut self,
         own: EndpointId,
@@ -2210,7 +2190,7 @@ impl EventLoopState {
         if !flag.proven || sender == own {
             return;
         }
-        let newly = self.rival_holders.insert(signer, sender) != Some(sender);
+        self.rival_holders.insert(signer, sender);
         if !self
             .rendezvous_flags
             .contains(&RendezvousFlag::HostsRendezvous)
@@ -2218,51 +2198,39 @@ impl EventLoopState {
             return;
         }
         if (beacon::Contest { own, rival: sender }).own_yields() {
-            self.beacon_notes.insert(BeaconNote::YieldToLower);
-            self.next_rival_recheck = Some(now);
-        } else if newly {
-            // Once per holder, so that a holder that sends its flag again and again cannot keep
-            // our re-check away. Pushed, not dropped: a holder that never re-checks never finds
-            // a co-host it does not know of. Pushed to the fast base, not to the steady cadence:
-            // a node that claimed alone and that the relay serves in our place sends us no flag,
-            // and only our own re-check can find it.
-            let pushed = now + cohost_arm::next_recheck_delay(0, self.peers.len(), own);
-            self.next_rival_recheck = Some(
-                self.next_rival_recheck
-                    .map_or(pushed, |due| due.max(pushed)),
-            );
+            self.bring_ask_to_now(now);
         }
     }
 
     /// A sign that another group of this mesh may exist: a member that we do not know linked to
-    /// our beacon, or the LAN named a member that we are not linked to.
-    ///
-    /// A holder that has found no member re-checks its rendezvous only every hour or two, and two
-    /// such holders of one room can stay apart that long. The sign brings the next re-check to
-    /// the fast base and starts the rounds from it again, so a node that nobody approaches keeps
-    /// its long wait. A sign counts once per steady interval: a burst of arrivals must not shed
-    /// the beacon again and again.
-    pub(crate) fn note_second_group_sign(&mut self, own: EndpointId, now: Instant) {
-        let Some(due) = self.next_rival_recheck.filter(|_| {
-            self.rendezvous_flags
-                .contains(&RendezvousFlag::HostsRendezvous)
-        }) else {
+    /// our beacon, or the LAN named a member that we are not linked to. The next ask of who serves
+    /// the rendezvous comes now ([`Self::bring_ask_to_now`]), so a split is read within one ask.
+    pub(crate) fn note_second_group_sign(&mut self, now: Instant) {
+        if self
+            .rendezvous_flags
+            .contains(&RendezvousFlag::HostsRendezvous)
+        {
+            self.bring_ask_to_now(now);
+        }
+    }
+
+    /// Bring the next ask of who serves the rendezvous to `now`, at most once per ask period: a
+    /// flag arrives with every `PeerInfo` of a holder (each change, and each refresh, 5 minutes or
+    /// more apart) and a burst of arrivals is a burst of signs, and none of them may ask again and
+    /// again. Nothing moves where no ask is armed, or where it is due already.
+    fn bring_ask_to_now(&mut self, now: Instant) {
+        let Some(due) = self.next_holder_probe else {
             return;
         };
-        let spacing = tuning::rival_recheck_meshed();
-        if self
-            .second_group_sign_at
-            .is_some_and(|at| now.saturating_duration_since(at) < spacing)
+        if due <= now
+            || self
+                .ask_hurried_at
+                .is_some_and(|at| now.saturating_duration_since(at) < tuning::heal_interval())
         {
             return;
         }
-        let brisk = now + cohost_arm::next_recheck_delay(0, self.peers.len(), own);
-        if due <= brisk {
-            return;
-        }
-        self.second_group_sign_at = Some(now);
-        self.rival_recheck_rounds = 0;
-        self.next_rival_recheck = Some(brisk);
+        self.ask_hurried_at = Some(now);
+        self.next_holder_probe = Some(now);
     }
 
     /// Whether some member is known to hold the rendezvous.

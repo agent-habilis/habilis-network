@@ -64,6 +64,27 @@ pub(crate) enum WhoAnswer {
     Unknown(&'static str),
 }
 
+impl WhoAnswer {
+    /// The word of the answer in the log line of the holder probe. A parser reads this word, not the
+    /// `Debug` text; the words are pinned by a test.
+    pub(crate) fn kind(self) -> &'static str {
+        match self {
+            Self::Ours => "ours",
+            Self::Rival(_) => "rival",
+            Self::Reached(_) => "reached",
+            Self::Unknown(_) => "unknown",
+        }
+    }
+
+    /// The cause of a `Reached` or `Unknown`, and the empty text for the others.
+    pub(crate) fn cause(self) -> &'static str {
+        match self {
+            Self::Reached(cause) | Self::Unknown(cause) => cause,
+            Self::Ours | Self::Rival(_) => "",
+        }
+    }
+}
+
 /// Ask the beacon at `target` which member serves it. `own` is the member that asks. `timeout` is
 /// the budget of the whole ask. Each answer that is not `Ours` or `Rival` is logged with its cause,
 /// so that the rate of them can be read from a log.
