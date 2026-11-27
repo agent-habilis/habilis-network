@@ -89,6 +89,31 @@ pub(crate) async fn claim(
         == Held::Claimed
 }
 
+/// Claim the rendezvous again, make before break: the new beacon binds first, and the old one is
+/// closed in the same step, so that the node never has 2 live endpoints of the id for longer than
+/// the claim takes. When the new claim fails, the old beacon stays.
+///
+/// The new beacon binds with no probe before it, as the first claim of a beacon does after its
+/// probe. A probe here would reach the old beacon, or the rival, and read the id as held, and
+/// nothing would ever bind. The probe of the holder has already read who serves the id.
+pub(crate) async fn claim_again(
+    params: &RendezvousParams,
+    peer: &Endpoint,
+    peer_book: &memory::MemoryLookup,
+    current: &mut Option<Rendezvous>,
+    rungs: &mut RungWatch,
+) -> Held {
+    let old = current.take();
+    let held = claim_holder(params, peer, peer_book, current, rungs).await;
+    let claimed = held == Held::Claimed;
+    match old {
+        Some(old) if claimed => old.shed(),
+        Some(old) => *current = Some(old),
+        None => {}
+    }
+    held
+}
+
 /// `claim`, with what the walk read when it did not bind.
 pub(crate) async fn claim_holder(
     params: &RendezvousParams,

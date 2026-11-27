@@ -7,7 +7,7 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 
 use super::{
-    Contest, Rendezvous, RendezvousParams, RivalProbe, claim, dependents, probe_verdict,
+    Contest, ProbePurpose, Rendezvous, RendezvousParams, RivalProbe, WhoAnswer, claim, dependents,
     releasable, rendezvous_addr, rival_probe, rung_ladder, spawn_rival_probe,
 };
 use crate::util::clock::Instant;
@@ -916,13 +916,14 @@ async fn loopback_endpoint() -> Endpoint {
 /// A probe wrapped around a channel we drive by hand. The endpoint is
 /// real but inert, because `RivalProbe` retains one so a departure can
 /// close it, and these tests are about the slot, not the dial.
-async fn probe_for(rx: oneshot::Receiver<bool>) -> (RivalProbe, Endpoint) {
+async fn probe_for(rx: oneshot::Receiver<WhoAnswer>) -> (RivalProbe, Endpoint) {
     let endpoint = loopback_endpoint().await;
     let probe = RivalProbe {
         rx,
         task: n0future_task::spawn(future::pending()),
         endpoints: vec![endpoint.clone()],
         cancel: None,
+        purpose: ProbePurpose::BeforeClaim,
     };
     (probe, endpoint)
 }
@@ -1060,8 +1061,11 @@ fn the_rival_probe_of_a_free_ladder_reads_free_at_once() {
         params.bind_ports = ports;
         let mut probe = spawn_rival_probe(&params, SecretKey::generate().public()).await;
         let started = Instant::now();
-        let verdict =
-            n0future_time::timeout(std_Duration::from_secs(5), probe_verdict(&mut probe)).await;
+        let verdict = n0future_time::timeout(
+            std_Duration::from_secs(5),
+            rival_probe::probe_verdict(&mut probe),
+        )
+        .await;
         assert!(matches!(verdict, Ok(false)), "a free ladder: {verdict:?}");
         assert!(
             started.elapsed() < std_Duration::from_millis(500),
@@ -1144,6 +1148,7 @@ fn abort_and_close_lets_a_probe_finish_closing_its_own_endpoint() {
             task,
             endpoints: vec![prober.clone()],
             cancel: None,
+            purpose: ProbePurpose::BeforeClaim,
         };
 
         probe.abort_and_close().await;
@@ -1624,8 +1629,11 @@ async fn rival_verdict_past_another_meshs_rung(foreign_lower: bool) -> Option<bo
 
     let node = SecretKey::generate().public();
     let mut rival = spawn_rival_probe(&params, node).await;
-    let verdict =
-        n0future_time::timeout(std_Duration::from_secs(20), probe_verdict(&mut rival)).await;
+    let verdict = n0future_time::timeout(
+        std_Duration::from_secs(20),
+        rival_probe::probe_verdict(&mut rival),
+    )
+    .await;
 
     if let Some(held) = beacon.take() {
         held.shed_and_wait().await;
@@ -2389,8 +2397,11 @@ fn a_rival_probe_from_another_rung_finds_the_beacon() {
         on_a.bootstrap_relay = Some(relay_a);
         let node = SecretKey::generate().public();
         let mut probe = spawn_rival_probe(&on_a, node).await;
-        let verdict =
-            n0future_time::timeout(std_Duration::from_secs(20), probe_verdict(&mut probe)).await;
+        let verdict = n0future_time::timeout(
+            std_Duration::from_secs(20),
+            rival_probe::probe_verdict(&mut probe),
+        )
+        .await;
 
         drop(beacon);
         peer.close().await;
@@ -2398,6 +2409,53 @@ fn a_rival_probe_from_another_rung_finds_the_beacon() {
             matches!(verdict, Ok(true)),
             "the probe from rung A did not find the beacon on rung B: {verdict:?}"
         );
+    });
+}
+
+/// **A claim again binds a new beacon and closes the old one.**
+///
+/// The new beacon binds with no probe before it, so the claim reads `Claimed`; the old endpoint is
+/// closed and the new one is live: the node has 1 endpoint of the id.
+#[test]
+fn a_claim_again_binds_a_new_beacon_and_closes_the_old_one() {
+    use super::{Held, RungWatch};
+    use crate::lookup::test_relay;
+    use crate::protocol::meshes::RelayChoice;
+
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        // The new claim displaces the old session of the same node on the relay.
+        ::habilis_network_test_tracing::allow_warn(
+            "iroh::socket::transports::relay::actor",
+            "Another endpoint connected with the same endpoint id",
+        );
+        let (relay, _server) = test_relay::spawn_plain().await.expect("a local relay");
+        let mut params = public_params();
+        params.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay.clone()]));
+        params.bootstrap_relay = Some(relay);
+        let peer = loopback_endpoint().await;
+        let book = lookup::address_book(&peer);
+        let mut beacon = None;
+        assert!(
+            claim::claim(&params, &peer, &book, &mut beacon).await,
+            "the beacon stands up"
+        );
+        let old: Endpoint = beacon.as_ref().expect("a beacon").endpoint.clone();
+        let (reports, _arrivals) = mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+
+        let result = claim::claim_again(&params, &peer, &book, &mut beacon, &mut rungs).await;
+
+        let new: Endpoint = beacon.as_ref().expect("a beacon").endpoint.clone();
+        settle(&old).await;
+        let old_closed = old.is_closed();
+        let new_live = !new.is_closed();
+        let moved = old.bound_sockets() != new.bound_sockets();
+        drop(beacon);
+        peer.close().await;
+        assert_eq!(result, Held::Claimed, "the claim again binds");
+        assert!(old_closed, "the old endpoint closed");
+        assert!(new_live, "the new endpoint is live");
+        assert!(moved, "the new beacon is another endpoint");
     });
 }
 
@@ -2537,7 +2595,7 @@ impl ProtocolHandler for StalledBeacon {
 /// an absence.
 #[test]
 fn the_ask_names_who_serves_a_beacon_and_reads_silence_as_unknown() {
-    use super::{BEACON_WHO_ALPN, WhoAnswer, ask_who};
+    use super::{BEACON_WHO_ALPN, WhoAnswer, beacon_who};
     use crate::lookup::test_relay;
     use crate::protocol::meshes::RelayChoice;
     use iroh::endpoint::{Builder, presets};
@@ -2564,14 +2622,15 @@ fn the_ask_names_who_serves_a_beacon_and_reads_silence_as_unknown() {
         let address = rendezvous_addr(&params).expect("an address");
         let stranger = SecretKey::generate().public();
 
-        let by_stranger = ask_who(&prober, address.clone(), stranger, budget).await;
-        let by_member = ask_who(&prober, address, member, budget).await;
+        let by_stranger = beacon_who::ask_who(&prober, address.clone(), stranger, budget).await;
+        let by_member = beacon_who::ask_who(&prober, address, member, budget).await;
         drop(beacon);
 
         // Nobody serves this id: the dial finds nothing in the budget.
         let nobody = SecretKey::generate().public();
         let nobody_addr = EndpointAddr::new(nobody).with_relay_url(relay.clone());
-        let by_silence = ask_who(&prober, nobody_addr, stranger, std_Duration::from_secs(2)).await;
+        let by_silence =
+            beacon_who::ask_who(&prober, nobody_addr, stranger, std_Duration::from_secs(2)).await;
 
         // An endpoint that does not know the ALPN refuses the dial.
         let unaware_builder: Builder = Endpoint::builder(presets::Minimal)
@@ -2580,7 +2639,7 @@ fn the_ask_names_who_serves_a_beacon_and_reads_silence_as_unknown() {
         let unaware = unaware_builder.bind().await.expect("an endpoint");
         unaware.online().await;
         let unaware_addr = EndpointAddr::new(unaware.id()).with_relay_url(relay.clone());
-        let by_refusal = ask_who(&prober, unaware_addr, stranger, budget).await;
+        let by_refusal = beacon_who::ask_who(&prober, unaware_addr, stranger, budget).await;
 
         // An endpoint that answers with 5 bytes: not an id.
         let relay_for_stall = relay.clone();
@@ -2592,7 +2651,7 @@ fn the_ask_names_who_serves_a_beacon_and_reads_silence_as_unknown() {
             .accept(BEACON_WHO_ALPN, ShortFrame)
             .spawn();
         let short_addr = short.addr();
-        let by_short_frame = ask_who(&prober, short_addr, stranger, budget).await;
+        let by_short_frame = beacon_who::ask_who(&prober, short_addr, stranger, budget).await;
 
         // An endpoint that takes the dial and never answers.
         let stalled_builder: Builder =
@@ -2602,7 +2661,7 @@ fn the_ask_names_who_serves_a_beacon_and_reads_silence_as_unknown() {
         let stalled_router = Router::builder(stalled.clone())
             .accept(BEACON_WHO_ALPN, StalledBeacon)
             .spawn();
-        let by_stall = ask_who(
+        let by_stall = beacon_who::ask_who(
             &prober,
             stalled.addr(),
             stranger,
@@ -2673,8 +2732,11 @@ fn a_probe_before_a_claim_reads_a_stalled_beacon_as_held() {
         let node = SecretKey::generate().public();
 
         let mut probe = spawn_rival_probe(&params, node).await;
-        let verdict =
-            n0future_time::timeout(std_Duration::from_secs(20), probe_verdict(&mut probe)).await;
+        let verdict = n0future_time::timeout(
+            std_Duration::from_secs(20),
+            rival_probe::probe_verdict(&mut probe),
+        )
+        .await;
 
         router.shutdown().await.expect("the router stops");
         assert!(
@@ -2704,8 +2766,11 @@ fn a_member_with_no_reachable_rung_reads_the_rendezvous_as_held() {
         let node = SecretKey::generate().public();
 
         let mut probe = spawn_rival_probe(&params, node).await;
-        let verdict =
-            n0future_time::timeout(std_Duration::from_secs(20), probe_verdict(&mut probe)).await;
+        let verdict = n0future_time::timeout(
+            std_Duration::from_secs(20),
+            rival_probe::probe_verdict(&mut probe),
+        )
+        .await;
 
         assert!(
             matches!(verdict, Ok(true)),
@@ -2754,9 +2819,12 @@ fn nothing_to_name_is_none_not_a_bare_id() {
 #[test]
 fn an_answered_probe_is_taken_at_its_word() {
     let _guard = ::habilis_network_test_tracing::init();
-    assert!(rival_probe::verdict_of(Ok(true)), "a rival answered");
     assert!(
-        !rival_probe::verdict_of(Ok(false)),
+        rival_probe::verdict_of(Ok(WhoAnswer::Reached("a rival answered"))),
+        "a rival answered"
+    );
+    assert!(
+        !rival_probe::verdict_of(Ok(WhoAnswer::Unknown("nobody answered"))),
         "nobody answered; the id is free"
     );
     // `RecvError` cannot be constructed here, so the unanswered case is
@@ -2769,9 +2837,13 @@ fn a_verdict_is_delivered_once_and_frees_the_slot() {
         let (tx, rx) = oneshot::channel();
         let (probe, endpoint) = probe_for(rx).await;
         let mut slot = Some(probe);
-        tx.send(false).expect("verdict accepted");
+        tx.send(WhoAnswer::Unknown("nobody answered"))
+            .expect("verdict accepted");
 
-        assert!(!probe_verdict(&mut slot).await, "the rendezvous is free");
+        assert!(
+            !rival_probe::probe_verdict(&mut slot).await,
+            "the rendezvous is free"
+        );
         // Cleared, or the loop's arm would re-fire on the closed channel
         // forever and no later tick could ever start a fresh probe.
         assert!(slot.is_none(), "the slot is free for the next probe");
@@ -2796,7 +2868,7 @@ fn an_unanswerable_probe_reads_held_not_free() {
             "the probe reports a verdict, it does not vanish"
         );
         assert!(
-            probe_verdict(&mut slot).await,
+            rival_probe::probe_verdict(&mut slot).await,
             "an unanswerable probe reads as held, never as free"
         );
     });
@@ -2805,13 +2877,14 @@ fn an_unanswerable_probe_reads_held_not_free() {
 #[test]
 fn a_probe_whose_task_dies_frees_the_slot_too() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-        let (tx, rx): (oneshot::Sender<bool>, oneshot::Receiver<bool>) = oneshot::channel();
+        let (tx, rx): (oneshot::Sender<WhoAnswer>, oneshot::Receiver<WhoAnswer>) =
+            oneshot::channel();
         let (probe, endpoint) = probe_for(rx).await;
         let mut slot = Some(probe);
         drop(tx);
 
         assert!(
-            probe_verdict(&mut slot).await,
+            rival_probe::probe_verdict(&mut slot).await,
             "could not tell; stay a peer"
         );
         assert!(slot.is_none(), "a dead probe must not wedge the slot");
@@ -2823,8 +2896,11 @@ fn a_probe_whose_task_dies_frees_the_slot_too() {
 fn no_probe_means_the_arm_never_fires() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
         let mut slot: Option<RivalProbe> = None;
-        let pending =
-            tokio_time::timeout(std_Duration::from_millis(50), probe_verdict(&mut slot)).await;
+        let pending = tokio_time::timeout(
+            std_Duration::from_millis(50),
+            rival_probe::probe_verdict(&mut slot),
+        )
+        .await;
         assert!(pending.is_err(), "an empty slot pends instead of firing");
     });
 }

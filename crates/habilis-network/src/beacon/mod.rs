@@ -47,6 +47,7 @@ pub(crate) mod claim;
 mod contest;
 mod dependents;
 mod held;
+mod holder_contest;
 mod lookups;
 mod rendezvous;
 mod rendezvous_params;
@@ -58,10 +59,13 @@ pub(crate) use beacon_who::{BEACON_WHO_ALPN, BeaconWho, WhoAnswer, ask_who};
 pub(crate) use contest::{Contest, claim_after_probe, releasable};
 pub(crate) use dependents::Dependents;
 pub(crate) use held::{Held, Walk, read_busy_rungs, read_ladder, walk_ladder};
+pub(crate) use holder_contest::{ContestAction, HolderContest};
 pub(crate) use lookups::beacon_lookups;
 pub(crate) use rendezvous::{Rendezvous, RendezvousLane};
 pub(crate) use rendezvous_params::RendezvousParams;
-pub(crate) use rival_probe::{RivalProbe, probe_verdict, spawn_rival_probe};
+pub(crate) use rival_probe::{
+    ProbePurpose, RivalProbe, holder_is_there, probe_outcome, spawn_holder_probe, spawn_rival_probe,
+};
 pub(crate) use rung_ladder::{
     forget_rungs, forget_rungs_in_book, refresh_holder_rung, rendezvous_addr,
     rendezvous_addr_offering, rung_of,

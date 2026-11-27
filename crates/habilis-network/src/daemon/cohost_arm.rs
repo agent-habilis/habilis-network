@@ -602,6 +602,10 @@ pub(super) fn schedule_rival_recheck(
     if !rival_recheck_applies(policy, params.bind_ports.is_empty()) {
         return;
     }
+    // The contest is not reset here: a claim again goes through this funnel, and the count of
+    // claims against a rival must survive it. A contest starts clean where a holder starts or ends
+    // (the first claim, `release_to_rival`, a rehome).
+    state.next_holder_probe = Some(Instant::now() + tuning::heal_interval());
     // A holder with no peer is an island or the first node of a room: its fast first check would
     // shed the one beacon that a member can find and graft to, so it takes the steady cadence.
     let round = if state.peers.is_empty() {
@@ -612,6 +616,87 @@ pub(super) fn schedule_rival_recheck(
     let delay = next_recheck_delay(round, state.peers.len(), endpoint.id());
     state.next_rival_recheck = Some(Instant::now() + delay);
 }
+/// Start the probe of the holder when it is due: it asks who serves the rendezvous on the rung of
+/// its own beacon. One period after the start, the next one is due, whether or not this one could
+/// start.
+pub(super) async fn start_holder_probe_if_due(
+    state: &mut EventLoopState,
+    arm: &CohostArm<'_>,
+    rendezvous: Option<&beacon::Rendezvous>,
+    probe: &mut Option<beacon::RivalProbe>,
+    node: EndpointId,
+) {
+    if rendezvous.is_none()
+        || probe.is_some()
+        || !rival_recheck_applies(arm.policy, arm.params.bind_ports.is_empty())
+    {
+        return;
+    }
+    if state
+        .next_holder_probe
+        .is_none_or(|deadline| Instant::now() < deadline)
+    {
+        return;
+    }
+    state.next_holder_probe = Some(Instant::now() + tuning::heal_interval());
+    *probe = beacon::spawn_holder_probe(arm.params, node).await;
+}
+
+/// The answer of the probe of the holder. The contest decides: stay, claim again (make before
+/// break: the new beacon binds first and the old one closes in the same step), or yield to the
+/// rival. An answer that comes after the beacon went is about nothing and is dropped.
+pub(super) async fn apply_holder_answer(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    arm: &CohostArm<'_>,
+    rendezvous: &mut Option<beacon::Rendezvous>,
+    answer: beacon::WhoAnswer,
+) {
+    if rendezvous.is_none() {
+        return;
+    }
+    let node = context.endpoint.id();
+    let action = state.holder_contest.on_answer(node, answer);
+    if answer == beacon::WhoAnswer::Ours {
+        tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "holder probe: ours");
+    } else {
+        tracing::info!(
+            target: "habilis_network::beacon",
+            node = %node.fmt_short(),
+            ?answer,
+            ?action,
+            "holder probe"
+        );
+    }
+    match action {
+        beacon::ContestAction::Stay => {}
+        beacon::ContestAction::ClaimAgain => {
+            let held = beacon::claim::claim_again(
+                arm.params,
+                context.endpoint,
+                &state.address_book,
+                rendezvous,
+                &mut state.rungs,
+            )
+            .await;
+            if held == beacon::Held::Claimed {
+                schedule_rival_recheck(state, arm.policy, arm.params, context.endpoint);
+                state.arm_reclaim(Instant::now());
+                offer_to_the_new_holder(state, context);
+            }
+        }
+        beacon::ContestAction::YieldTo(rival) => {
+            tracing::info!(
+                target: "habilis_network::beacon",
+                node = %node.fmt_short(),
+                rival = %rival.fmt_short(),
+                "beacon yielded: another member serves the rendezvous"
+            );
+            release_to_rival(state, arm, rendezvous);
+        }
+    }
+}
+
 /// The rival re-check itself: at the scheduled deadline, **release** the
 /// held beacon and let probe-before-claim re-arbitrate on the reclaim
 /// burst. Two `EagerProbed` members that claimed inside each other's
@@ -671,6 +756,18 @@ pub(super) fn shed_rival_beacon_if_due(
         "beacon rival re-check: releasing the rendezvous to re-probe for a same-id co-host"
     );
     state.beacon_notes.remove(&BeaconNote::YieldToLower);
+    release_to_rival(state, arm, rendezvous);
+    true
+}
+
+/// Let go of the beacon for a rival that keeps the rendezvous, and read the ladder again: the
+/// endpoint closes, the address of the beacon leaves the book, and the reclaim window opens, so that
+/// the next walk reads the rival and the overlays merge.
+fn release_to_rival(
+    state: &mut EventLoopState,
+    arm: &CohostArm<'_>,
+    rendezvous: &mut Option<beacon::Rendezvous>,
+) {
     // `shed`, not a plain drop: the graceful endpoint close turns the
     // peer's link to its own dead beacon into an immediate
     // `NeighborDown` instead of a zombie that only dies at the QUIC idle
@@ -684,6 +781,8 @@ pub(super) fn shed_rival_beacon_if_due(
         state.beacon_closing = Some(held.shed_then());
     }
     state.next_rival_recheck = None;
+    state.next_holder_probe = None;
+    state.holder_contest = beacon::HolderContest::default();
     state.rival_recheck_rounds = state.rival_recheck_rounds.saturating_add(1);
     // A round that was running against our own beacon now has nothing to find.
     state.cancel_rendezvous_round();
@@ -700,7 +799,6 @@ pub(super) fn shed_rival_beacon_if_due(
     // beacon's `NeighborDown` to do it — the re-probe (and the re-claim
     // when no rival exists) then runs within ~RECLAIM_INTERVAL.
     state.arm_reclaim(Instant::now());
-    true
 }
 
 #[cfg(test)]
@@ -715,9 +813,12 @@ mod tests {
     use std::time::Duration;
 
     use crate::beacon::claim;
+    use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::{cohost_arm, config, state};
-    use crate::protocol::meshes;
-    use crate::transport::PayloadPath;
+    use crate::gossip::event::SilentSink;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::{MeshId, Nickname, meshes};
+    use crate::transport::{MeshSender, PayloadPath};
     use crate::util::{clock, tuning};
     use crate::{beacon, lookup, protocol, testing};
     use iroh_gossip::proto;
@@ -910,6 +1011,289 @@ mod tests {
         let closer = endpoint.clone();
         habilis_network_test_tracing::at_end(async move { closer.close().await });
         endpoint
+    }
+
+    /// A member for the tests of the holder probe: its endpoint, the pieces of a handler context, its
+    /// state, and the beacon that it holds.
+    struct Member {
+        endpoint: iroh::Endpoint,
+        sender: MeshSender,
+        mesh: MeshId,
+        author: Nickname,
+        identity: Identity,
+        sink: SilentSink,
+        state: state::EventLoopState,
+        rendezvous: Option<beacon::Rendezvous>,
+    }
+
+    impl Member {
+        async fn new(params: &beacon::RendezvousParams) -> Self {
+            use iroh_gossip::net::Gossip;
+
+            let endpoint = loopback_endpoint().await;
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let (gossip_sender, _receiver) = gossip
+                .subscribe(params.topic_id, Vec::new())
+                .await
+                .expect("subscribe without a bootstrap")
+                .split();
+            let mut state = testing::fresh_state();
+            state.rungs = beacon::RungWatch::detached();
+            Self {
+                endpoint,
+                sender: MeshSender::new(gossip_sender),
+                mesh: MeshId::from("test"),
+                author: testing::nick("member"),
+                identity: Identity::generate(),
+                sink: SilentSink,
+                state,
+                rendezvous: None,
+            }
+        }
+
+        async fn claim(&mut self, params: &beacon::RendezvousParams) {
+            let book = lookup::address_book(&self.endpoint);
+            let claimed = claim::claim(params, &self.endpoint, &book, &mut self.rendezvous).await;
+            assert!(claimed, "the member claims the rendezvous");
+        }
+
+        /// The probe of the holder, as the loop runs it: ask who serves the id on the own rung from a
+        /// throwaway endpoint, then give the answer to the contest.
+        async fn ask_and_apply(&mut self, params: &beacon::RendezvousParams) {
+            use iroh::endpoint::presets;
+            use iroh::{EndpointAddr, RelayMode};
+
+            let rung = params.bootstrap_relay.clone().expect("a rung");
+            let prober: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::custom([rung.clone()]))
+                .bind()
+                .await
+                .expect("a prober");
+            let target = EndpointAddr::new(params.id).with_relay_url(rung);
+            let answer =
+                beacon::ask_who(&prober, target, self.endpoint.id(), tuning::HEAL_PROBE).await;
+            prober.close().await;
+            self.apply(params, answer).await;
+        }
+
+        /// The answer of the probe of the holder, given to the contest as the loop gives it.
+        async fn apply(&mut self, params: &beacon::RendezvousParams, answer: beacon::WhoAnswer) {
+            let context = HandlerCtx {
+                sender: &self.sender,
+                endpoint: &self.endpoint,
+                mesh: &self.mesh,
+                author: &self.author,
+                identity: &self.identity,
+                our_pubkey: self.identity.author_key(),
+                max_connections: 16,
+                rendezvous_id: params.id,
+                external_msg_tx: None,
+                sink: &self.sink,
+            };
+            let arm = super::CohostArm {
+                policy: CoHostPolicy::EagerProbed,
+                params,
+                started: clock::Instant::now(),
+            };
+            super::apply_holder_answer(
+                &mut self.state,
+                &context,
+                &arm,
+                &mut self.rendezvous,
+                answer,
+            )
+            .await;
+        }
+
+        fn sockets(&self) -> Vec<net::SocketAddr> {
+            self.rendezvous
+                .as_ref()
+                .map(|held| held.endpoint.bound_sockets())
+                .unwrap_or_default()
+        }
+    }
+
+    /// **The count of claims against a rival survives a claim again, so the bound acts.**
+    ///
+    /// On a relay that keeps the older claim served, a holder with the lower id reads the same rival
+    /// each period. It claims again `CLAIMS_BEFORE_YIELD` times, and then yields. If a claim reset the
+    /// count, it would claim for ever and the 2 groups would never merge.
+    #[test]
+    fn a_holder_that_keeps_reading_the_same_higher_rival_yields_after_its_claims() {
+        use crate::lookup::test_relay;
+        use crate::protocol::meshes::{LookupOpts, RelayChoice};
+
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Another endpoint connected with the same endpoint id",
+            );
+            let (relay, _server) = test_relay::spawn_plain().await.expect("a local relay");
+            let mut params = public_params();
+            params.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay.clone()]));
+            params.bootstrap_relay = Some(relay);
+            let mut holder = Member::new(&params).await;
+            holder.claim(&params).await;
+            let mut rival = iroh::SecretKey::generate().public();
+            while rival < holder.endpoint.id() {
+                rival = iroh::SecretKey::generate().public();
+            }
+            let answer = beacon::WhoAnswer::Rival(rival);
+
+            let first = holder.sockets();
+            holder.apply(&params, answer).await;
+            assert!(
+                holder.rendezvous.is_some(),
+                "the first read: claim again, not yield"
+            );
+            let second = holder.sockets();
+            assert_ne!(first, second, "the first read made a new claim");
+            holder.apply(&params, answer).await;
+            assert!(
+                holder.rendezvous.is_some(),
+                "the second read: claim again, not yield"
+            );
+            assert_ne!(second, holder.sockets(), "the second read made a new claim");
+            holder.apply(&params, answer).await;
+            assert!(
+                holder.rendezvous.is_none(),
+                "the third read of the same rival: the holder yields"
+            );
+            super::wait_for_shed_close(&mut holder.state).await;
+            holder.endpoint.close().await;
+        });
+    }
+
+    /// **A claim does not clear the count of answers with no proof.**
+    ///
+    /// 2 `Unknown`, a claim that the funnel of every claim sees, and 1 more `Unknown` make 3 in a
+    /// row: the holder claims again, as if the claim had not come between.
+    #[test]
+    fn a_claim_between_unknown_answers_does_not_clear_their_count() {
+        use crate::lookup::test_relay;
+        use crate::protocol::meshes::{LookupOpts, RelayChoice};
+
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Another endpoint connected with the same endpoint id",
+            );
+            let (relay, _server) = test_relay::spawn_plain().await.expect("a local relay");
+            let mut params = public_params();
+            params.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay.clone()]));
+            params.bootstrap_relay = Some(relay);
+            let mut holder = Member::new(&params).await;
+            holder.claim(&params).await;
+            let unknown = beacon::WhoAnswer::Unknown("a test");
+            let before = holder.sockets();
+
+            holder.apply(&params, unknown).await;
+            holder.apply(&params, unknown).await;
+            assert_eq!(before, holder.sockets(), "2 unknown answers claim nothing");
+            super::schedule_rival_recheck(
+                &mut holder.state,
+                CoHostPolicy::EagerProbed,
+                &params,
+                &holder.endpoint,
+            );
+            holder.apply(&params, unknown).await;
+
+            assert_ne!(
+                before,
+                holder.sockets(),
+                "the third unknown answer in a row claims again"
+            );
+            let held = holder.rendezvous.take().expect("the beacon");
+            held.shed_and_wait().await;
+            holder.endpoint.close().await;
+        });
+    }
+
+    /// **Two holders of one rendezvous id end with one, and the lower id keeps it.**
+    ///
+    /// On a relay that serves the newest claim, in both orders of the first claims. A holder that is
+    /// not served and has the lower id claims again, make before break; the other reads the rival and
+    /// yields. The loop of asks is the one of the event loop, without its timers.
+    #[test]
+    fn two_holders_of_one_rendezvous_end_with_one_and_the_lower_id_keeps_it() {
+        use crate::lookup::test_relay;
+        use crate::protocol::meshes::{LookupOpts, RelayChoice};
+
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // The second claim of one id displaces the first on the relay, and the relay tells the
+            // session that it displaced. A handover does the same by design.
+            ::habilis_network_test_tracing::expect_warn(
+                "iroh::socket::transports::relay::actor",
+                "Another endpoint connected with the same endpoint id",
+            );
+            let (relay, _server) = test_relay::spawn_plain().await.expect("a local relay");
+            for lower_claims_first in [true, false] {
+                let mut params = public_params();
+                params.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay.clone()]));
+                params.bootstrap_relay = Some(relay.clone());
+                let first = Member::new(&params).await;
+                let second = Member::new(&params).await;
+                let (mut lower, mut higher) = if first.endpoint.id() < second.endpoint.id() {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                if lower_claims_first {
+                    lower.claim(&params).await;
+                    higher.claim(&params).await;
+                } else {
+                    higher.claim(&params).await;
+                    lower.claim(&params).await;
+                }
+
+                let mut rounds = 0;
+                let mut claimed_again = 0;
+                while lower.rendezvous.is_some() && higher.rendezvous.is_some() {
+                    assert!(rounds < 6, "the contest did not end in 6 rounds");
+                    let before = lower.rendezvous.as_ref().map(|held| held.endpoint.clone());
+                    lower.ask_and_apply(&params).await;
+                    // A node has 1 live endpoint of the id after a claim again: the old one closed in
+                    // the same step as the new one bound.
+                    if let (Some(old), Some(held)) = (before, lower.rendezvous.as_ref())
+                        && old.bound_sockets() != held.endpoint.bound_sockets()
+                    {
+                        for _ in 0..100 {
+                            if old.is_closed() {
+                                break;
+                            }
+                            time::sleep(Duration::from_millis(50)).await;
+                        }
+                        assert!(
+                            old.is_closed(),
+                            "the old endpoint closed after the claim again"
+                        );
+                        assert!(!held.endpoint.is_closed(), "the new endpoint is live");
+                        claimed_again += 1;
+                    }
+                    higher.ask_and_apply(&params).await;
+                    rounds += 1;
+                }
+                assert_eq!(
+                    claimed_again,
+                    u32::from(lower_claims_first),
+                    "the lower id claims again once, when it is not served"
+                );
+                assert!(
+                    lower.rendezvous.is_some(),
+                    "the lower id keeps the rendezvous (it claimed first: {lower_claims_first})"
+                );
+                assert!(
+                    higher.rendezvous.is_none(),
+                    "the higher id yielded (the lower claimed first: {lower_claims_first})"
+                );
+                // The node that claimed again closed its old endpoint: one endpoint of the id.
+                let held = lower.rendezvous.take().expect("the beacon of the lower id");
+                held.shed_and_wait().await;
+                super::wait_for_shed_close(&mut higher.state).await;
+                lower.endpoint.close().await;
+                higher.endpoint.close().await;
+            }
+        });
     }
 
     /// A held beacon with one tab negotiating on it. The tab counts as a

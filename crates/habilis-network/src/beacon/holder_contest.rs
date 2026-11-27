@@ -1,0 +1,363 @@
+//! The rules of a holder that asks who serves its own beacon. One value holds the state, one call
+//! takes one answer and gives one action, and nothing here touches a socket, so that a model of the
+//! relay can test the rules.
+
+use iroh::EndpointId;
+
+use super::{Contest, WhoAnswer};
+
+/// How many answers of `Unknown` in a row a holder reads before it claims its rendezvous again.
+pub(crate) const UNKNOWN_BEFORE_CLAIM: u32 = 3;
+
+/// How many times a holder claims again against one rival before it yields to that rival.
+pub(crate) const CLAIMS_BEFORE_YIELD: u32 = 2;
+
+/// How many answers of `Ours` in a row end a contest: the claims against a rival are forgotten.
+/// One `Ours` between two claims is not the end: a relay that changes the served claim at each
+/// event, read with answers a period old, shows one.
+pub(crate) const OURS_BEFORE_PEACE: u32 = 2;
+
+/// What a holder does with an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContestAction {
+    /// Keep the beacon as it is.
+    Stay,
+    /// Bind a new beacon and close the old one in the same step.
+    ClaimAgain,
+    /// Let go of the beacon: the rival keeps the rendezvous.
+    YieldTo(EndpointId),
+}
+
+/// What a holder remembers between two answers.
+#[derive(Debug, Default)]
+pub(crate) struct HolderContest {
+    unknown: u32,
+    ours: u32,
+    claims: Option<(EndpointId, u32)>,
+}
+
+impl HolderContest {
+    /// The action for `answer`, from the holder `own`.
+    ///
+    /// `Ours` clears the count of `Unknown`, and `OURS_BEFORE_PEACE` of them in a row clear the
+    /// claims. A rival with a lower id than ours keeps the rendezvous (`Contest::own_yields`), so
+    /// we yield. A rival with a higher id loses it, so we claim again, and when the relay does not
+    /// serve the new claim we yield after `CLAIMS_BEFORE_YIELD` of them: the contest then ends on
+    /// every rule of the relay, and the higher id keeps the rendezvous where the relay lets it.
+    /// `Reached` and `Unknown` say nothing about a rival: only `UNKNOWN_BEFORE_CLAIM` of them in a
+    /// row make us claim again, which repairs a beacon that stopped answering and a claim that the
+    /// relay lost.
+    pub(crate) fn on_answer(&mut self, own: EndpointId, answer: WhoAnswer) -> ContestAction {
+        match answer {
+            WhoAnswer::Ours => {
+                self.unknown = 0;
+                self.ours += 1;
+                if self.ours >= OURS_BEFORE_PEACE {
+                    *self = Self::default();
+                }
+                ContestAction::Stay
+            }
+            WhoAnswer::Rival(rival) => {
+                self.unknown = 0;
+                self.ours = 0;
+                let contest = Contest { own, rival };
+                if contest.own_yields() {
+                    *self = Self::default();
+                    return ContestAction::YieldTo(rival);
+                }
+                let claims = match self.claims {
+                    Some((against, claims)) if against == rival => claims,
+                    _ => 0,
+                };
+                if claims >= CLAIMS_BEFORE_YIELD {
+                    *self = Self::default();
+                    return ContestAction::YieldTo(rival);
+                }
+                self.claims = Some((rival, claims + 1));
+                ContestAction::ClaimAgain
+            }
+            WhoAnswer::Reached(_) | WhoAnswer::Unknown(_) => {
+                self.ours = 0;
+                self.unknown += 1;
+                if self.unknown >= UNKNOWN_BEFORE_CLAIM {
+                    self.unknown = 0;
+                    return ContestAction::ClaimAgain;
+                }
+                ContestAction::Stay
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iroh::{EndpointId, SecretKey};
+
+    use super::{ContestAction, HolderContest};
+    use crate::beacon::WhoAnswer;
+
+    /// The rule by which a relay picks the claim of an id that it serves. The weak assumption of the
+    /// design: it serves at most 1 claim, and it changes it only when a session registers or leaves.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Relay {
+        /// The newest claim is served, and when it leaves the newest that remains.
+        NewestWins,
+        /// The oldest claim is served, and when it leaves the oldest that remains.
+        OldestWins,
+        /// The newest on one event and the oldest on the next.
+        Flip,
+        /// The newest claim at a registration; when the served claim leaves, nobody is served.
+        NoPromotion,
+    }
+
+    /// The claims of 1 id on 1 relay, and which is served.
+    struct Model {
+        relay: Relay,
+        /// The holders that have a live claim, with the stamp of the claim, oldest first.
+        claims: Vec<(usize, u64)>,
+        served: Option<usize>,
+        events: u64,
+        stamp: u64,
+    }
+
+    impl Model {
+        fn new(relay: Relay) -> Self {
+            Self {
+                relay,
+                claims: Vec::new(),
+                served: None,
+                events: 0,
+                stamp: 0,
+            }
+        }
+
+        /// A claim of `holder`; its old claim, if any, closes in the same step.
+        fn register(&mut self, holder: usize) {
+            self.claims.retain(|(claimer, _)| *claimer != holder);
+            self.stamp += 1;
+            self.claims.push((holder, self.stamp));
+            self.events += 1;
+            self.served = self.pick(true);
+        }
+
+        /// The claim of `holder` closes.
+        fn leave(&mut self, holder: usize) {
+            let was_served = self.served == Some(holder);
+            self.claims.retain(|(claimer, _)| *claimer != holder);
+            self.events += 1;
+            self.served = if self.relay == Relay::NoPromotion {
+                if was_served { None } else { self.served }
+            } else {
+                self.pick(false)
+            };
+        }
+
+        /// The holder whose claim the relay serves after an event.
+        fn pick(&self, registered: bool) -> Option<usize> {
+            let newest = self.claims.last().map(|(holder, _)| *holder);
+            let oldest = self.claims.first().map(|(holder, _)| *holder);
+            match self.relay {
+                Relay::NewestWins => newest,
+                Relay::OldestWins => oldest,
+                Relay::Flip => {
+                    if self.events.is_multiple_of(2) {
+                        newest
+                    } else {
+                        oldest
+                    }
+                }
+                Relay::NoPromotion => {
+                    if registered {
+                        newest
+                    } else {
+                        self.served
+                    }
+                }
+            }
+        }
+
+        /// What the probe of `holder` reads.
+        fn answer(&self, holder: usize, ids: &[EndpointId]) -> WhoAnswer {
+            match self.served {
+                None => WhoAnswer::Unknown("nobody is served"),
+                Some(served) if served == holder => WhoAnswer::Ours,
+                Some(served) => WhoAnswer::Rival(ids[served]),
+            }
+        }
+
+        fn alive(&self) -> Vec<usize> {
+            self.claims.iter().map(|(holder, _)| *holder).collect()
+        }
+    }
+
+    fn permutations(items: &[usize]) -> Vec<Vec<usize>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut all = Vec::new();
+        for position in 0..items.len() {
+            let mut rest = items.to_vec();
+            let first = rest.remove(position);
+            for mut tail in permutations(&rest) {
+                tail.insert(0, first);
+                all.push(tail);
+            }
+        }
+        all
+    }
+
+    /// How many periods a rendezvous that nobody holds waits for a claim: the probe before a claim
+    /// reads it as free twice in a row.
+    const RECLAIM_PERIODS: u32 = 2;
+
+    /// The ids of `count` holders, lowest first (the lowest id keeps the rendezvous).
+    fn ids_of(count: usize) -> Vec<EndpointId> {
+        let mut ids: Vec<EndpointId> = (1..=count)
+            .map(|seed| {
+                SecretKey::from_bytes(&[u8::try_from(seed).expect("a small seed"); 32]).public()
+            })
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// The periods until 1 holder is left and reads `Ours`, or `None` when the contest does not end.
+    /// Every holder reads from the same snapshot of the relay in a period, and the actions then apply
+    /// one by one in `apply_order`: this is the worst staleness, a claim on an answer that an earlier
+    /// action of the same period has made old.
+    fn periods_to_end(
+        relay: Relay,
+        initial: &[usize],
+        apply_order: &[usize],
+        ids: &[EndpointId],
+        old_answers: bool,
+    ) -> Option<(u32, usize)> {
+        let mut model = Model::new(relay);
+        let mut contests: Vec<HolderContest> =
+            initial.iter().map(|_| HolderContest::default()).collect();
+        for holder in initial {
+            model.register(*holder);
+        }
+        let mut previous: Vec<(usize, WhoAnswer)> = Vec::new();
+        let mut empty_periods = 0;
+        for period in 1..=60 {
+            let alive = model.alive();
+            let current: Vec<(usize, WhoAnswer)> = alive
+                .iter()
+                .map(|holder| (*holder, model.answer(*holder, ids)))
+                .collect();
+            // A holder that acts on the answer of the period before: a probe has a budget, and a
+            // claim takes time.
+            let answers = if old_answers && !previous.is_empty() {
+                previous.clone()
+            } else {
+                current.clone()
+            };
+            previous = current;
+            let mut quiet = true;
+            for holder in apply_order {
+                let Some((_, answer)) = answers.iter().find(|(asked, _)| asked == holder) else {
+                    continue;
+                };
+                if !model.alive().contains(holder) {
+                    continue;
+                }
+                match contests[*holder].on_answer(ids[*holder], *answer) {
+                    ContestAction::Stay => {}
+                    ContestAction::ClaimAgain => {
+                        quiet = false;
+                        if model.alive().contains(holder) {
+                            model.register(*holder);
+                        }
+                    }
+                    ContestAction::YieldTo(_) => {
+                        quiet = false;
+                        model.leave(*holder);
+                    }
+                }
+            }
+            let left = model.alive();
+            if quiet && left.len() == 1 && model.served == Some(left[0]) {
+                return Some((period, left[0]));
+            }
+            // Every holder yielded, each on an answer that the other's yield had made old: nobody
+            // holds the rendezvous. Each of them probes it before a claim, and reads it as free
+            // twice in a row (`probe_verdict` in `daemon/event_loop.rs`, then `claim_after_probe`).
+            // Any member may claim, not the lowest id, and the probes are spread by a random
+            // spread (`probe_backoff.note_verdict`), so one of them is first: it claims, and the
+            // others read the rendezvous as held and stay peers. The first is any of them: the
+            // first of the actions of the period, here. 2 periods.
+            if left.is_empty() {
+                empty_periods += 1;
+                if empty_periods >= RECLAIM_PERIODS {
+                    empty_periods = 0;
+                    let first = apply_order[0];
+                    model.register(first);
+                    contests[first] = HolderContest::default();
+                }
+            }
+        }
+        None
+    }
+
+    /// The bound of the note, in periods, for `count` holders: `count + 2` (the last period is the
+    /// quiet one that confirms the end). A holder that acts on the answer of the period before can
+    /// also yield with every other holder on answers that the others' yields made old, and the
+    /// rendezvous then waits `RECLAIM_PERIODS` for a claim and the period before.
+    fn bound(_relay: Relay, count: usize, old_answers: bool) -> u32 {
+        let count = u32::try_from(count).expect("a small count");
+        let older = if old_answers { 1 + RECLAIM_PERIODS } else { 0 };
+        count + 2 + older
+    }
+
+    /// **The contest ends with 1 holder on every rule of the relay, in the bound of the note.**
+    ///
+    /// For 2, 3 and 4 holders, every order of the first claims, every order in which the actions of
+    /// one period apply, and holders that act on the answer of the period before as well as on the
+    /// answer of this one.
+    #[test]
+    fn the_contest_ends_with_one_holder_on_every_rule_of_the_relay() {
+        for count in 2..=4 {
+            let ids = ids_of(count);
+            let holders: Vec<usize> = (0..count).collect();
+            for relay in [
+                Relay::NewestWins,
+                Relay::OldestWins,
+                Relay::Flip,
+                Relay::NoPromotion,
+            ] {
+                for old_answers in [false, true] {
+                    let limit = bound(relay, count, old_answers);
+                    let mut slowest = 0;
+                    let mut cases = 0;
+                    for initial in permutations(&holders) {
+                        for apply_order in permutations(&holders) {
+                            let ended =
+                                periods_to_end(relay, &initial, &apply_order, &ids, old_answers);
+                            let Some((periods, survivor)) = ended else {
+                                panic!(
+                                    "{relay:?}, {count} holders, old answers {old_answers}, claims {initial:?}, actions {apply_order:?}: the contest did not end"
+                                );
+                            };
+                            assert!(
+                                periods <= limit,
+                                "{relay:?}, {count} holders, old answers {old_answers}, claims {initial:?}, actions {apply_order:?}: {periods} periods, over the bound of {limit}"
+                            );
+                            if relay == Relay::NewestWins && !old_answers {
+                                assert_eq!(
+                                    survivor, 0,
+                                    "{relay:?}: the lowest id keeps the rendezvous"
+                                );
+                            }
+                            slowest = slowest.max(periods);
+                            cases += 1;
+                        }
+                    }
+                    eprintln!(
+                        "{relay:?}, {count} holders, old answers {old_answers}: {cases} cases, slowest {slowest} periods, bound {limit}"
+                    );
+                }
+            }
+        }
+    }
+}

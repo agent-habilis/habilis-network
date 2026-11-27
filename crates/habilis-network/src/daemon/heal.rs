@@ -348,6 +348,7 @@ pub(crate) fn apply_rung_change(
         // branch — the deterministic tie-break that exists precisely so two
         // simultaneous claimants shed in a decidable order.
         state.rival_recheck_rounds = 0;
+        state.holder_contest = beacon::HolderContest::default();
         // The rendezvous now answers at a different rung, so a free reading
         // taken against the old one is not about this identity at all.
         state.forget_rendezvous_verdict();

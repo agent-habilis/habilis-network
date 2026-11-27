@@ -59,9 +59,10 @@ use crate::{beacon, gossip, lifecycle};
 
 use super::app::NodeDriver;
 use super::cohost_arm::{
-    CohostArm, claims_at_startup, maybe_cohost, maybe_reclaim, note_rival_holds,
-    offer_to_the_new_holder, probes_before_claim, reads_ladder_while_unmeshed, release_rendezvous,
-    schedule_rival_recheck, shed_rival_beacon_if_due, verdict_after_known_holders,
+    CohostArm, apply_holder_answer, claims_at_startup, maybe_cohost, maybe_reclaim,
+    note_rival_holds, offer_to_the_new_holder, probes_before_claim, reads_ladder_while_unmeshed,
+    release_rendezvous, schedule_rival_recheck, shed_rival_beacon_if_due,
+    start_holder_probe_if_due, verdict_after_known_holders,
 };
 #[cfg(feature = "host")]
 use super::config::RuntimeConfig;
@@ -1421,6 +1422,32 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         );
     }
 
+    /// An off-loop probe answered. A probe before a claim goes to the claim path. The probe of the
+    /// holder goes to its contest.
+    async fn probe_answer(&mut self, purpose: beacon::ProbePurpose, answer: beacon::WhoAnswer) {
+        match purpose {
+            beacon::ProbePurpose::BeforeClaim => {
+                self.probe_verdict(beacon::holder_is_there(answer)).await;
+            }
+            beacon::ProbePurpose::OfHolder => {
+                let context = self.parts.handler_ctx(&self.sender);
+                let arm = CohostArm {
+                    policy: self.cohost,
+                    params: &self.rendezvous_params,
+                    started: self.started,
+                };
+                apply_holder_answer(
+                    &mut self.state,
+                    &context,
+                    &arm,
+                    &mut self.rendezvous,
+                    answer,
+                )
+                .await;
+            }
+        }
+    }
+
     /// The off-loop probe-before-claim answered. Its own arm rather than a poll at the next heal
     /// tick: the probe already cost up to `HEAL_PROBE`, and making a free rendezvous wait out
     /// another 15s interval before anyone binds it would hand back the claim latency this change
@@ -1562,6 +1589,14 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         // forever). At this cadence the offsets survive; the next tick
         // (~RECLAIM_INTERVAL later, after the dropped endpoint has
         // unmapped) runs the re-probe via `maybe_reclaim`.
+        start_holder_probe_if_due(
+            &mut self.state,
+            &arm,
+            self.rendezvous.as_ref(),
+            &mut self.rival_probe,
+            context.endpoint.id(),
+        )
+        .await;
         if !shed_rival_beacon_if_due(
             &mut self.state,
             &arm,
@@ -1876,7 +1911,7 @@ async fn run_loop<Driver: NodeDriver>(
             _ = lp.intervals.heal.tick() => { lp.heal().await?; },
             _ = lp.intervals.digest_round.tick() => { lp.digest_round().await; },
             Some(decision) = lp.rung_rx.recv() => { lp.rung_change(decision); },
-            found_rival = beacon::probe_verdict(&mut lp.rival_probe) => { lp.probe_verdict(found_rival).await; },
+            (purpose, answer) = beacon::probe_outcome(&mut lp.rival_probe) => { lp.probe_answer(purpose, answer).await; },
             Some(report) = lp.rung_reports.recv() => { lp.rung_report(report).await; },
             () = closed_opt(&mut lp.state.beacon_closing) => { lp.beacon_closed().await; },
             _ = lp.intervals.reclaim.tick() => { lp.reclaim().await; },

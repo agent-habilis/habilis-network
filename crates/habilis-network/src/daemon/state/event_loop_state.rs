@@ -892,6 +892,11 @@ pub struct EventLoopState {
     /// yielded to (see `event_loop::shed_rival_beacon_if_due`). `None`
     /// while not holding a shed-eligible beacon.
     pub(crate) next_rival_recheck: Option<Instant>,
+    /// When the holder of the beacon next asks who serves the rendezvous on its own rung (`None`
+    /// while it holds nothing, or when the probe does not apply to it).
+    pub(crate) next_holder_probe: Option<Instant>,
+    /// What the holder remembers between two answers of that probe.
+    pub(crate) holder_contest: beacon::HolderContest,
     /// How many rival re-check sheds have run. Round 0 (the claim made at
     /// startup, before any shed) schedules the *fast first* re-check with
     /// the deterministic endpoint-id tie-break offset — the likeliest
@@ -1200,6 +1205,8 @@ impl EventLoopState {
             webrtc_ice: init.webrtc_ice,
             reclaim_until: None,
             next_rival_recheck: None,
+            next_holder_probe: None,
+            holder_contest: beacon::HolderContest::default(),
             rival_recheck_rounds: 0,
             second_group_sign_at: None,
             no_rung_noted_at: None,
