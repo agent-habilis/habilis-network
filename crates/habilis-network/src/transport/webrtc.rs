@@ -842,6 +842,7 @@ mod tests {
                         server_gossip.clone(),
                         PayloadPath::DirectOnly,
                         None,
+                        super::super::PathGate::SelectedOnly,
                     ),
                 );
                 let router: Router = router.spawn();
@@ -975,6 +976,7 @@ mod tests {
                         server_gossip.clone(),
                         PayloadPath::DirectOnly,
                         None,
+                        super::super::PathGate::SelectedOnly,
                     ),
                 );
                 let router: Router = router.spawn();
@@ -1339,6 +1341,7 @@ mod tests {
                         server_gossip.clone(),
                         PayloadPath::DirectOnly,
                         None,
+                        super::super::PathGate::SelectedOnly,
                     ),
                 );
                 let router: Router = router.spawn();

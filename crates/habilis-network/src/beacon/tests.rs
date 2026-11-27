@@ -19,7 +19,7 @@ use crate::daemon::setup;
 use crate::lookup;
 #[cfg(feature = "host")]
 use crate::testing;
-use crate::transport::PayloadPath;
+use crate::transport::{PathGate, PayloadPath};
 use crate::util::tuning;
 use iroh::address_lookup::memory;
 use n0_future::{task, task as n0future_task, time as n0future_time};
@@ -2701,9 +2701,12 @@ fn a_rendezvous_does_not_dial_its_own_peer() {
             tuning::MAX_CONNECTIONS,
             None,
             None,
+            PathGate::SelectedOnly,
             habilis_network_iroh_transport_util::ProtocolSet::default(),
-            false,
-            false,
+            lookup::GatePolicy {
+                relay_transport: false,
+                needs_session: false,
+            },
         );
         let (_sender, mut receiver) = gossip
             .subscribe(params.topic_id, Vec::new())
@@ -2762,9 +2765,12 @@ fn a_holder_reaches_its_own_public_rendezvous_without_lookups() {
             tuning::MAX_CONNECTIONS,
             None,
             None,
+            PathGate::SelectedOnly,
             habilis_network_iroh_transport_util::ProtocolSet::default(),
-            false,
-            false,
+            lookup::GatePolicy {
+                relay_transport: false,
+                needs_session: false,
+            },
         );
         let (sender, mut receiver) = gossip
             .subscribe(params.topic_id, Vec::new())
@@ -2824,9 +2830,12 @@ fn a_member_that_links_to_the_beacon_is_reported_to_its_holder() {
             tuning::MAX_CONNECTIONS,
             None,
             None,
+            PathGate::SelectedOnly,
             habilis_network_iroh_transport_util::ProtocolSet::default(),
-            false,
-            false,
+            lookup::GatePolicy {
+                relay_transport: false,
+                needs_session: false,
+            },
         );
         let (sender, mut receiver) = gossip
             .subscribe(params.topic_id, Vec::new())

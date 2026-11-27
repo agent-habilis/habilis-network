@@ -66,7 +66,7 @@ pub use mesh_sender::MeshSender;
 pub(crate) use outbox::Resend;
 #[cfg(feature = "blob")]
 pub(crate) use payload_path::{PROBE_DEADLINE, refuse_relayed};
-pub(crate) use payload_path::{PayloadPath, RELAY_REFUSED, payload_allowed_on};
+pub(crate) use payload_path::{PathGate, PayloadPath, RELAY_REFUSED, payload_allowed_on};
 pub use pool::LONGEST_SEND_CALL;
 pub(crate) use pool::UnicastPool;
 #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]

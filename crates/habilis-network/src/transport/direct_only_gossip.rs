@@ -15,8 +15,8 @@ use n0_future::time::Instant;
 
 use super::PayloadPath;
 use super::payload_path::{
-    GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, log_accept_refused, refuse_unless_direct,
-    selected_is_direct,
+    GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, PathGate, log_accept_refused,
+    refuse_unless_direct_in, selected_is_direct,
 };
 
 use n0_future::{task, time as n0future_time};
@@ -33,6 +33,9 @@ pub(crate) struct DirectOnlyGossip {
     session_gate: Option<(WebRtcHandle, super::SignalAdmission, iroh::EndpointId)>,
     /// This node's own id, for the log line of a refusal.
     local: Option<iroh::EndpointId>,
+    /// The question that the gate asks of an inbound connection: a peer passes its table, the
+    /// rendezvous of the beacon the old question.
+    gate: PathGate,
 }
 
 impl DirectOnlyGossip {
@@ -40,12 +43,14 @@ impl DirectOnlyGossip {
         inner: Gossip,
         relay_transport: PayloadPath,
         session_gate: Option<(WebRtcHandle, super::SignalAdmission, iroh::EndpointId)>,
+        gate: PathGate,
     ) -> Self {
         Self {
             inner,
             relay_transport,
             session_gate,
             local: None,
+            gate,
         }
     }
 
@@ -83,11 +88,12 @@ impl ProtocolHandler for DirectOnlyGossip {
             connection.close(GOSSIP_RELAY_REFUSED_CODE.into(), b"no webrtc session yet");
             return Ok(());
         }
-        if !refuse_unless_direct(
+        if !refuse_unless_direct_in(
             &connection,
             self.relay_transport,
             PROBE_DEADLINE,
             GOSSIP_RELAY_REFUSED_CODE,
+            &self.gate,
         )
         .await
         {

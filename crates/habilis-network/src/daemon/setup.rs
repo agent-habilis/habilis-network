@@ -249,6 +249,7 @@ fn unicast_inbox(
 /// back-pressure the loop: a request over the cap gets the absent answer.
 fn chunk_inbox(
     relay_transport: transport::PayloadPath,
+    admission: transport::SignalAdmission,
 ) -> (
     mpsc::Receiver<transport::ChunkAsk>,
     transport::ChunkAcceptor,
@@ -257,7 +258,10 @@ fn chunk_inbox(
         mpsc::Sender<transport::ChunkAsk>,
         mpsc::Receiver<transport::ChunkAsk>,
     ) = mpsc::channel(tuning::CHUNK_INBOX_CAP);
-    (rx, transport::ChunkAcceptor::new(tx, relay_transport))
+    (
+        rx,
+        transport::ChunkAcceptor::new(tx, relay_transport, admission),
+    )
 }
 
 /// The multihop handle that `build_member_endpoint` returns: the real one when the `multihop`
@@ -1614,7 +1618,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         |injected| injected.admission.clone(),
     );
     let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport, admission.clone());
-    let (chunk_rx, chunk_acceptor) = chunk_inbox(relay_transport);
+    let (chunk_rx, chunk_acceptor) = chunk_inbox(relay_transport, admission.clone());
 
     let build = SetupBuild {
         author: &author,
@@ -1802,9 +1806,14 @@ fn build_overlay(
         build.max_connections,
         Some(unicast),
         webrtc_lane,
+        transport::PathGate::Table(admission.clone()),
         protocols,
-        build.relay_transport.relay_allowed(),
-        webrtc::lane_needs::local_needs_webrtc_lane(UdpTransport::from(build.transports.udp)),
+        lookup::GatePolicy {
+            relay_transport: build.relay_transport.relay_allowed(),
+            needs_session: webrtc::lane_needs::local_needs_webrtc_lane(UdpTransport::from(
+                build.transports.udp,
+            )),
+        },
     );
     (gossip, router, admission, address_book, ice)
 }

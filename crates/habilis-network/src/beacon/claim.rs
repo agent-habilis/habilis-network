@@ -136,11 +136,16 @@ pub(crate) async fn claim_holder(
         }),
         // The rendezvous serves no caller protocol either — it is a meeting
         // point, not somewhere an application is reachable.
+        // The rendezvous is not a peer: no connection of a remote is reported to a table for its
+        // endpoint, so its gate asks the old question of the connection alone.
+        transport::PathGate::SelectedOnly,
         habilis_network_iroh_transport_util::ProtocolSet::default(),
-        params.relay_transport.relay_allowed(),
-        // The rendezvous keeps the hold: a joiner grafts it only once their
-        // session is attached, so a held dial here is not a second one.
-        false,
+        lookup::GatePolicy {
+            relay_transport: params.relay_transport.relay_allowed(),
+            // The rendezvous keeps the hold: a joiner grafts it only once their
+            // session is attached, so a held dial here is not a second one.
+            needs_session: false,
+        },
     );
 
     // Register the peer's address so the rendezvous can dial it

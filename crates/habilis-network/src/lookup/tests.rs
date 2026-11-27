@@ -1,9 +1,9 @@
-use super::{TransportOpts, build_peer_endpoint};
+use super::{GatePolicy, TransportOpts, build_peer_endpoint};
 #[cfg(feature = "host")]
 use crate::protocol::meshes::RelayChoice;
 use crate::protocol::meshes::{LookupOpts, TransportPolicy};
 #[cfg(feature = "host")]
-use crate::transport::PayloadPath;
+use crate::transport::{PathGate, PayloadPath};
 #[cfg(feature = "host")]
 use std::collections::HashSet;
 
@@ -1140,9 +1140,12 @@ fn a_router_that_carries_no_unicast_completes_a_nudge() {
             5,
             None,
             None,
+            PathGate::SelectedOnly,
             habilis_network_iroh_transport_util::ProtocolSet::default(),
-            true,
-            false,
+            GatePolicy {
+                relay_transport: true,
+                needs_session: false,
+            },
         );
         let dialer = build_endpoint(
             &LookupOpts::loopback(),

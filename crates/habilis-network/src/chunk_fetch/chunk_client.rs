@@ -268,7 +268,7 @@ mod tests {
     async fn serve_with(mut answer: impl FnMut(&[u8]) -> Option<Vec<u8>> + Send + 'static) -> Node {
         let endpoint = bind().await;
         let (tx, mut asks) = mpsc::channel(16);
-        let acceptor = ChunkAcceptor::new(tx, PayloadPath::RelayAllowed);
+        let acceptor = ChunkAcceptor::for_test(tx, PayloadPath::RelayAllowed);
         let address = endpoint.addr();
         let router = Router::builder(endpoint)
             .accept(CHUNKS_ALPN, acceptor)
@@ -293,7 +293,7 @@ mod tests {
     async fn serve_state(mut state: Box<EventLoopState>) -> Node {
         let endpoint = bind().await;
         let (tx, mut asks) = mpsc::channel(16);
-        let acceptor = ChunkAcceptor::new(tx, PayloadPath::RelayAllowed);
+        let acceptor = ChunkAcceptor::for_test(tx, PayloadPath::RelayAllowed);
         let address = endpoint.addr();
         let router = Router::builder(endpoint)
             .accept(CHUNKS_ALPN, acceptor)

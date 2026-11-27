@@ -4,6 +4,7 @@
 //! and [`relay`] (the relay ladder + bootstrap-rung selection/failover).
 
 mod build_mesh;
+mod gate_policy;
 
 mod address_book;
 
@@ -87,6 +88,7 @@ pub(crate) use probe_answer::{ProbeAnswer, probe_answer};
 pub use endpoint::build_endpoint;
 
 pub(crate) use build_mesh::build_mesh;
+pub(crate) use gate_policy::GatePolicy;
 
 pub(crate) use address_book::replace_peer_addr;
 pub use address_book::{add_peer_addr, address_book};
