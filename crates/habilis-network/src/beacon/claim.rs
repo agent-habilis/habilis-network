@@ -6,7 +6,9 @@ use crate::lookup::{add_peer_addr, build_mesh, replace_peer_addr};
 use crate::util::tuning;
 
 use super::rung_ladder::{holder_entry, rung_of, settle_on_rung};
-use super::{Held, Rendezvous, RendezvousParams, RungWatch, Walk, bind};
+use super::{
+    BEACON_WHO_ALPN, BeaconWho, Held, Rendezvous, RendezvousParams, RungWatch, Walk, bind,
+};
 #[cfg(test)]
 use super::{RivalProbe, walk_ladder};
 
@@ -134,12 +136,13 @@ pub(crate) async fn claim_holder(
                 },
             )
         }),
-        // The rendezvous serves no caller protocol either — it is a meeting
-        // point, not somewhere an application is reachable.
+        // The rendezvous serves no caller protocol — it is a meeting point, not somewhere an
+        // application is reachable. It answers one question: which member serves it.
         // The rendezvous is not a peer: no connection of a remote is reported to a table for its
         // endpoint, so its gate asks the old question of the connection alone.
         transport::PathGate::SelectedOnly,
-        habilis_network_iroh_transport_util::ProtocolSet::default(),
+        habilis_network_iroh_transport_util::ProtocolSet::default()
+            .protocol(BEACON_WHO_ALPN.to_vec(), BeaconWho::new(peer.id())),
         lookup::GatePolicy {
             relay_transport: params.relay_transport.relay_allowed(),
             // The rendezvous keeps the hold: a joiner grafts it only once their

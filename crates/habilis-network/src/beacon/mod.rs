@@ -41,6 +41,7 @@
 //! The rendezvous endpoint never authors app messages; its node id is
 //! filtered out of peer-side neighbor handling.
 
+mod beacon_who;
 mod bind;
 pub(crate) mod claim;
 mod contest;
@@ -53,6 +54,7 @@ mod rival_probe;
 mod rung_ladder;
 mod rung_probe;
 mod rung_watch;
+pub(crate) use beacon_who::{BEACON_WHO_ALPN, BeaconWho};
 pub(crate) use contest::{Contest, claim_after_probe, releasable};
 pub(crate) use dependents::Dependents;
 pub(crate) use held::{Held, Walk, read_busy_rungs, read_ladder, walk_ladder};

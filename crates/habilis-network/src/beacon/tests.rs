@@ -2399,6 +2399,108 @@ fn a_rival_probe_from_another_rung_finds_the_beacon() {
     });
 }
 
+/// **A claimed beacon names the member that serves it.**
+///
+/// Two holders of one rendezvous id are the same endpoint id, so a dial that connects does not say
+/// which of them answered. The beacon answers the question "who serves you?" with the endpoint id
+/// of its own member, 32 bytes on a unidirectional stream.
+#[test]
+fn a_beacon_names_the_member_that_serves_it() {
+    use super::BEACON_WHO_ALPN;
+    use crate::lookup::test_relay;
+    use crate::protocol::meshes::RelayChoice;
+    use iroh::RelayMode;
+    use iroh::endpoint::presets;
+
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let (relay, _server) = test_relay::spawn_plain().await.expect("a local relay");
+        let mut params = public_params();
+        params.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay.clone()]));
+        params.bootstrap_relay = Some(relay.clone());
+        let peer = loopback_endpoint().await;
+        let member = peer.id();
+        let book = lookup::address_book(&peer);
+        let mut beacon = None;
+        let claimed = claim::claim(&params, &peer, &book, &mut beacon).await;
+        assert!(claimed, "the beacon stands up");
+
+        let prober = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::custom([relay]))
+            .bind()
+            .await
+            .expect("a prober");
+        let address = rendezvous_addr(&params).expect("an address");
+        let frame = n0future_time::timeout(std_Duration::from_secs(10), async {
+            let connection = prober.connect(address, BEACON_WHO_ALPN).await.ok()?;
+            let mut recv = connection.accept_uni().await.ok()?;
+            recv.read_to_end(64).await.ok()
+        })
+        .await;
+
+        drop(beacon);
+        prober.close().await;
+        peer.close().await;
+        assert_eq!(
+            frame.ok().flatten(),
+            Some(member.as_bytes().to_vec()),
+            "the beacon did not name the member that serves it"
+        );
+    });
+}
+
+/// **An asker with a relay path only gets the answer inside the probe budget.**
+///
+/// A holder behind a NAT can reach the rendezvous by the relay alone. The beacon-who handler has no
+/// path gate of its own (the gate of the rendezvous applies to its gossip accepts), so the 32 bytes
+/// come at once: the asker is neither held for the path deadline nor closed as relay-only.
+#[test]
+fn a_beacon_names_its_member_to_an_asker_with_a_relay_path_only() {
+    use super::BEACON_WHO_ALPN;
+    use crate::lookup::test_relay;
+    use crate::protocol::meshes::RelayChoice;
+    use iroh::RelayMode;
+    use iroh::endpoint::presets;
+
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let (relay, _server) = test_relay::spawn_plain().await.expect("a local relay");
+        let mut params = public_params();
+        params.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay.clone()]));
+        params.bootstrap_relay = Some(relay.clone());
+        let peer = loopback_endpoint().await;
+        let member = peer.id();
+        let book = lookup::address_book(&peer);
+        let mut beacon = None;
+        let claimed = claim::claim(&params, &peer, &book, &mut beacon).await;
+        assert!(claimed, "the beacon stands up");
+
+        let prober: Endpoint = Endpoint::builder(presets::Minimal)
+            .clear_ip_transports()
+            .relay_mode(RelayMode::custom([relay]))
+            .bind()
+            .await
+            .expect("a prober with no IP socket");
+        let address = rendezvous_addr(&params).expect("an address");
+        let started = Instant::now();
+        let frame = n0future_time::timeout(tuning::HEAL_PROBE, async {
+            let connection = prober.connect(address, BEACON_WHO_ALPN).await.ok()?;
+            let mut recv = connection.accept_uni().await.ok()?;
+            recv.read_to_end(64).await.ok()
+        })
+        .await;
+        let took = started.elapsed();
+
+        drop(beacon);
+        prober.close().await;
+        peer.close().await;
+        assert_eq!(
+            frame.ok().flatten(),
+            Some(member.as_bytes().to_vec()),
+            "an asker with a relay path only did not get the member inside the probe budget"
+        );
+        eprintln!("relay-only ask took {took:?}");
+    });
+}
+
 /// **A member with no reachable rung reads the rendezvous as held, not as free.**
 ///
 /// The walk found no rung, so `bootstrap_relay` is `None` while the ladder is not empty. The beacon
