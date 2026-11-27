@@ -3,6 +3,8 @@ use crate::protocol::meshes::LookupOpts;
 
 use iroh::Endpoint;
 use iroh::address_lookup::EndpointInfo;
+use iroh::endpoint::Connection;
+use iroh::protocol::{AcceptError, ProtocolHandler};
 
 use super::{
     Contest, Rendezvous, RendezvousParams, RivalProbe, claim, dependents, probe_verdict,
@@ -2498,6 +2500,187 @@ fn a_beacon_names_its_member_to_an_asker_with_a_relay_path_only() {
             "an asker with a relay path only did not get the member inside the probe budget"
         );
         eprintln!("relay-only ask took {took:?}");
+    });
+}
+
+/// A beacon-who handler that writes 5 bytes: a frame that is not an endpoint id.
+#[derive(Debug, Clone, Copy)]
+struct ShortFrame;
+
+impl ProtocolHandler for ShortFrame {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        if let Ok(mut send) = connection.open_uni().await {
+            let _ = send.write_all(b"short").await;
+            let _ = send.finish();
+            let _ = n0future_time::timeout(std_Duration::from_secs(2), connection.closed()).await;
+        }
+        Ok(())
+    }
+}
+
+/// A beacon-who handler that takes the dial and never answers: a slow or wedged beacon.
+#[derive(Debug, Clone, Copy)]
+struct StalledBeacon;
+
+impl ProtocolHandler for StalledBeacon {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let _ = n0future_time::timeout(std_Duration::from_secs(10), connection.closed()).await;
+        Ok(())
+    }
+}
+
+/// **The ask names who serves a beacon, and reads silence as unknown.**
+///
+/// `Ours` and `Rival` need the answer of a real beacon. Every other outcome is `Unknown` (nobody
+/// reached: a refusal of the ALPN, nobody there) or `Reached` (a connection came up and no valid
+/// frame followed: a frame that is not an id, a beacon that stalls). The ask never reads a rival from
+/// an absence.
+#[test]
+fn the_ask_names_who_serves_a_beacon_and_reads_silence_as_unknown() {
+    use super::{BEACON_WHO_ALPN, WhoAnswer, ask_who};
+    use crate::lookup::test_relay;
+    use crate::protocol::meshes::RelayChoice;
+    use iroh::endpoint::{Builder, presets};
+    use iroh::protocol::Router;
+    use iroh::{EndpointAddr, RelayMode};
+
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let (relay, _server) = test_relay::spawn_plain().await.expect("a local relay");
+        let budget = std_Duration::from_secs(5);
+        let mut params = public_params();
+        params.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay.clone()]));
+        params.bootstrap_relay = Some(relay.clone());
+        let peer = loopback_endpoint().await;
+        let member = peer.id();
+        let book = lookup::address_book(&peer);
+        let mut beacon = None;
+        let claimed = claim::claim(&params, &peer, &book, &mut beacon).await;
+        assert!(claimed, "the beacon stands up");
+        let prober: Endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::custom([relay.clone()]))
+            .bind()
+            .await
+            .expect("a prober");
+        let address = rendezvous_addr(&params).expect("an address");
+        let stranger = SecretKey::generate().public();
+
+        let by_stranger = ask_who(&prober, address.clone(), stranger, budget).await;
+        let by_member = ask_who(&prober, address, member, budget).await;
+        drop(beacon);
+
+        // Nobody serves this id: the dial finds nothing in the budget.
+        let nobody = SecretKey::generate().public();
+        let nobody_addr = EndpointAddr::new(nobody).with_relay_url(relay.clone());
+        let by_silence = ask_who(&prober, nobody_addr, stranger, std_Duration::from_secs(2)).await;
+
+        // An endpoint that does not know the ALPN refuses the dial.
+        let unaware_builder: Builder = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::custom([relay.clone()]))
+            .alpns(vec![b"habilis-mesh/other/1".to_vec()]);
+        let unaware = unaware_builder.bind().await.expect("an endpoint");
+        unaware.online().await;
+        let unaware_addr = EndpointAddr::new(unaware.id()).with_relay_url(relay.clone());
+        let by_refusal = ask_who(&prober, unaware_addr, stranger, budget).await;
+
+        // An endpoint that answers with 5 bytes: not an id.
+        let relay_for_stall = relay.clone();
+        let short_builder: Builder =
+            Endpoint::builder(presets::Minimal).relay_mode(RelayMode::custom([relay]));
+        let short = short_builder.bind().await.expect("an endpoint");
+        short.online().await;
+        let router = Router::builder(short.clone())
+            .accept(BEACON_WHO_ALPN, ShortFrame)
+            .spawn();
+        let short_addr = short.addr();
+        let by_short_frame = ask_who(&prober, short_addr, stranger, budget).await;
+
+        // An endpoint that takes the dial and never answers.
+        let stalled_builder: Builder =
+            Endpoint::builder(presets::Minimal).relay_mode(RelayMode::custom([relay_for_stall]));
+        let stalled = stalled_builder.bind().await.expect("an endpoint");
+        stalled.online().await;
+        let stalled_router = Router::builder(stalled.clone())
+            .accept(BEACON_WHO_ALPN, StalledBeacon)
+            .spawn();
+        let by_stall = ask_who(
+            &prober,
+            stalled.addr(),
+            stranger,
+            std_Duration::from_secs(1),
+        )
+        .await;
+
+        stalled_router.shutdown().await.expect("the router stops");
+        router.shutdown().await.expect("the router stops");
+        unaware.close().await;
+        prober.close().await;
+        peer.close().await;
+        assert_eq!(
+            by_stranger,
+            WhoAnswer::Rival(member),
+            "a stranger reads the member as a rival"
+        );
+        assert_eq!(
+            by_member,
+            WhoAnswer::Ours,
+            "the member reads its own beacon as ours"
+        );
+        assert!(
+            matches!(by_silence, WhoAnswer::Unknown(_)),
+            "nobody there: {by_silence:?}"
+        );
+        assert!(
+            matches!(by_refusal, WhoAnswer::Unknown(_)),
+            "a refusal of the ALPN: {by_refusal:?}"
+        );
+        assert!(
+            matches!(by_short_frame, WhoAnswer::Reached(_)),
+            "a frame that is not an id: {by_short_frame:?}"
+        );
+        assert!(
+            matches!(by_stall, WhoAnswer::Reached(_)),
+            "a beacon that stalls: {by_stall:?}"
+        );
+    });
+}
+
+/// **A probe before a claim reads a beacon that stalls as held, not as free.**
+///
+/// The connection comes up and no frame follows. Someone is there; a claim on the other reading
+/// stands up a second holder, and the contest has to undo it.
+#[test]
+fn a_probe_before_a_claim_reads_a_stalled_beacon_as_held() {
+    use super::BEACON_WHO_ALPN;
+    use crate::lookup::test_relay;
+    use crate::protocol::meshes::RelayChoice;
+    use iroh::RelayMode;
+    use iroh::endpoint::{Builder, presets};
+    use iroh::protocol::Router;
+
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        let (relay, _server) = test_relay::spawn_plain().await.expect("a local relay");
+        let stalled_builder: Builder =
+            Endpoint::builder(presets::Minimal).relay_mode(RelayMode::custom([relay.clone()]));
+        let stalled = stalled_builder.bind().await.expect("an endpoint");
+        stalled.online().await;
+        let router = Router::builder(stalled.clone())
+            .accept(BEACON_WHO_ALPN, StalledBeacon)
+            .spawn();
+        let mut params = public_params();
+        params.id = stalled.id();
+        params.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay.clone()]));
+        params.bootstrap_relay = Some(relay);
+        let node = SecretKey::generate().public();
+
+        let mut probe = spawn_rival_probe(&params, node).await;
+        let verdict =
+            n0future_time::timeout(std_Duration::from_secs(20), probe_verdict(&mut probe)).await;
+
+        router.shutdown().await.expect("the router stops");
+        assert!(
+            matches!(verdict, Ok(true)),
+            "a beacon that stalls was read as free: {verdict:?}"
+        );
     });
 }
 

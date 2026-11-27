@@ -6,11 +6,11 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use n0_future::task::JoinHandle;
 use tokio::sync::{oneshot, watch};
 
-use crate::lookup::{ProbeAnswer, TransportHandles, build_endpoint, probe_answer, probe_connect};
+use crate::lookup::{ProbeAnswer, TransportHandles, build_endpoint, probe_answer};
 use crate::protocol::meshes::LookupOpts;
 use crate::util::tuning::{HEAL_PROBE, RENDEZVOUS_CLOSE, heal_interval};
 
-use super::{RendezvousParams, beacon_lookups, rendezvous_addr, rung_is_busy};
+use super::{RendezvousParams, WhoAnswer, ask_who, beacon_lookups, rendezvous_addr, rung_is_busy};
 
 use n0_future::{task, time};
 use std::future;
@@ -108,6 +108,14 @@ pub(crate) async fn probe_verdict(probe: &mut Option<RivalProbe>) -> bool {
     let found_rival = verdict_of((&mut active.rx).await);
     *probe = None;
     found_rival
+}
+
+/// Whether the answer of the ask says that a holder serves the id. A node that holds nothing reads
+/// `Rival`, and also `Reached`: a connection that came up is proof that a holder is there, even
+/// when it sent no valid frame (a slow beacon), and a claim on the other reading stands up a
+/// second holder. Only `Unknown`, where nothing was reached, reads the id as free.
+fn holder_is_there(answer: WhoAnswer) -> bool {
+    matches!(answer, WhoAnswer::Rival(_) | WhoAnswer::Reached(_))
 }
 
 /// Read a probe task's outcome. A dropped sender — the task was aborted, or
@@ -212,7 +220,7 @@ pub(crate) async fn spawn_rival_probe(
     let task = task::spawn(
         async move {
             let found_rival = tokio::select! {
-                found = probe_connect(&prober, target, budget) => found,
+                answer = ask_who(&prober, target, node, budget) => holder_is_there(answer),
                 // A departure: no one will read the verdict, but the endpoint
                 // must still close below.
                 _ = cancelled => true,
