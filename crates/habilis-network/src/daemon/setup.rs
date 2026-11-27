@@ -903,7 +903,9 @@ fn last_recorded_run_in(key_path: &Path) -> Option<u64> {
 /// Take the exclusive lock on `<state>.key.lock` and keep it as long as the returned file lives, so two
 /// live starts of one state path cannot be one member: the second would read the same member key and take
 /// the next run, and a peer would drop the first as an older run of that member. The try is one and does not
-/// wait: a start that meets a held lock fails at once and names the way out. A restart after a leave meets no
+/// wait: a start that meets a held lock fails at once, names the pid of the holder (from the line that the
+/// holder wrote into the lock file), and names the way out. A start that cannot write that line fails, as the
+/// record of the daemon lock does. A restart after a leave meets no
 /// holder, because the leave waits for the daemon to end (the daemon lock). It is an OS lock on the descriptor, so
 /// it goes with the process, and a crash frees the key. The file is opened close-on-exec (the default of Rust), so
 /// a child of the daemon does not keep the lock after the daemon is gone. No state path means no key to keep. A
@@ -925,12 +927,58 @@ fn hold_member_key(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
         );
     }
     let lock_path = key_lock_path(state);
-    let lock = open_lock(&lock_path)?;
+    let mut lock = open_lock(&lock_path)?;
     if try_lock(&lock, &lock_path)? {
+        record_key_holder(&mut lock)?;
         // shared with every clone of the keys: the lock goes when the last one drops
         Ok(Some(sync::Arc::new(lock)))
     } else {
-        Err(key_held_error(state))
+        Err(key_held_error(state, &lock))
+    }
+}
+
+/// Write the pid and the start of this process into the key lock file, which this process holds, so a start
+/// that meets the lock can name the holder. One truncate and one write under the lock: the file is never
+/// replaced, as a new file would not carry the lock. A start that the system cannot read leaves the file
+/// empty, and the refusal then says `unknown`.
+#[cfg(all(unix, feature = "host"))]
+fn record_key_holder(lock: &mut File) -> Result<()> {
+    use crate::util::process;
+    use crate::util::process_start::ProcessStart;
+    use std::io::Write as _;
+    use std::process as std_process;
+    lock.set_len(0)?;
+    let pid = std_process::id();
+    if let ProcessStart::Live(start) = process::start_of(pid) {
+        lock.write_all(format!("{pid} {start}\n").as_bytes())?;
+    }
+    Ok(())
+}
+
+/// The pid of the process that holds the key lock `lock`, or `unknown`. It is read from the checked handle of
+/// the lock file, so no second open goes round the checks of [`open_lock`]. The file keeps the line of an
+/// earlier holder until the next holder writes its own, so the pid counts only when a process with that pid
+/// runs with the recorded start.
+#[cfg(all(unix, feature = "host"))]
+fn key_holder_pid(lock: &File) -> String {
+    use crate::util::process;
+    use crate::util::process_start::ProcessStart;
+    use std::os::unix::fs::FileExt as _;
+    let mut line = [0u8; 64];
+    let count = lock.read_at(&mut line, 0).unwrap_or(0);
+    let bytes: &[u8] = line.get(..count).unwrap_or_default();
+    let text: &str = str::from_utf8(bytes).unwrap_or_default();
+    let mut fields = text.split_whitespace();
+    let recorded_pid: Option<u32> = fields.next().and_then(|field| field.parse().ok());
+    let recorded_start: Option<u64> = fields.next().and_then(|field| field.parse().ok());
+    let (Some(holder), Some(start)) = (recorded_pid, recorded_start) else {
+        return "unknown".to_owned();
+    };
+    match process::start_of(holder) {
+        ProcessStart::Live(running) if running == start => holder.to_string(),
+        ProcessStart::Live(_) | ProcessStart::Gone | ProcessStart::Unknown(_) => {
+            "unknown".to_owned()
+        }
     }
 }
 
@@ -1030,7 +1078,9 @@ fn open_lock(lock_path: &Path) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt as _;
     refuse_shared_state_folder(lock_path)?;
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(false).mode(0o600);
+    // Read access: the key lock reads the line of its holder from this handle.
+    options.read(true).write(true);
+    options.create(true).truncate(false).mode(0o600);
     let lock: File = options
         .custom_flags(no_link_flags())
         .open(lock_path)
@@ -1123,10 +1173,11 @@ compile_error!(
 
 /// The error of a start that finds the member key held.
 #[cfg(all(unix, feature = "host"))]
-fn key_held_error(state: &Path) -> anyhow::Error {
+fn key_held_error(state: &Path, lock: &File) -> anyhow::Error {
     anyhow::anyhow!(
-        "another daemon still runs on this state file and holds the member key {}: wait for it to exit and retry, or use another nickname or --state-file",
-        state.with_extension("key").display()
+        "another daemon still runs on this state file and holds the member key {} (pid {}): wait for it to exit and retry, or use another nickname or --state-file",
+        state.with_extension("key").display(),
+        key_holder_pid(lock)
     )
 }
 
@@ -3322,6 +3373,58 @@ mod tests {
             waited < Duration::from_millis(250),
             "the refusal comes at once: {waited:?}"
         );
+    }
+
+    /// A start that meets a live holder learns who holds the key: the refusal names the pid of the holder, as
+    /// the refusal of the daemon lock does. The holder writes its pid into the lock file once it has the lock.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_start_that_meets_a_live_holder_names_its_pid() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let dir = env::temp_dir().join(format!("habilis-key-lock-pid-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("pid.json");
+        let holder = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start");
+
+        let second = super::hold_member_key(Some(&state));
+        drop(holder);
+
+        let error = second.expect_err("a live holder refuses the second start");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains(&format!("(pid {})", process::id())),
+            "the refusal names the pid of the holder: {text}"
+        );
+        drop(fs::remove_dir_all(&dir));
+    }
+
+    /// A lock file that holds the line of an earlier holder, or no line yet (the holder has the lock and has not
+    /// written), is never read as the pid of a live process: the refusal says `unknown`.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_start_that_meets_a_holder_with_no_current_record_says_unknown() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let dir = env::temp_dir().join(format!("habilis-key-lock-stale-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("stale.json");
+        let lock_path = super::key_lock_path(&state);
+        let held = super::open_lock(&lock_path).expect("the lock file");
+        assert!(
+            super::try_lock(&held, &lock_path).expect("a try"),
+            "the lock is free"
+        );
+        for line in ["", "garbage", &format!("{} 1", process::id())] {
+            fs::write(&lock_path, line).expect("a line in the lock file");
+
+            let error = super::hold_member_key(Some(&state)).expect_err("the held lock refuses");
+
+            assert!(
+                format!("{error:#}").contains("(pid unknown)"),
+                "a record that is no live holder says unknown for {line:?}: {error:#}"
+            );
+        }
+        drop(held);
+        drop(fs::remove_dir_all(&dir));
     }
 
     /// The lock goes with the daemon: when the holder is dropped (or dies, since the lock is an OS
