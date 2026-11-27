@@ -15,8 +15,8 @@ use n0_future::time::Instant;
 
 use super::PayloadPath;
 use super::payload_path::{
-    GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, PathGate, log_accept_refused,
-    refuse_unless_direct_in, selected_is_direct,
+    GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, PathGate, Refusal, log_accept_refused,
+    refuse_unless_direct_in,
 };
 
 use n0_future::{task, time as n0future_time};
@@ -105,7 +105,12 @@ impl ProtocolHandler for DirectOnlyGossip {
                 .session_gate
                 .as_ref()
                 .and_then(|(_, admission, _)| admission.relay_refused_sink());
-            watch_relay_policy_and_refusal(&connection, None, refused_sink);
+            watch_relay_policy_and_refusal(
+                &connection,
+                None,
+                refused_sink,
+                gate_of(self.gate.clone()),
+            );
         }
         self.inner
             .handle_connection(connection)
@@ -120,13 +125,24 @@ impl ProtocolHandler for DirectOnlyGossip {
     }
 }
 
+/// The question that the gossip watcher asks of a connection: the question of the gate of the
+/// acceptor (see [`PathGate::refusal`]).
+pub(super) fn gate_of(gate: PathGate) -> impl Fn(&Connection) -> Option<Refusal> + Send + 'static {
+    move |connection| gate.refusal(connection)
+}
+
 /// The watch of [`watch_relay_policy_and_refusal`] with no report of a refusal.
 #[cfg(test)]
 pub(super) fn watch_relay_policy(
     gossip_conn: &Connection,
     path_sink: Option<mpsc::UnboundedSender<super::probe::PathChange>>,
 ) {
-    watch_relay_policy_and_refusal(gossip_conn, path_sink, None);
+    watch_relay_policy_and_refusal(
+        gossip_conn,
+        path_sink,
+        None,
+        gate_of(PathGate::SelectedOnly),
+    );
 }
 
 /// Keep the relay policy on a gossip connection, whichever end dialed it: one whose selected
@@ -162,6 +178,7 @@ pub(super) fn watch_relay_policy_and_refusal(
     gossip_conn: &Connection,
     path_sink: Option<mpsc::UnboundedSender<super::probe::PathChange>>,
     refused_sink: Option<mpsc::UnboundedSender<super::probe::RelayRefused>>,
+    refusal_of: impl Fn(&Connection) -> Option<Refusal> + Send + 'static,
 ) {
     use futures_util::StreamExt as _;
     let weak = gossip_conn.weak_handle();
@@ -186,28 +203,36 @@ pub(super) fn watch_relay_policy_and_refusal(
             if connection.close_reason().is_some() {
                 return;
             }
-            if selected_is_direct(&connection) {
-                on_relay_since = None;
-            } else {
-                if on_relay_since.is_none()
-                    && let Some(sink) = &path_sink
-                {
-                    let _ = sink.send(super::probe::PathChange {
-                        peer: connection.remote_id(),
-                        kind: super::probe::PathKind::Relay,
-                        conn_id: connection.stable_id(),
-                    });
-                }
-                let since = *on_relay_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= PROBE_DEADLINE {
-                    tracing::info!(
-                        target: super::LOG_TARGET,
-                        remote = %connection.remote_id(),
-                        dialed = connection.side().is_client(),
-                        "gossip link on the relay path past the deadline: closing it"
-                    );
-                    connection.close(GOSSIP_RELAY_REFUSED_CODE.into(), b"relay path refused");
-                    return;
+            match refusal_of(&connection) {
+                None => on_relay_since = None,
+                Some(refusal) => {
+                    if on_relay_since.is_none() {
+                        tracing::debug!(
+                            target: super::LOG_TARGET,
+                            remote = %connection.remote_id(),
+                            reading = %refusal,
+                            "gossip link not admitted by the gate: the wait for the deadline starts"
+                        );
+                        if let Some(sink) = &path_sink {
+                            let _ = sink.send(super::probe::PathChange {
+                                peer: connection.remote_id(),
+                                kind: super::probe::PathKind::Relay,
+                                conn_id: connection.stable_id(),
+                            });
+                        }
+                    }
+                    let since = *on_relay_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= PROBE_DEADLINE {
+                        tracing::info!(
+                            target: super::LOG_TARGET,
+                            remote = %connection.remote_id(),
+                            dialed = connection.side().is_client(),
+                            reading = %refusal,
+                            "gossip link on the relay path past the deadline: closing it"
+                        );
+                        connection.close(GOSSIP_RELAY_REFUSED_CODE.into(), b"relay path refused");
+                        return;
+                    }
                 }
             }
             let wait = on_relay_since.map(|since| PROBE_DEADLINE.saturating_sub(since.elapsed()));
@@ -245,6 +270,7 @@ mod watcher_tests {
     use crate::lookup;
     #[cfg(feature = "iroh-test-utils")]
     use crate::lookup::test_relay;
+    use crate::transport::payload_path::Refusal;
     use crate::transport::probe;
     use iroh::endpoint::presets;
     use std::future::{self, Future};
@@ -303,6 +329,82 @@ mod watcher_tests {
         );
     }
 
+    /// The watcher takes its answer from the gate function. A connection that the gate does not
+    /// admit is closed once `PROBE_DEADLINE` has passed, and a connection that it admits is not.
+    /// Both go through the real watcher task.
+    async fn watched_link_closes_within(
+        refusal_of: fn(&Connection) -> Option<Refusal>,
+        wait: Duration,
+    ) -> bool {
+        const ALPN: &[u8] = b"habilis-mesh/test-gate-watch/0";
+
+        #[derive(Debug, Clone)]
+        struct Watch(fn(&Connection) -> Option<Refusal>);
+        impl ProtocolHandler for Watch {
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                super::watch_relay_policy_and_refusal(&connection, None, None, self.0);
+                connection.closed().await;
+                Ok(())
+            }
+        }
+        let bind = || async {
+            iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint")
+        };
+        let server = bind().await;
+        let router = Router::builder(server.clone())
+            .accept(ALPN, Watch(refusal_of))
+            .spawn();
+        let client = bind().await;
+        lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
+        let connection = client.connect(server.id(), ALPN).await.expect("connect");
+        let closed = tokio_time::timeout(wait, connection.closed()).await.is_ok();
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+        closed
+    }
+
+    #[test]
+    fn the_watcher_closes_a_link_that_the_gate_does_not_admit_after_the_deadline() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let closed = watched_link_closes_within(
+                    |_| Some(Refusal::default()),
+                    super::PROBE_DEADLINE + Duration::from_secs(5),
+                )
+                .await;
+                assert!(
+                    closed,
+                    "a link that the gate refuses is closed after the deadline"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn the_watcher_keeps_a_link_that_the_gate_admits_past_the_deadline() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let closed = watched_link_closes_within(
+                    |_| None,
+                    super::PROBE_DEADLINE + Duration::from_secs(3),
+                )
+                .await;
+                assert!(
+                    !closed,
+                    "a link that the gate admits stays open past the deadline"
+                );
+            },
+        );
+    }
+
     /// A link that we dialed and that the peer ends with the relay-refused code is reported once,
     /// and a link that the peer ends with another code is not. The watch holds the connection
     /// weakly, so that the caller's handle decides how long the link lives.
@@ -342,7 +444,12 @@ mod watcher_tests {
                     lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
                     let connection = client.connect(server.id(), ALPN).await.expect("connect");
                     let (sink, mut reports) = mpsc::unbounded_channel();
-                    super::watch_relay_policy_and_refusal(&connection, None, Some(sink));
+                    super::watch_relay_policy_and_refusal(
+                        &connection,
+                        None,
+                        Some(sink),
+                        super::gate_of(super::PathGate::SelectedOnly),
+                    );
                     // The caller holds its handle only inside a read that ends at the close and
                     // then drops it, as the gossip transport does: the report must not depend on
                     // who drops first.
@@ -404,7 +511,12 @@ mod watcher_tests {
                 impl ProtocolHandler for WatchAndHold {
                     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
                         let sink = self.sink.lock().expect("sink lock").take();
-                        super::watch_relay_policy_and_refusal(&connection, None, sink);
+                        super::watch_relay_policy_and_refusal(
+                            &connection,
+                            None,
+                            sink,
+                            super::gate_of(super::PathGate::SelectedOnly),
+                        );
                         let _ = self.watching.send(());
                         if let Some(code) = self.close_here {
                             connection.close(code.into(), b"test");
@@ -553,7 +665,12 @@ mod watcher_tests {
                         connection: Connection,
                     ) -> impl Future<Output = Result<(), AcceptError>> + Send {
                         let (sink, _reports) = mpsc::unbounded_channel();
-                        super::watch_relay_policy_and_refusal(&connection, None, Some(sink));
+                        super::watch_relay_policy_and_refusal(
+                            &connection,
+                            None,
+                            Some(sink),
+                            super::gate_of(super::PathGate::SelectedOnly),
+                        );
                         future::ready(Ok(()))
                     }
                 }

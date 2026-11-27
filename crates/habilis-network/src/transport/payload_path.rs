@@ -6,6 +6,7 @@
 //! a question about the *selected* path, not about which paths exist —
 //! `net::conn_path` answers the latter, for diagnostics.
 
+use std::fmt;
 use std::time::Duration;
 
 use iroh::endpoint::{Connection, Path};
@@ -111,6 +112,20 @@ pub(crate) struct PathFact {
     pub(crate) relay: bool,
     /// The library selected this path.
     pub(crate) selected: bool,
+}
+
+impl fmt::Display for PathFact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = if self.relay { "relay" } else { "direct" };
+        let selected = if self.selected { " selected" } else { "" };
+        write!(formatter, "{kind}{selected}")
+    }
+}
+
+/// The facts of one connection as one bracketed list.
+fn bracketed(facts: &[PathFact]) -> String {
+    let words: Vec<String> = facts.iter().map(ToString::to_string).collect();
+    format!("[{}]", words.join(", "))
 }
 
 impl PathFact {
@@ -413,20 +428,49 @@ pub(crate) enum PathGate {
     Table(super::SignalAdmission),
 }
 
+/// What the gate read of a connection that it did not admit: the paths of the connection, and
+/// the paths of each other open connection of its remote. The log shows the reading that decided,
+/// not a second read.
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Refusal {
+    own: Vec<PathFact>,
+    others: Vec<Vec<PathFact>>,
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let others: Vec<String> = self.others.iter().map(|facts| bracketed(facts)).collect();
+        write!(
+            formatter,
+            "own={} others=[{}]",
+            bracketed(&self.own),
+            others.join(", ")
+        )
+    }
+}
+
 impl PathGate {
-    /// Whether payload may flow on `connection`. The paths of the other connections of the remote
-    /// are read only when the paths of this one do not decide.
-    pub(crate) fn admits(&self, connection: &Connection) -> bool {
+    /// What the gate read of `connection` when it does not admit it, and `None` when it admits
+    /// it. The paths of the other connections of the remote are read only when the paths of this
+    /// one do not decide.
+    pub(crate) fn refusal(&self, connection: &Connection) -> Option<Refusal> {
         let own = PathFact::of(connection);
         if gate_admits(&own, &[]) {
-            return true;
+            return None;
         }
-        let Self::Table(table) = self else {
-            return false;
+        let others = match self {
+            Self::SelectedOnly => Vec::new(),
+            Self::Table(table) => {
+                table.facts_of_other_connections(connection.remote_id(), connection.stable_id())
+            }
         };
-        let others =
-            table.facts_of_other_connections(connection.remote_id(), connection.stable_id());
-        gate_admits(&own, &others)
+        (!gate_admits(&own, &others)).then_some(Refusal { own, others })
+    }
+
+    /// Whether payload may flow on `connection`.
+    pub(crate) fn admits(&self, connection: &Connection) -> bool {
+        self.refusal(connection).is_none()
     }
 }
 
@@ -576,7 +620,7 @@ mod tests {
         });
     }
 
-    use super::{PathFact, gate_admits};
+    use super::{PathFact, Refusal, gate_admits};
 
     const fn fact(relay: bool, selected: bool) -> PathFact {
         PathFact { relay, selected }
@@ -623,6 +667,20 @@ mod tests {
         assert!(
             !gate_admits(&own, &others),
             "a connection with only the relay path is refused"
+        );
+    }
+
+    #[test]
+    fn a_refusal_shows_the_paths_of_the_connection_and_of_the_others() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let refusal = Refusal {
+            own: vec![fact(false, false), fact(true, false)],
+            others: vec![vec![fact(false, false)], vec![fact(true, true)]],
+        };
+        assert_eq!(
+            refusal.to_string(),
+            "own=[direct, relay] others=[[direct], [relay selected]]",
+            "the reading shows each path with its kind and its selection"
         );
     }
 
