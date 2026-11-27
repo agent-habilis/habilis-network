@@ -30,7 +30,9 @@ use tokio::sync::{Mutex, watch};
 use crate::transport::PendingSend;
 use crate::transport::unicast_acceptor::NOT_TAKEN;
 use crate::transport::webrtc::close_code::IDLE;
-use crate::transport::{LOG_TARGET, RELAY_REFUSED, SendVerdict, UNICAST_ALPN, payload_allowed_on};
+use crate::transport::{
+    LOG_TARGET, PathGate, RELAY_REFUSED, SendVerdict, UNICAST_ALPN, payload_allowed_on,
+};
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
@@ -240,6 +242,16 @@ impl UnicastPool {
         let _ = self.inner.admission.set(admission);
     }
 
+    /// The question that the sender asks of a connection before it writes: the rule of the gate of
+    /// the acceptors, with the table of the node once the table is set, and the old question of
+    /// the connection alone before (a pool that no node owns, in a test).
+    fn gate(&self) -> PathGate {
+        match self.inner.admission.get() {
+            Some(table) => PathGate::Table(table.clone()),
+            None => PathGate::SelectedOnly,
+        }
+    }
+
     /// Decide how the next dial of `eid` goes, before it starts, and once for the caller that is
     /// the dialer of the peer. At the ceiling of direct connections, with a multihop `route` to the
     /// peer, the dial takes that route and nothing else, and the peer is pinned: its connection
@@ -413,7 +425,7 @@ impl UnicastPool {
         let Some(connection) = self.warm(eid).await else {
             return WarmSend::Cold;
         };
-        if !payload_allowed_on(&connection, self.inner.relay_transport) {
+        if !payload_allowed_on(&connection, self.inner.relay_transport, &self.gate()) {
             return WarmSend::Refused;
         }
         let pool = self.clone();
@@ -564,7 +576,7 @@ impl UnicastPool {
         let conns = self.inner.conns.lock().await;
         conns.get(&eid).is_some_and(|pooled| {
             pooled.connection.close_reason().is_none()
-                && payload_allowed_on(&pooled.connection, self.inner.relay_transport)
+                && payload_allowed_on(&pooled.connection, self.inner.relay_transport, &self.gate())
         })
     }
 

@@ -206,8 +206,12 @@ pub(crate) fn selected_rung(connection: &Connection) -> Option<&'static str> {
 /// path snapshot, which locks and clones. With the relay lookup only, the
 /// selected path must be a proven non-relay one: "not selected yet" is
 /// refused, not trusted.
-pub(crate) fn payload_allowed_on(connection: &Connection, relay_transport: bool) -> bool {
-    relay_transport || selected_is_direct(connection)
+pub(crate) fn payload_allowed_on(
+    connection: &Connection,
+    relay_transport: bool,
+    gate: &PathGate,
+) -> bool {
+    relay_transport || gate.admits(connection)
 }
 
 /// The refusal every payload lane reports when the relay is lookup only and
@@ -218,6 +222,11 @@ pub(crate) const RELAY_REFUSED: &str =
 /// Wait until `conn`'s selected path is not the relay, or `deadline` passes.
 /// Every path event is a reason to re-read the path list: the event's own
 /// address may be stale by the time it is handled.
+///
+/// The answer is for the paths of this connection alone. A connection of a remote that iroh
+/// selected on a path of another connection reads no selected path of its own, and the wait
+/// does not end for it: the gates of the engine ask the wider question (see `gate_admits`), and
+/// this public function does not.
 ///
 /// # Examples
 ///
