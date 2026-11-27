@@ -25,6 +25,10 @@ use std::sync::atomic::Ordering;
 /// retried later rather than waited on.
 pub const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 
+/// How often a hold that waits for a selected path looks at the selection again, when no path
+/// event of its own connection wakes it.
+const RESELECT_TICK: Duration = Duration::from_millis(500);
+
 /// Close code an inbound gossip connection gets when the relay is lookup
 /// only and no direct path was selected within the deadline. Distinct from
 /// the blob lane's code so a log reader can tell the two refusals apart.
@@ -98,6 +102,63 @@ pub(crate) fn selected_is_direct(connection: &Connection) -> bool {
     let paths = connection.paths();
     let selected = paths.iter().find(Path::is_selected);
     selected.is_some_and(|path| !path.is_relay())
+}
+
+/// What the gate reads of one path of a connection.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PathFact {
+    /// The path is the relay.
+    pub(crate) relay: bool,
+    /// The library selected this path.
+    pub(crate) selected: bool,
+}
+
+impl PathFact {
+    /// The facts of the open paths of `connection`.
+    pub(crate) fn of(connection: &Connection) -> Vec<Self> {
+        let paths = connection.paths();
+        paths.iter().map(|path| Self::of_path(&path)).collect()
+    }
+
+    fn of_path(path: &Path<'_>) -> Self {
+        Self {
+            relay: path.is_relay(),
+            selected: path.is_selected(),
+        }
+    }
+
+    fn direct(self) -> bool {
+        !self.relay
+    }
+
+    fn selected_direct(self) -> bool {
+        self.selected && !self.relay
+    }
+
+    fn any_selected_direct(facts: &[Self]) -> bool {
+        facts.iter().any(|path| path.selected_direct())
+    }
+}
+
+/// Whether payload may flow on a connection of a remote under a lookup-only relay. `own` are
+/// the paths of the connection, `others` the paths of each other open connection of the same
+/// remote.
+///
+/// The library selects one path for each remote, and sets the paths of every connection that
+/// are not that one to Backup. A connection that holds another address of the remote, or that
+/// the remote reached while its selection sat elsewhere, reads none of its own paths as selected.
+/// It may carry payload when it has an open path that is not the relay and the selection of the
+/// remote is a path that is not the relay: the remote is then not on the relay. A remote selected
+/// on the relay, and a connection with only the relay path, stay refused.
+pub(crate) fn gate_admits(own: &[PathFact], others: &[Vec<PathFact>]) -> bool {
+    if PathFact::any_selected_direct(own) {
+        return true;
+    }
+    let has_direct_path = own.iter().any(|path| path.direct());
+    let remote_selected_direct = others
+        .iter()
+        .any(|facts| PathFact::any_selected_direct(facts));
+    has_direct_path && remote_selected_direct
 }
 
 /// Whether iroh's selected path to the remote is a direct UDP path: the race
@@ -228,7 +289,7 @@ enum PathWait {
 async fn wait_selected(
     connection: &Connection,
     deadline: Duration,
-    selected: fn(&Connection) -> bool,
+    selected: impl Fn(&Connection) -> bool,
 ) -> bool {
     wait_selected_outcome(connection, deadline, selected).await == PathWait::Selected
 }
@@ -236,7 +297,7 @@ async fn wait_selected(
 async fn wait_selected_outcome(
     connection: &Connection,
     deadline: Duration,
-    selected: fn(&Connection) -> bool,
+    selected: impl Fn(&Connection) -> bool,
 ) -> PathWait {
     use futures_util::StreamExt as _;
     let mut events = connection.path_events();
@@ -245,7 +306,9 @@ async fn wait_selected_outcome(
             if selected(connection) {
                 return PathWait::Selected;
             }
-            if events.next().await.is_none() {
+            // The selection of the remote can move with no event on this connection, so the
+            // gate looks again at each tick.
+            if let Ok(None) = n0future_time::timeout(RESELECT_TICK, events.next()).await {
                 return PathWait::Closed;
             }
         }
@@ -281,10 +344,30 @@ pub async fn refuse_unless_direct(
     deadline: Duration,
     close_code: u32,
 ) -> bool {
+    refuse_unless_direct_in(
+        connection,
+        relay,
+        deadline,
+        close_code,
+        &PathGate::SelectedOnly,
+    )
+    .await
+}
+
+/// [`refuse_unless_direct`] with the question of `gate`: a peer passes [`PathGate::Table`], and a
+/// connection whose own paths are not selected is admitted when the remote is selected on a path
+/// that is not the relay on another of its connections (see [`gate_admits`]).
+pub(crate) async fn refuse_unless_direct_in(
+    connection: &Connection,
+    relay: PayloadPath,
+    deadline: Duration,
+    close_code: u32,
+    gate: &PathGate,
+) -> bool {
     let outcome = if relay.relay_allowed() {
         PathWait::Selected
     } else {
-        wait_selected_outcome(connection, deadline, selected_is_direct).await
+        wait_selected_outcome(connection, deadline, |connection| gate.admits(connection)).await
     };
     match outcome {
         PathWait::Selected => {
@@ -315,6 +398,36 @@ pub async fn refuse_unless_direct(
     tracing::info!(target: LOG_TARGET, remote = %connection.remote_id(), paths = ?paths, "{RELAY_REFUSED}");
     connection.close(close_code.into(), b"relay path refused");
     false
+}
+
+/// Which question a gate asks of a connection.
+///
+/// A peer asks the question of the remote: see [`gate_admits`]. The rendezvous of the beacon and
+/// the public [`refuse_unless_direct`] ask the old question of the connection alone: the beacon is
+/// not a peer, and no other connection of a remote is reported to a table for its endpoint.
+#[derive(Debug, Clone)]
+pub(crate) enum PathGate {
+    /// A selected path of this connection, and not the relay.
+    SelectedOnly,
+    /// The rule of [`gate_admits`], with the other connections of the remote that the table holds.
+    Table(super::SignalAdmission),
+}
+
+impl PathGate {
+    /// Whether payload may flow on `connection`. The paths of the other connections of the remote
+    /// are read only when the paths of this one do not decide.
+    pub(crate) fn admits(&self, connection: &Connection) -> bool {
+        let own = PathFact::of(connection);
+        if gate_admits(&own, &[]) {
+            return true;
+        }
+        let Self::Table(table) = self else {
+            return false;
+        };
+        let others =
+            table.facts_of_other_connections(connection.remote_id(), connection.stable_id());
+        gate_admits(&own, &others)
+    }
 }
 
 /// The debug line of an acceptor that refused `connection` as relay-only: which acceptor, which
@@ -461,5 +574,70 @@ mod tests {
             client.close().await;
             server.close().await;
         });
+    }
+
+    use super::{PathFact, gate_admits};
+
+    const fn fact(relay: bool, selected: bool) -> PathFact {
+        PathFact { relay, selected }
+    }
+
+    #[test]
+    fn a_connection_with_its_own_selected_direct_path_is_admitted() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            gate_admits(&[fact(false, true), fact(true, false)], &[]),
+            "a connection with its own selected direct path is admitted"
+        );
+    }
+
+    /// The selection is one path for each remote: a connection that holds another address of the
+    /// remote reads none of its own paths as selected.
+    #[test]
+    fn an_open_direct_path_is_admitted_when_another_connection_of_the_remote_is_selected() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let own = [fact(false, false), fact(true, false)];
+        let others = [vec![fact(false, true)]];
+        assert!(
+            gate_admits(&own, &others),
+            "an open direct path of a remote that is selected elsewhere is admitted"
+        );
+    }
+
+    #[test]
+    fn a_remote_selected_on_the_relay_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let own = [fact(false, false), fact(true, false)];
+        let others = [vec![fact(true, true), fact(false, false)]];
+        assert!(
+            !gate_admits(&own, &others),
+            "a remote selected on the relay is refused"
+        );
+    }
+
+    #[test]
+    fn a_connection_with_only_the_relay_path_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let own = [fact(true, false)];
+        let others = [vec![fact(false, true)]];
+        assert!(
+            !gate_admits(&own, &others),
+            "a connection with only the relay path is refused"
+        );
+    }
+
+    #[test]
+    fn a_remote_with_no_selected_path_anywhere_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let own = [fact(false, false)];
+        let others = [vec![fact(false, false)], vec![fact(true, false)]];
+        assert!(
+            !gate_admits(&own, &others),
+            "no selected path on any connection of the remote is refused"
+        );
+        assert!(
+            !gate_admits(&own, &[]),
+            "a remote with no other connection and no selected path is refused"
+        );
     }
 }

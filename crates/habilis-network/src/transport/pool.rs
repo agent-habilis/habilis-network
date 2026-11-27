@@ -1917,7 +1917,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -2001,7 +2001,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -2079,7 +2079,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -2183,7 +2183,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -2250,7 +2250,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let admission = SignalAdmission::new(8);
@@ -2308,7 +2308,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let admission = SignalAdmission::new(8);

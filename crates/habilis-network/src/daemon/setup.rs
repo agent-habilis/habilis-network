@@ -229,6 +229,7 @@ pub(crate) async fn reregister_rendezvous(
 /// back-pressure the loop (a dropped frame is not repaired until the loss repair lands).
 fn unicast_inbox(
     relay_transport: transport::PayloadPath,
+    admission: transport::SignalAdmission,
 ) -> (
     mpsc::Receiver<transport::UnicastFrame>,
     transport::UnicastAcceptor,
@@ -237,7 +238,10 @@ fn unicast_inbox(
         mpsc::Sender<transport::UnicastFrame>,
         mpsc::Receiver<transport::UnicastFrame>,
     ) = mpsc::channel(consts::UNICAST_INBOX_CAP);
-    (rx, transport::UnicastAcceptor::new(tx, relay_transport))
+    (
+        rx,
+        transport::UnicastAcceptor::new(tx, relay_transport, admission),
+    )
 }
 
 /// The chunk request channel and its Router acceptor. The acceptor hands each request of `CHUNKS_ALPN` to the
@@ -319,7 +323,7 @@ async fn build_member_endpoint(
     }
     // Made before the endpoint, because the endpoint reports its connections
     // to this table from the first handshake on.
-    let admission = transport::SignalAdmission::new(build.max_connections);
+    let admission = build.admission.clone();
     if build.multihop {
         // The cap also bounds the sessions of the underlay: it holds one to each known member that needs one.
         let (endpoint, handle, webrtc, underlay_webrtc, mdns) = lookup::build_peer_multihop_with(
@@ -380,7 +384,7 @@ async fn build_member_endpoint(
             injected.mdns,
         ));
     }
-    let admission = transport::SignalAdmission::new(build.max_connections);
+    let admission = build.admission.clone();
     #[cfg(feature = "multihop")]
     if build.multihop {
         let (endpoint, handle, webrtc, underlay_webrtc, mdns) = lookup::build_peer_multihop_with(
@@ -531,6 +535,8 @@ struct SetupBuild<'build> {
     lookups: &'build LookupOpts,
     unicast_acceptor: &'build transport::UnicastAcceptor,
     chunk_acceptor: &'build transport::ChunkAcceptor,
+    /// The admission table of the node: the acceptors and the endpoint share it.
+    admission: &'build transport::SignalAdmission,
     /// The mesh policy's `multihop`: register the multi-hop transport on the
     /// peer endpoint.
     #[cfg_attr(
@@ -1600,7 +1606,14 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // only when its verdict is another rung.
     let ladder: Vec<_> = relay_ladder(&lookups.relay_lookup).collect();
     let (rung_tx, rung_rx) = mpsc::unbounded_channel();
-    let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);
+    // The table of the node, made before the acceptors that read it and before the endpoint that
+    // reports its connections to it from the first handshake on. An endpoint that the caller
+    // injected brought its own table, and the node uses that one.
+    let admission = injected.as_ref().map_or_else(
+        || transport::SignalAdmission::new(max_connections),
+        |injected| injected.admission.clone(),
+    );
+    let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport, admission.clone());
     let (chunk_rx, chunk_acceptor) = chunk_inbox(relay_transport);
 
     let build = SetupBuild {
@@ -1610,6 +1623,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         lookups: &lookups,
         unicast_acceptor: &unicast_acceptor,
         chunk_acceptor: &chunk_acceptor,
+        admission: &admission,
         // The mesh policy's `multihop`, on a node that has a direct path for its underlay to
         // forward over: UDP, or a WebRTC data channel when IP is cleared. With neither there is
         // no direct path, and no handle.
@@ -1774,7 +1788,7 @@ fn build_overlay(
     let ice = transport::IceProfile {
         host_only: lookup::stays_on_this_host(mesh.is_loopback(), build.transports),
     };
-    let unicast = build.unicast_acceptor.clone().admission(admission.clone());
+    let unicast = build.unicast_acceptor.clone();
     let webrtc_lane = build
         .transports
         .webrtc

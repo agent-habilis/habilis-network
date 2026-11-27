@@ -25,7 +25,7 @@ use crate::util::tuning::DIRECT_IDLE_BACKSTOP;
 
 use super::acknowledgement::Acknowledgement;
 use super::admission::SignalAdmission;
-use super::payload_path::{self, PROBE_DEADLINE, refuse_unless_direct};
+use super::payload_path::{self, PROBE_DEADLINE, PathGate};
 use super::webrtc::close_code::{IDLE, UNICAST_RELAY_REFUSED};
 use super::{LOG_TARGET, PayloadPath};
 
@@ -79,28 +79,40 @@ pub(crate) struct UnicastAcceptor {
     idle: Duration,
     /// The table whose ceiling the accepted connections count against: a stream that is being
     /// read marks its connection busy.
-    admission: Option<SignalAdmission>,
+    admission: SignalAdmission,
 }
 
 impl UnicastAcceptor {
-    /// Report the streams of this acceptor to `admission`.
-    pub(crate) fn admission(mut self, admission: SignalAdmission) -> Self {
-        self.admission = Some(admission);
-        self
+    /// An acceptor of a peer. The table of the node is part of it: the streams are reported to
+    /// it, and the gate reads the other connections of the remote from it.
+    pub(crate) fn new(
+        tx: mpsc::Sender<UnicastFrame>,
+        relay_transport: PayloadPath,
+        admission: SignalAdmission,
+    ) -> Self {
+        Self::with_idle(tx, relay_transport, DIRECT_IDLE_BACKSTOP, admission)
     }
 
-    pub(crate) fn new(tx: mpsc::Sender<UnicastFrame>, relay_transport: PayloadPath) -> Self {
-        Self::with_idle(tx, relay_transport, DIRECT_IDLE_BACKSTOP)
+    /// [`Self::new`] with a table of its own, for a test.
+    #[cfg(test)]
+    pub(crate) fn for_test(tx: mpsc::Sender<UnicastFrame>, relay_transport: PayloadPath) -> Self {
+        Self::new(tx, relay_transport, SignalAdmission::new(8))
+    }
+
+    /// [`Self::with_idle`] with a table of its own, for a test.
+    #[cfg(test)]
+    pub(crate) fn with_idle_for_test(
+        tx: mpsc::Sender<UnicastFrame>,
+        relay_transport: PayloadPath,
+        idle: Duration,
+    ) -> Self {
+        Self::with_idle(tx, relay_transport, idle, SignalAdmission::new(8))
     }
 
     /// How long `peer` may send nothing before its connection closes. A peer whose connection took
     /// no unit (an extra) goes after [`EXTRA_IDLE`], sooner than the timeout of a direct one.
     fn idle_for(&self, peer: iroh::EndpointId) -> Duration {
-        let extra: bool = self
-            .admission
-            .as_ref()
-            .is_some_and(|table| table.is_extra(peer));
-        if extra {
+        if self.admission.is_extra(peer) {
             self.idle.min(EXTRA_IDLE)
         } else {
             self.idle
@@ -113,12 +125,13 @@ impl UnicastAcceptor {
         tx: mpsc::Sender<UnicastFrame>,
         relay_transport: PayloadPath,
         idle: Duration,
+        admission: SignalAdmission,
     ) -> Self {
         Self {
             tx,
             relay_transport,
             idle,
-            admission: None,
+            admission,
         }
     }
 }
@@ -202,19 +215,16 @@ impl ProtocolHandler for UnicastAcceptor {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         // The sender checks its own selected path, but an old build or a
         // hostile peer may not: hold until this side has proof too.
-        if !refuse_unless_direct(
+        if !payload_path::refuse_unless_direct_in(
             &connection,
             self.relay_transport,
             PROBE_DEADLINE,
             UNICAST_RELAY_REFUSED,
+            &PathGate::Table(self.admission.clone()),
         )
         .await
         {
-            payload_path::log_accept_refused(
-                "unicast",
-                self.admission.as_ref().and_then(SignalAdmission::local),
-                &connection,
-            );
+            payload_path::log_accept_refused("unicast", self.admission.local(), &connection);
             return Ok(());
         }
         // Each accepted bidirectional stream carries exactly one frame, and its two steps go back
@@ -242,7 +252,7 @@ impl ProtocolHandler for UnicastAcceptor {
             match n0future_time::timeout(idle, connection.accept_bi()).await {
                 Ok(Ok((acknowledgement, recv))) => {
                     let remote = connection.remote_id();
-                    let busy = self.admission.as_ref().map(|table| table.busy(remote));
+                    let busy = self.admission.busy(remote);
                     let tx = self.tx.clone();
                     streams.spawn(async move {
                         let _busy = busy;
@@ -299,7 +309,7 @@ mod tests {
         mpsc::Receiver<UnicastFrame>,
     ) {
         let (tx, frames) = mpsc::channel(8);
-        let handler = UnicastAcceptor::with_idle(tx, PayloadPath::RelayAllowed, idle);
+        let handler = UnicastAcceptor::with_idle_for_test(tx, PayloadPath::RelayAllowed, idle);
         let (connection, router, client) = connected_to(handler).await;
         (connection, router, client, frames)
     }
@@ -462,7 +472,7 @@ mod tests {
         let (tx, _frames) = mpsc::channel(8);
         let timeout = Duration::from_mins(10);
         let acceptor =
-            UnicastAcceptor::with_idle(tx, PayloadPath::RelayAllowed, timeout).admission(admission);
+            UnicastAcceptor::with_idle(tx, PayloadPath::RelayAllowed, timeout, admission);
         assert_eq!(
             acceptor.idle_for(extra),
             EXTRA_IDLE,
@@ -482,7 +492,7 @@ mod tests {
             // Shared by the test, which releases the start, and the handler, which the router owns.
             let start = Arc::new(Notify::new());
             let handler = LateStart {
-                inner: UnicastAcceptor::with_idle(
+                inner: UnicastAcceptor::with_idle_for_test(
                     tx,
                     PayloadPath::RelayAllowed,
                     Duration::from_secs(8),
@@ -544,7 +554,7 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (tx, _frames) = mpsc::channel(1);
         assert_eq!(
-            UnicastAcceptor::new(tx, PayloadPath::RelayAllowed).idle,
+            UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed).idle,
             DIRECT_IDLE_BACKSTOP,
             "an idle acceptor connection is closed after the one backstop"
         );
@@ -590,7 +600,7 @@ mod tests {
         // Shared by the test, which waits for the eviction, and the handler.
         let evict = Arc::new(Notify::new());
         let handler = EvictFirst {
-            inner: UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+            inner: UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
             // Shared by every clone of the handler, one for each connection.
             first: Arc::new(AtomicBool::new(true)),
             evict: Arc::clone(&evict),
@@ -782,7 +792,7 @@ mod tests {
         // Shared by the test, which starts the peer late, and the handler.
         let start = Arc::new(Notify::new());
         let handler = LateStart {
-            inner: UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+            inner: UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
             start: Arc::clone(&start),
         };
         let bind = || async {
@@ -886,7 +896,7 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (tx, mut frames) = mpsc::channel(1);
             let (connection, router, client) =
-                connected_to(UnicastAcceptor::new(tx, PayloadPath::RelayAllowed)).await;
+                connected_to(UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed)).await;
 
             let (mut stream, _held) = hold_by_hand(&connection, b"gave up")
                 .await
@@ -912,7 +922,7 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (tx, mut frames) = mpsc::channel(64);
             let (connection, router, client) =
-                connected_to(UnicastAcceptor::new(tx, PayloadPath::RelayAllowed)).await;
+                connected_to(UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed)).await;
 
             assert_eq!(
                 MAX_HELD_FRAMES, BURST,
@@ -1066,7 +1076,7 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (tx, mut frames) = mpsc::channel(8);
             let handler = CloseBeforeTheEnd {
-                inner: UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                inner: UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                 // Shared by every clone of the handler, one for each connection.
                 first: Arc::new(AtomicBool::new(true)),
             };
@@ -1122,7 +1132,7 @@ mod tests {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (tx, mut frames) = mpsc::channel(8);
             let handler = CloseBeforeTheEndThenRefuse {
-                inner: UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                inner: UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                 // Shared by every clone of the handler, one for each connection.
                 first: Arc::new(AtomicBool::new(true)),
             };
@@ -1156,7 +1166,7 @@ mod tests {
                 bytes: bytes::Bytes::from_static(b"fills the inbox"),
             })
             .expect("fill the inbox");
-            let handler = UnicastAcceptor::new(tx, PayloadPath::RelayAllowed);
+            let handler = UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed);
             let bind = || async {
                 iroh::Endpoint::builder(presets::Minimal)
                     .relay_mode(iroh::RelayMode::Disabled)

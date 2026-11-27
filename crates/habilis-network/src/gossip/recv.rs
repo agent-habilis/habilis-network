@@ -2907,7 +2907,7 @@ mod first_contact_tests {
                 let router = Router::builder(bob.clone())
                     .accept(
                         UNICAST_ALPN,
-                        UnicastAcceptor::with_idle(
+                        UnicastAcceptor::with_idle_for_test(
                             inbox,
                             PayloadPath::DirectOnly,
                             Duration::from_mins(1),

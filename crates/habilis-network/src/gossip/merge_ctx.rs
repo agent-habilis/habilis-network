@@ -1008,7 +1008,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
 
@@ -1138,7 +1138,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
 

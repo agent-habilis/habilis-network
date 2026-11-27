@@ -510,6 +510,33 @@ impl SignalAdmission {
         victims.end();
     }
 
+    /// The paths of each open connection of `peer` but the one with `except` as its stable id, for
+    /// the gate of an acceptor. The paths are read after the table is let go.
+    pub(crate) fn facts_of_other_connections(
+        &self,
+        peer: EndpointId,
+        except: usize,
+    ) -> Vec<Vec<transport::payload_path::PathFact>> {
+        let connections: Vec<Connection> = {
+            let inner = self.lock();
+            inner.slots.get(&peer).map_or_else(Vec::new, |slot| {
+                slot.conns
+                    .iter()
+                    .filter_map(WeakConnectionHandle::upgrade)
+                    .collect()
+            })
+        };
+        let open: Vec<&Connection> = connections
+            .iter()
+            .filter(|connection| {
+                connection.close_reason().is_none() && connection.stable_id() != except
+            })
+            .collect();
+        open.into_iter()
+            .map(transport::payload_path::PathFact::of)
+            .collect()
+    }
+
     /// Whether `peer` is pinned to multihop: a dial planned it, or its pinned connection is open.
     pub(crate) fn is_pinned(&self, peer: EndpointId) -> bool {
         self.lock().ceiling.pinned(peer)
