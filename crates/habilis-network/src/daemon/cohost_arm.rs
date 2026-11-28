@@ -458,32 +458,35 @@ pub(super) fn shed_on_request(
 fn regrafts_rendezvous(rendezvous_linked: bool, rendezvous_wanted: bool) -> bool {
     !rendezvous_linked && rendezvous_wanted
 }
-/// Whether this session's beacon is subject to the periodic rival
-/// re-check shed: any **public** co-host that had to *probe* for the
-/// identity rather than owning it.
+/// Whether the holder of this session's beacon asks, every heal tick, who serves the rendezvous:
+/// every co-host of a **public** mesh, the creator included. The relay serves the newest claim, so
+/// only the older holder can read a claim that came after it, and the creator is the oldest holder
+/// of a mesh: a creator that asked nothing would never read a joiner that claimed on a free reading
+/// by error, and the two would stay 2 groups. An ask sheds nothing, so the reason that once kept
+/// the creator out (a shed would churn the only beacon of a cold mesh) does not hold.
 ///
-/// `EagerProbed` claimants share a `rendezvous_id` with concurrent peers
-/// (topic joiners, directory advertisers) and can double-claim inside each
-/// other's probe window. `Deferred` was excluded here on the premise that it
-/// "meshes before claiming" — but `may_cohost` also lets an unmeshed joiner
-/// claim after the co-host grace, and a meshed one still claims on the word of
-/// a probe. When that probe could not resolve the id (the defect
-/// `beacon::spawn_rival_probe` documents), *every* survivor of a departed
-/// origin claimed a duplicate, and this shed was the one mechanism that would
-/// have re-arbitrated it — switched off for the policy that needed it. So the
-/// gate is now "did a probe decide this claim", which is the property that
-/// makes a same-id split possible in the first place.
-///
-/// Still excluded: `Eager` (the mesh origin owns the identity from t=0, and
-/// shedding it would churn the only beacon a cold mesh has), `Never` (claims
-/// nothing), and every loopback mesh. A port ladder arbitrates atomically at
-/// bind time, but the identity probe that follows a failed bind can read a
-/// loaded host wrongly, and two holders then serve one mesh. The loopback
-/// repair is not this timer: a holder above the first rung asks, on every heal
-/// tick, whether a lower rung answers as our mesh, and yields on a positive
-/// answer only (`maybe_cohost`, `beacon::lower_rung_that_answers`).
+/// Not `Never` (it claims nothing) and not a loopback mesh. A port ladder arbitrates atomically at
+/// bind time, but the identity probe that follows a failed bind can read a loaded host wrongly,
+/// and two holders then serve one mesh. The loopback repair is a holder above the first rung that
+/// asks, on every heal tick, whether a lower rung answers as our mesh, and that yields on a
+/// positive answer only (`maybe_cohost`, `beacon::lower_rung_that_answers`).
 pub(crate) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool {
-    matches!(policy, CoHostPolicy::EagerProbed | CoHostPolicy::Deferred) && public
+    public
+        && match policy {
+            CoHostPolicy::Eager | CoHostPolicy::EagerProbed | CoHostPolicy::Deferred => true,
+            CoHostPolicy::Never => false,
+        }
+}
+
+/// The policy of a node after its holder yielded to a rival. The creator owns the rendezvous from
+/// t=0 and claims it with no probe, but a creator that yielded is a claimant like any other: its
+/// next claim reads the id first, or it would bind again at once on its next reclaim tick, take
+/// the newest claim from the rival that it just yielded to, and the contest would go round again.
+pub(super) fn cohost_after_a_yield(policy: CoHostPolicy) -> CoHostPolicy {
+    match policy {
+        CoHostPolicy::Eager => CoHostPolicy::EagerProbed,
+        CoHostPolicy::EagerProbed | CoHostPolicy::Deferred | CoHostPolicy::Never => policy,
+    }
 }
 /// Whether a member that does not hold the rendezvous may probe it in order to claim it. Not
 /// while it knows a holder: its own shed makes the shared id read free for a moment, and a claim
@@ -542,17 +545,21 @@ pub(super) async fn start_holder_probe_if_due(
 
 /// The answer of the probe of the holder. The contest decides: stay, claim again (make before
 /// break: the new beacon binds first and the old one closes in the same step), or yield to the
-/// rival. An answer that comes after the beacon went is about nothing and is dropped.
+/// rival. An answer that comes after the beacon went is about nothing and is dropped. It returns the
+/// policy of the node after the answer: a holder that yielded is a claimant like any other
+/// (`cohost_after_a_yield`), and the loop must keep what this returns.
+#[must_use = "the policy after a yield is what the node claims by: the loop must keep it"]
 pub(super) async fn apply_holder_answer(
     state: &mut EventLoopState,
     context: &HandlerCtx<'_>,
     arm: &CohostArm<'_>,
     rendezvous: &mut Option<beacon::Rendezvous>,
     answer: beacon::WhoAnswer,
-) {
+) -> CoHostPolicy {
     if rendezvous.is_none() {
-        return;
+        return arm.policy;
     }
+    let mut policy = arm.policy;
     let node = context.endpoint.id();
     let action = state.holder_contest.on_answer(node, answer);
     beacon::log_holder_probe(node, answer, action);
@@ -583,8 +590,10 @@ pub(super) async fn apply_holder_answer(
                 "beacon yielded: another member serves the rendezvous"
             );
             release_to_rival(state, arm, rendezvous);
+            policy = cohost_after_a_yield(arm.policy);
         }
     }
+    policy
 }
 
 /// Let go of the beacon for a rival that keeps the rendezvous, and read the ladder again: the
@@ -892,6 +901,18 @@ mod tests {
 
         /// The answer of the probe of the holder, given to the contest as the loop gives it.
         async fn apply(&mut self, params: &beacon::RendezvousParams, answer: beacon::WhoAnswer) {
+            self.apply_as(CoHostPolicy::EagerProbed, params, answer)
+                .await;
+        }
+
+        /// [`Self::apply`] for a node of the policy `policy`; it gives the policy that the node has
+        /// after the answer.
+        async fn apply_as(
+            &mut self,
+            policy: CoHostPolicy,
+            params: &beacon::RendezvousParams,
+            answer: beacon::WhoAnswer,
+        ) -> CoHostPolicy {
             let context = HandlerCtx {
                 sender: &self.sender,
                 endpoint: &self.endpoint,
@@ -905,7 +926,7 @@ mod tests {
                 sink: &self.sink,
             };
             let arm = super::CohostArm {
-                policy: CoHostPolicy::EagerProbed,
+                policy,
                 params,
                 started: clock::Instant::now(),
             };
@@ -916,7 +937,7 @@ mod tests {
                 &mut self.rendezvous,
                 answer,
             )
-            .await;
+            .await
         }
 
         fn sockets(&self) -> Vec<net::SocketAddr> {
@@ -2403,6 +2424,94 @@ mod tests {
         });
     }
 
+    /// **A creator that yielded claims like any other member.** The creator claims with no probe,
+    /// since it owns the id at t=0. After it yielded to a rival, the same rule would bind it again
+    /// at its next reclaim tick, with no read of the id, and it would take the newest claim back.
+    #[test]
+    fn a_creator_that_yielded_probes_before_it_claims_again() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            !probes_before_claim(CoHostPolicy::Eager),
+            "a creator claims at t=0 with no probe"
+        );
+        assert!(
+            probes_before_claim(super::cohost_after_a_yield(CoHostPolicy::Eager)),
+            "a creator that yielded probes before its next claim"
+        );
+        for policy in [
+            CoHostPolicy::EagerProbed,
+            CoHostPolicy::Deferred,
+            CoHostPolicy::Never,
+        ] {
+            assert_eq!(
+                super::cohost_after_a_yield(policy),
+                policy,
+                "a yield changes no other policy"
+            );
+        }
+    }
+
+    /// **The holder that yields changes the policy of its node.** The loop gives the answer of the
+    /// probe to `apply_holder_answer` and keeps the policy that the arm holds afterwards, so a
+    /// creator that yields to a rival with a lower id is an `EagerProbed` node from then on; a
+    /// creator that claims again (a rival with a higher id) stays the creator.
+    #[test]
+    fn a_creator_that_yields_to_a_rival_changes_its_policy() {
+        use crate::lookup::test_relay;
+        use crate::protocol::meshes::{LookupOpts, RelayChoice};
+
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Another endpoint connected with the same endpoint id",
+            );
+            let (relay, _server) = test_relay::spawn_plain().await.expect("a local relay");
+            let mut params = public_params();
+            params.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay.clone()]));
+            params.bootstrap_relay = Some(relay);
+            let mut holder = Member::new(&params).await;
+            holder.claim(&params).await;
+            let own = holder.endpoint.id();
+            let mut lower = iroh::SecretKey::generate().public();
+            while lower >= own {
+                lower = iroh::SecretKey::generate().public();
+            }
+            let mut higher = iroh::SecretKey::generate().public();
+            while higher <= own {
+                higher = iroh::SecretKey::generate().public();
+            }
+
+            let claims_again = holder
+                .apply_as(
+                    CoHostPolicy::Eager,
+                    &params,
+                    beacon::WhoAnswer::Rival(higher),
+                )
+                .await;
+            assert_eq!(
+                claims_again,
+                CoHostPolicy::Eager,
+                "a creator that claims again against a rival with a higher id stays the creator"
+            );
+            let yields = holder
+                .apply_as(
+                    CoHostPolicy::Eager,
+                    &params,
+                    beacon::WhoAnswer::Rival(lower),
+                )
+                .await;
+            assert_eq!(
+                yields,
+                CoHostPolicy::EagerProbed,
+                "a creator that yielded to a rival with a lower id is a probed claimant from then on"
+            );
+            if let Some(held) = holder.rendezvous.take() {
+                held.shed_and_wait().await;
+            }
+            holder.endpoint.close().await;
+        });
+    }
+
     #[test]
     fn rival_recheck_gates_on_probed_claims_and_public() {
         // The shed exists for claimants that took the identity on the word of
@@ -2432,10 +2541,11 @@ mod tests {
             !rival_recheck_applies(CoHostPolicy::Deferred, false),
             "the rival recheck is off for a deferred policy that is not public"
         );
-        // The origin owns the identity from t=0 and a consumer claims nothing.
+        // The creator is the oldest holder, so it is the one that can read a joiner that claimed
+        // after it (`a_creator_arms_the_ask_of_the_holder`). A consumer claims nothing.
         assert!(
-            !rival_recheck_applies(CoHostPolicy::Eager, true),
-            "the rival recheck is off for an eager policy"
+            rival_recheck_applies(CoHostPolicy::Eager, true),
+            "the rival recheck applies to the creator of a public mesh"
         );
         assert!(
             !rival_recheck_applies(CoHostPolicy::Never, true),

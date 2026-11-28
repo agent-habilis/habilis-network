@@ -1436,7 +1436,8 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
                     params: &self.rendezvous_params,
                     started: self.started,
                 };
-                apply_holder_answer(
+                // The policy after a yield: the creator probes before its next claim.
+                self.cohost = apply_holder_answer(
                     &mut self.state,
                     &context,
                     &arm,

@@ -339,7 +339,7 @@ Flags and signs share one limit: the ask moves once per heal interval, so a burs
 A flag never makes a holder yield by itself: the answer of the ask decides.
 A holder on another rung than the rival reads `Ours` and stays.
 The ladder rule above then brings the higher rung down, and the two holders meet on one rung.
-A loopback mesh and the creator have no ask armed, so a sign changes nothing for them.
+A loopback mesh has no ask armed, so a sign changes nothing for it. The creator of a public mesh asks like every other holder: it is the oldest holder, so it is the one that can read a joiner that claimed after it. A creator that yielded probes before its next claim, as any claimant does.
 The ask costs one throwaway endpoint for each heal interval (240 an hour), and it never rebinds the beacon.
 The old rule shed and rebound the beacon on a timer, and a rebind is the suspected road into a `recvmsg` spin.
 A permanently alone topic peer made about 138 rebinds an hour before the ramp existed, and about 8 an hour with the 300 s cap.
