@@ -53,6 +53,7 @@ pub use shutdown::{OwnerPidError, validate_owner_pid};
 
 // Crate-internal shorthands. The public spelling of all of these is
 // `crate::runtime`, which is what a consumer imports.
+pub(crate) use cohost_arm::rival_recheck_applies;
 pub(crate) use config::{CoHostPolicy, DriverMode, EventLoopConfig};
 pub(crate) use event_loop::run;
 #[cfg(test)]

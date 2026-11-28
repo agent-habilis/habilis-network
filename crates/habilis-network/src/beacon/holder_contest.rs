@@ -206,6 +206,7 @@ mod tests {
         ContestAction, HolderContest, Miss, log_claim_missed, log_claim_on_free, log_holder_probe,
     };
     use crate::beacon::{Cause, Held, WhoAnswer};
+    use crate::daemon::{CoHostPolicy, rival_recheck_applies};
     use crate::testing::LogCapture;
 
     /// The rule by which a relay picks the claim of an id that it serves. The weak assumption of the
@@ -345,6 +346,7 @@ mod tests {
         apply_order: &[usize],
         ids: &[EndpointId],
         old_answers: bool,
+        silent: &[usize],
     ) -> Option<(u32, usize, bool)> {
         let mut model = Model::new(relay);
         let mut contests: Vec<HolderContest> =
@@ -371,6 +373,9 @@ mod tests {
             previous = current;
             let mut quiet = true;
             for holder in apply_order {
+                if silent.contains(holder) {
+                    continue;
+                }
                 let Some((_, answer)) = answers.iter().find(|(asked, _)| asked == holder) else {
                     continue;
                 };
@@ -575,6 +580,51 @@ mod tests {
         }
     }
 
+    /// **A mesh with a creator ends with 1 holder, the lowest id, and never with none.** The first
+    /// claimant is the creator (policy `Eager`) and every later claimant is a joiner (policy
+    /// `Deferred`). A holder asks who serves the id only if the product says so for its policy
+    /// (`rival_recheck_applies`). The relay serves the newest claim, so the creator, the older
+    /// holder, is the only one that can read the joiner; a creator that never asks leaves 2 holders
+    /// for ever. The model holds the 2 for 2 and 3 holders and every order of claims and actions.
+    #[test]
+    fn a_mesh_with_a_creator_ends_with_one_holder() {
+        for count in 2..=3 {
+            let ids = ids_of(count);
+            let holders: Vec<usize> = (0..count).collect();
+            let limit = bound(Relay::NewestWins, count, false);
+            for initial in permutations(&holders) {
+                let creator = initial[0];
+                let silent: Vec<usize> = if rival_recheck_applies(CoHostPolicy::Eager, true) {
+                    Vec::new()
+                } else {
+                    vec![creator]
+                };
+                for apply_order in permutations(&holders) {
+                    let ended = periods_to_end(
+                        Relay::NewestWins,
+                        &initial,
+                        &apply_order,
+                        &ids,
+                        false,
+                        &silent,
+                    );
+                    let Some((periods, survivor, ever_empty)) = ended else {
+                        panic!(
+                            "{count} holders, creator {creator}, claims {initial:?}, actions {apply_order:?}: the contest did not end, the creator asks: {}",
+                            silent.is_empty()
+                        );
+                    };
+                    assert!(
+                        periods <= limit,
+                        "{count} holders, creator {creator}, claims {initial:?}: {periods} periods, over the bound of {limit}"
+                    );
+                    assert_eq!(survivor, 0, "the lowest id keeps the rendezvous");
+                    assert!(!ever_empty, "nobody held the rendezvous at some period");
+                }
+            }
+        }
+    }
+
     /// **The contest ends with 1 holder on every rule of the relay, in the bound of the note.**
     ///
     /// For 2, 3 and 4 holders, every order of the first claims, every order in which the actions of
@@ -602,8 +652,14 @@ mod tests {
                     let mut cases = 0;
                     for initial in permutations(&holders) {
                         for apply_order in permutations(&holders) {
-                            let ended =
-                                periods_to_end(relay, &initial, &apply_order, &ids, old_answers);
+                            let ended = periods_to_end(
+                                relay,
+                                &initial,
+                                &apply_order,
+                                &ids,
+                                old_answers,
+                                &[],
+                            );
                             let Some((periods, survivor, ever_empty)) = ended else {
                                 panic!(
                                     "{relay:?}, {count} holders, old answers {old_answers}, claims {initial:?}, actions {apply_order:?}: the contest did not end"

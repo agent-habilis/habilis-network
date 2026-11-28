@@ -482,7 +482,7 @@ fn regrafts_rendezvous(rendezvous_linked: bool, rendezvous_wanted: bool) -> bool
 /// repair is not this timer: a holder above the first rung asks, on every heal
 /// tick, whether a lower rung answers as our mesh, and yields on a positive
 /// answer only (`maybe_cohost`, `beacon::lower_rung_that_answers`).
-pub(super) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool {
+pub(crate) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool {
     matches!(policy, CoHostPolicy::EagerProbed | CoHostPolicy::Deferred) && public
 }
 /// Whether a member that does not hold the rendezvous may probe it in order to claim it. Not
@@ -2382,6 +2382,25 @@ mod tests {
             !claims_at_startup(CoHostPolicy::Never),
             "a never policy does not claim at startup"
         );
+    }
+
+    /// **The creator of a public mesh arms the ask of the holder.** A joiner that claims on a free
+    /// reading while the creator holds is the newer claim, so the relay serves the joiner, and only
+    /// the older holder, the creator, can read it. A creator that arms no ask never reads the
+    /// rival, and nothing repairs the pair.
+    #[test]
+    fn a_creator_arms_the_ask_of_the_holder() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let params = public_params();
+            let mut holder = Member::new(&params).await;
+            super::arm_holder_probe(&mut holder.state, CoHostPolicy::Eager, &params);
+            let armed = holder.state.next_holder_probe.is_some();
+            holder.endpoint.close().await;
+            assert!(
+                armed,
+                "the creator of a public mesh arms no ask of the holder, so it never reads a rival that claimed after it"
+            );
+        });
     }
 
     #[test]
