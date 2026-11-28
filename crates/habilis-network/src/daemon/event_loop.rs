@@ -1459,14 +1459,12 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state
             .probe_backoff
             .note_verdict(found_rival, Instant::now(), spread);
-        // One free verdict is not enough to claim: a live beacon's
-        // rival re-check periodically releases the rendezvous to
-        // re-probe it, and a probe landing inside that window reads
-        // "free" while a holder is about to re-bind. Claiming on it
-        // stands up a rival copy, and two copies shed each other
-        // longer than most joins are willing to wait. Two frees in a
-        // row (the next reclaim tick re-probes) squares those odds
-        // away; a genuinely dead beacon costs one extra probe round.
+        // One free verdict is not enough to claim: one probe can read
+        // "free" while a live holder is slow to answer (a lost datagram, a
+        // holder in the middle of a bind), and claiming on it stands up a
+        // second copy of the id. Two frees in a row (the next reclaim tick
+        // re-probes) cut those odds; a genuinely dead beacon costs one
+        // extra probe round. This reason is read, not measured.
         if !found_rival
             && !self
                 .state
@@ -1547,8 +1545,8 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     async fn beacon_closed(&mut self) {
-        // The beacon that the re-check shed is closed: the id is free of our own corpse, so
-        // the re-probe starts now. The reclaim tick below stays as the net.
+        // The beacon that was shed (a yield to a rival, or a rehome) is closed: the id is free of
+        // our own corpse, so the re-probe starts now. The reclaim tick below stays as the net.
         self.state.beacon_closing = None;
         self.state.idle.reclaim += 1;
         let context = self.parts.handler_ctx(&self.sender);

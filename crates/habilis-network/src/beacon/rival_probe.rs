@@ -44,9 +44,8 @@ pub(crate) enum ProbePurpose {
 #[derive(Debug)]
 #[must_use]
 pub(crate) struct RivalProbe {
-    /// The verdict: `true` ⇒ a beacon already answers, stay a peer.
-    /// A dropped sender (the task died) reads as `true` — see
-    /// [`probe_verdict`].
+    /// The answer of the probe. A dropped sender (the task died) reads as `Reached`: someone may be
+    /// there, so the member stays a peer (see [`answer_of`]).
     pub(crate) rx: oneshot::Receiver<WhoAnswer>,
     pub(crate) task: JoinHandle<()>,
     /// The throwaway prober endpoints, retained for the same reason `Rendezvous` retains its own:
@@ -155,7 +154,7 @@ fn answer_of(result: Result<WhoAnswer, oneshot::error::RecvError>) -> WhoAnswer 
 /// Start the probe-before-claim on its own task.
 ///
 /// The prober dials from a **throwaway endpoint**, not the member's `peer`:
-/// an ex-holder re-probing after a rival re-check shed carries stale
+/// an ex-holder re-probing after a yield to a rival carries stale
 /// per-id connection state for the shared `rendezvous_id` (the link to its
 /// own just-dropped beacon — the reused-endpoint-id pathology of
 /// iroh-gossip#10), and a dial from it joins that dead state and times out

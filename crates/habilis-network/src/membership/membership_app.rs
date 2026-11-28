@@ -740,7 +740,7 @@ pub enum Beacons {
         /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
-    /// Tests only: shed the beacon of this node at once, as a rival re-check shed does, and leave
+    /// Tests only: shed the beacon of this node at once, as a yield to a rival does, and leave
     /// the node to re-claim or to read the holder that is there. Nothing happens when it holds no
     /// beacon.
     ShedBeacon {

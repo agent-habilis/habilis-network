@@ -893,7 +893,7 @@ pub struct EventLoopState {
     pub(crate) ask_hurried_at: Option<Instant>,
     /// When the member last said that every rung of its ladder is held by another process.
     pub(crate) no_rung_noted_at: Option<Instant>,
-    /// The close of the beacon that a rival re-check just shed: when it resolves the loop
+    /// The close of the beacon that a yield or a rehome just shed: when it resolves the loop
     /// re-probes the id at once, instead of at the next reclaim tick. `None` when no shed runs.
     pub(crate) beacon_closing: Option<oneshot::Receiver<()>>,
     /// Recently-seen message ids, for duplicate suppression. Gossip

@@ -255,7 +255,7 @@ fn note_no_rung_free(state: &mut EventLoopState, context: &HandlerCtx<'_>, ports
 
 /// Offer to our new beacon at once, to the address that the claim just registered. The round of
 /// this member that was started while nobody held the rendezvous was ended by
-/// [`schedule_rival_recheck`].
+/// [`arm_holder_probe`].
 pub(super) fn offer_to_the_new_holder(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     webrtc::rendezvous::offer_rendezvous_off_tick(state, context);
 }
@@ -795,7 +795,7 @@ mod tests {
         );
     }
 
-    /// Public-mesh rendezvous parameters: the rival re-check applies to them.
+    /// Public-mesh rendezvous parameters: the ask of the holder applies to them.
     fn public_params() -> beacon::RendezvousParams {
         let secret = iroh::SecretKey::generate();
         beacon::RendezvousParams {

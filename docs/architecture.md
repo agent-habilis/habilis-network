@@ -343,7 +343,11 @@ A loopback mesh and the creator have no ask armed, so a sign changes nothing for
 The ask costs one throwaway endpoint for each heal interval (240 an hour), and it never rebinds the beacon.
 The old rule shed and rebound the beacon on a timer, and a rebind is the suspected road into a `recvmsg` spin.
 A permanently alone topic peer made about 138 rebinds an hour before the ramp existed, and about 8 an hour with the 300 s cap.
-Measured on a local relay, one run each: a lone holder over 1 hour used about 20 s of CPU, against about 17 s an hour for the old rule over 20 minutes, with no spin, and its file descriptors (37) and UDP sockets (12) stayed flat. 1300 asks, 1000 at low load and 300 at a load of up to 96, all read `Ours`, and the descriptors did not grow.
+Measured on a local relay: a lone topic peer ran for 1 hour (1 run) and used about 20.9 s of CPU, with no spin, 37 to 39 file descriptors and 12 to 14 UDP sockets.
+The number of asks in that run is not known: its log holds no beacon line, so none were counted. A topic peer arms an ask every 15 s by the code, so about 240 are expected.
+The old rule ran for 20 minutes (1 run) and used about 6.4 s of CPU (about 19 s an hour), with 37 file descriptors and 12 UDP sockets.
+The cost of the ask was measured apart, in 3 runs of a lone served holder (100, 300 and 1000 asks, the 300 at a load of up to 96): every ask read `Ours`, and the file descriptors went from 20 to 24 or 25 in each run, the same rise for 100 asks and for 1000.
+The UDP sockets were not counted in those 3 runs.
 A local relay has no loss and no fault, so the rate of `Unknown` on a real relay is not known from that data.
 A claim again binds a new endpoint with a new `WebRTC` handle, so a browser tab that negotiates with the old beacon loses the round.
 The tab offers again when its rendezvous link drops, and again on the next heal tick. A session that it still holds is detached on the second tick, so the loss is at most 2 heal intervals (30 s) and one round (read, not measured).
@@ -364,7 +368,7 @@ A scratch model with ticks of 1 s, which is not in the repository, read 30 ticks
 When the relay serves a claim 14, 16 or 20 ticks late, the scratch model reads up to 52, 61 and 65 ticks for 2 holders, and up to 82, 91 and 94 ticks for 3, and an old answer adds up to 2 to 4 ticks for 2 holders and 4 to 6 ticks for 3.
 On a relay that serves the newest claim, the lowest id wins in each case, and no case has nobody holding the rendezvous.
 On a relay that alternates between the newest and the oldest claim (`Flip`, not measured), some of these cases do not end.
-The ask timer starts when the bind returns (`arm_holder_probe` in `daemon/cohost_arm.rs`), and the relay serves the claim a moment later.
+The ask timer starts when the bind returns (`arm_holder_probe` in `daemon/cohost_arm.rs`), and the relay serves the claim later, by a delay that no host has measured.
 No log line marks that moment, so no host value of that delay exists.
 The 2 log lines `rendezvous read free twice: claiming` and `beacon assumed` of one node bound the local bind only.
 The log line of a holder probe has the fields `node`, `kind`, `cause`, `rival` and `action`, each one word, and `-` for a field that does not apply.
