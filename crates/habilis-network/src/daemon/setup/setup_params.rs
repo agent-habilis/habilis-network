@@ -9,6 +9,7 @@ use crate::daemon::CoHostPolicy;
 use std::sync::atomic;
 
 use crate::lookup;
+use crate::util::tuning;
 use std::{fmt, ops, sync};
 /// The per-session inputs to [`setup_mesh`](super::setup_mesh) that are independent of the
 /// [`SetupKind`](super::SetupKind): this member's identity/io/tuning and the localhost
@@ -31,8 +32,10 @@ pub struct SetupParams {
     /// This member's nickname, the author of every message it sends.
     pub author: Nickname,
     /// The cap on the direct connections of the node: gossip neighbors, `WebRTC` sessions and
-    /// unicast connections together. It is also the size of the gossip active view. `0` takes
-    /// [`tuning::MAX_CONNECTIONS`](crate::util::tuning::MAX_CONNECTIONS).
+    /// unicast connections together. It is also the size of the gossip active view. The default is
+    /// [`tuning::MAX_CONNECTIONS`]. A number below
+    /// [`tuning::MIN_MAX_CONNECTIONS`], `0` too, is a setup
+    /// error: nothing raises it.
     pub max_connections: usize,
     /// The consumer's per-user runtime base (see
     /// [`runtime_base`](crate::util::runtime_base)) — the root the socket, the
@@ -85,7 +88,7 @@ impl SetupParams {
     pub fn new<S: NodeSink + 'static>(author: Nickname, sink: S) -> Self {
         Self {
             author,
-            max_connections: 0,
+            max_connections: tuning::MAX_CONNECTIONS,
             runtime_base: None,
             state_file: None,
             // trait object: the loop and the setup share the sink through this Arc

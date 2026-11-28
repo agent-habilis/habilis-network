@@ -38,6 +38,9 @@ pub(crate) struct Inner {
     pub(crate) proven_sink: Option<mpsc::UnboundedSender<probe::DirectOutcome>>,
     /// Where the relay watch of a dialed gossip link reports to the event loop, set with the sink above.
     pub(crate) path_sink: Option<mpsc::UnboundedSender<probe::PathChange>>,
+    /// Where the close of a dialed gossip link by a peer that refuses it as relay-only is reported to
+    /// the event loop, set with the sinks above.
+    pub(crate) relay_refused_sink: Option<mpsc::UnboundedSender<probe::RelayRefused>>,
     /// The gossip transport of the endpoint, when the mesh has `gossip`. The table sees every
     /// connection, so it tells the handle which peers are established and which pairs a higher
     /// rung carries (see [`Inner::sync_gossip`]).
@@ -67,16 +70,43 @@ impl fmt::Debug for Inner {
 }
 
 impl Inner {
-    /// Give the path selector of the endpoint the pin of `peer` as the ledger holds it now.
-    pub(crate) fn sync_pin(&self, peer: EndpointId) {
+    /// Give the path selector of the endpoint the pin of `peer` as the ledger holds it now. `site`
+    /// names the caller, for the line that a change of the pin writes.
+    pub(crate) fn sync_pin(&self, peer: EndpointId, site: &'static str) {
         let Some(local) = self.local else {
             return;
         };
-        if self.ceiling.pinned(peer) {
+        // The selector keeps one selected path for each remote. A peer that holds a live direct
+        // connection that it opened to us has a direct path, so the selector must not hold the
+        // remote to multihop: the pin of the ledger stays and the selector pin goes.
+        let pinned = self.ceiling.pinned(peer) && !self.holds_inbound(peer);
+        if pinned != habilis_network_iroh_transport_util::is_pinned(local, peer) {
+            tracing::debug!(
+                target: transport::LOG_TARGET,
+                local = %local.fmt_short(),
+                peer = %peer.fmt_short(),
+                pinned,
+                site,
+                "the pin of a peer changed"
+            );
+        }
+        if pinned {
             habilis_network_iroh_transport_util::pin(local, peer);
         } else {
             habilis_network_iroh_transport_util::unpin(local, peer);
         }
+    }
+
+    /// Whether `peer` holds an open connection that it opened to us, of any protocol.
+    fn holds_inbound(&self, peer: EndpointId) -> bool {
+        self.slots.get(&peer).is_some_and(|slot| {
+            slot.conns
+                .iter()
+                .filter_map(WeakConnectionHandle::upgrade)
+                .any(|connection| {
+                    connection.close_reason().is_none() && !connection.side().is_client()
+                })
+        })
     }
 
     /// Release every pin of this table from the path selector.
@@ -161,7 +191,7 @@ impl Inner {
         };
         for peer in &evictions.evict {
             self.ceiling.unregister_quic(*peer);
-            self.sync_pin(*peer);
+            self.sync_pin(*peer, "eviction");
             self.ceiling.unregister_session(*peer);
             let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
             self.we_evicted.note(*peer, Instant::now(), spread);
@@ -198,7 +228,7 @@ impl Inner {
         });
         if !alive {
             self.ceiling.unregister_quic(peer);
-            self.sync_pin(peer);
+            self.sync_pin(peer, "connection gone");
         }
     }
 

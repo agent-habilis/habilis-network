@@ -21,7 +21,7 @@ use iroh::address_lookup;
 /// after its deadline, so a timer graft costs a whole hold for nothing. (It
 /// no longer wedges the link: the pinned iroh-gossip drops a peer whose
 /// connection died before the handshake and redials on the next send.)
-/// `has_session` is no defence either: the rival re-check rebuilds the
+/// `has_session` is no defence either: a holder that claims again rebuilds the
 /// rendezvous endpoint, leaving a session that is locally held but dead on
 /// the other end. The only safe
 /// trigger is the **attach event itself** — a JSEP round that just completed
@@ -108,9 +108,8 @@ pub(crate) fn negotiate_rendezvous_session(
         return;
     }
     let rendezvous = context.rendezvous_id;
-    // A held session with an *unlinked* rendezvous is stale: the beacon's
-    // rival re-check releases and re-claims the rendezvous on a fresh
-    // endpoint, whose session table starts empty, and this heal tick only
+    // A held session with an *unlinked* rendezvous is stale: a holder that
+    // claims the rendezvous again binds a fresh endpoint, whose session table starts empty, and this heal tick only
     // runs while the link is down. Without a detach, admission would refuse
     // every re-offer with `HaveSession` and the peer would stay wedged for
     // the life of the process.
@@ -195,8 +194,7 @@ pub(crate) fn offer_to_rendezvous(
 /// A rendezvous offer made off the heal tick: when the loop starts, and when
 /// the rendezvous link drops. The heal tick that otherwise makes it is a whole
 /// interval away, and until it runs a browser-shaped node has no path onto a
-/// lookup-only mesh; a beacon that re-checks inside that window finds nobody
-/// negotiating and sheds.
+/// lookup-only mesh.
 ///
 /// Only a node that already offers: one that needs the lane, or an IP-capable
 /// node whose fallback is armed. An IP-capable node's first call arms the

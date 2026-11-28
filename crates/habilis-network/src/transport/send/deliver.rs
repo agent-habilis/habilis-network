@@ -16,7 +16,7 @@ use crate::transport::{MeshSender, webrtc};
 
 use crate::util::clock;
 
-use crate::transport::{Delivered, Lane, SendError};
+use crate::transport::{Delivered, Lane, SendError, SendVerdict};
 
 use n0_future::task;
 /// Route one already-signed, already-serialized message. `bytes` MUST be
@@ -65,20 +65,32 @@ pub async fn deliver(
                 .map_err(SendError::internal)?;
             Ok(Delivered::Done)
         }
-        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, &state.unicast_pool, || {
-            probe::route_to(state, eid)
-        })
-        .await
-        .map_err(SendError::internal),
+        Resend::Unicast(eid, bytes) => {
+            announce_directed_send(state, eid);
+            send_unicast(eid, bytes, &state.unicast_pool, || {
+                probe::route_to(state, eid)
+            })
+            .await
+            .map_err(SendError::internal)
+        }
     }
+}
+
+/// Tells the loop that a directed send to `eid` starts, so that it proves the pair or asks for its
+/// lane session. The send holds only a shared reference to the state, and it neither waits for the
+/// loop nor fails when the loop is gone: a loop that stops has nobody left to ask. A message goes
+/// for each directed send, whatever the state of the pair: the loop decides, and a push on an
+/// unbounded channel costs less than the copy of that decision here.
+fn announce_directed_send(state: &EventLoopState, eid: EndpointId) {
+    let _ = state.send_started.send(eid);
 }
 
 /// The routing decision of [`deliver`], without the send: which plane carries
 /// `msg`, so that a caller that must not wait can queue it for another task.
 ///
 /// # Errors
-/// The same as [`deliver`] for a message that has no path now: held for a
-/// direct path, or its addressee has no known endpoint.
+/// The same as [`deliver`] for a message that has no path now: its addressee has no known
+/// endpoint.
 pub(crate) fn resolve(
     message: &Verified,
     bytes: WireFrame,
@@ -87,7 +99,6 @@ pub(crate) fn resolve(
     match super::route::route(message, state) {
         Route::Broadcast => Ok(Resend::Broadcast(bytes)),
         Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
-        Route::Held(eid) => Err(SendError::Held { eid }),
         Route::Undeliverable => Err(undeliverable(sole_addressee(&message.kind), state)),
     }
 }
@@ -115,14 +126,13 @@ fn undeliverable(addressee: Option<&AuthorKey>, state: &EventLoopState) -> SendE
 ///
 /// It checks, in this order, that the frame is one this node signed ([`SendError::ForeignFrame`]),
 /// that the frame is not directed to another key ([`SendError::OtherAddressee`]), and that `to` has
-/// an endpoint to go to, by the directed rules of [`deliver`] ([`SendError::Undeliverable`] or
-/// [`SendError::Held`]). The payload path check applies as it does for [`deliver`], and the send
-/// waits on nothing: a cold peer is dialed by a task, and the verdict comes through
-/// [`Delivered::Pending`].
+/// an endpoint to go to, by the directed rules of [`deliver`] ([`SendError::Undeliverable`]). The
+/// payload path check applies as it does for [`deliver`], and the send waits on nothing: a cold
+/// peer is dialed by a task, and the verdict comes through [`Delivered::Pending`].
 ///
-/// A frame held for a direct path comes back as [`SendError::Held`], and nothing asks for a lane
-/// session, as `send_app` does for a held frame. The caller retries the repair later, and a peer
-/// that has no IP path needs its session from another send.
+/// Like every directed send of this module, it tells the loop that a send starts: the loop proves
+/// the pair, or asks for the lane session of a peer with no IP path. That happens on the next turn
+/// of the loop, after the handler in progress ends. The send does not wait for it.
 ///
 /// # Errors
 /// One of the refusals above, a frame that does not serialize, or the failure of a send to a warm
@@ -148,6 +158,7 @@ pub async fn deliver_to(
     state: &EventLoopState,
 ) -> Result<Delivered, SendError> {
     let (eid, bytes) = resolve_to(to, message, state)?;
+    announce_directed_send(state, eid);
     send_unicast(eid, bytes, &state.unicast_pool, || {
         probe::route_to(state, eid)
     })
@@ -173,7 +184,6 @@ pub(crate) fn resolve_to(
     }
     let eid = match super::route::route_to_key(to, state) {
         Route::Unicast(eid) => eid,
-        Route::Held(eid) => return Err(SendError::Held { eid }),
         Route::Undeliverable | Route::Broadcast => return Err(undeliverable(Some(to), state)),
     };
     let bytes = message
@@ -225,16 +235,14 @@ pub async fn deliver_to_in_background(
 /// - the addressee has no known endpoint yet, or advertises the rendezvous
 ///   pseudo-node. The first can change once its `PeerInfo` arrives. The
 ///   second never does, so a retry budget must not rely on it.
-/// - it is held for a direct path: the peer is not proven direct and the
-///   relay carries no payload.
 /// - it is cold and on the per-peer dial-failure cooldown.
 /// - the gossip broadcast failed.
 ///
 /// A `false` send is not queued: the caller tries again later.
 ///
-/// Like [`deliver`], it cannot prove the addressee by its multihop route. Only the directed send of
-/// the engine does (`Messaging::Send` and `SendToKey`), so a send to an unwatched peer on a
-/// multihop route can be held for up to one sweep (10 s).
+/// Like every directed send of this module, it tells the loop that a send starts, and the loop
+/// proves the addressee by its multihop route or asks for its lane session. That happens on the
+/// next turn of the loop, after the handler in progress ends.
 ///
 /// `true` does not prove delivery: a background dial or write can still fail,
 /// and is only logged. A warm connection whose selected path reads relay gives
@@ -284,29 +292,12 @@ pub(crate) fn can_unicast(eid: EndpointId, state: &EventLoopState) -> bool {
     !super::route::unproven(eid, state) || state.unicast_arrival == Some(eid)
 }
 
-/// A frame held for a lane peer is the reason to open its session: the peer has no IP path, and
-/// a send could not dial it without one. So is a frame held for a pair that lost its direct path
-/// and reads as the relay. Call this when a send failed with [`SendError::Held`]; any other error,
-/// and a peer that has an IP path and no relay reading, change nothing.
-pub(crate) fn note_held(state: &mut EventLoopState, error: &SendError) {
-    let SendError::Held { eid } = error else {
-        return;
-    };
-    want_lane_if_needed(state, *eid);
-}
-
-/// The same reason as [`note_held`], for a frame that is not held: a directed frame to a peer
-/// whose direct path is not proven yet, on a mesh where the relay is lookup only. The send dials
-/// the peer and waits for a direct path. A peer that has no IP path, or that turns out relay-only,
-/// needs a lane session, so it is asked now and not on the next retry pass. Returns whether the
-/// frame is such a frame, and the peer is a candidate for the offer.
-pub(crate) fn note_unproven(state: &mut EventLoopState, message: &Verified) -> bool {
-    let Some(key) = sole_addressee(&message.kind) else {
-        return false;
-    };
-    let Some(eid) = super::route::directed_endpoint(key, state) else {
-        return false;
-    };
+/// A directed send to `eid` whose direct path is not proven yet, on a mesh where the relay is lookup
+/// only, asks for its lane session: the peer is marked wanted if it needs a lane or reads as the
+/// relay. It returns whether the send is such a send, and the peer is then a candidate for the
+/// offer. A pair that a probe stored as relay-only is asked for too: the stored state refuses
+/// nothing.
+pub(crate) fn ask_lane(state: &mut EventLoopState, eid: EndpointId) -> bool {
     if !super::route::unproven(eid, state) {
         return false;
     }
@@ -336,7 +327,7 @@ pub(crate) fn lane_for(key: &AuthorKey, state: &EventLoopState) -> Lane {
     let Some(eid) = super::route::directed_endpoint(key, state) else {
         return Lane::Unreachable;
     };
-    if super::route::held(eid, state) {
+    if super::route::relay_only(eid, state) {
         return Lane::RelayOnly;
     }
     if directly_meshed(key, state) {
@@ -358,10 +349,11 @@ fn directly_meshed(key: &AuthorKey, state: &EventLoopState) -> bool {
 /// and resends once in the background). A cold peer, and a warm peer whose connection reads relay,
 /// are served on a task of its own, so that the caller never waits on the dial, the path wait or
 /// the write. A connection that reads relay can be a young one whose direct path is still
-/// forming, so the task waits for the path like the dial of a cold peer and shares that wait with
-/// the sends that follow. The error of the dial or of the wait is the send's outcome, through the
-/// handle — there is no fallback. A cold peer on the dial-failure cooldown is refused at once. A
-/// warm connection needs no dial, so the cooldown does not apply to it.
+/// forming, so the task waits for the path like the dial of a cold peer. Each send waits for the
+/// path on its own, so that each gets its own verdict. The error of the dial or of the wait is the
+/// send's outcome, through the handle — there is no fallback. A cold peer on the dial-failure
+/// cooldown is refused at once. A warm connection needs no dial, so the cooldown does not apply
+/// to it.
 ///
 /// `route` gives the multihop route to the peer, and the send reads it only when it dials: at the
 /// ceiling of direct connections, a dial that has a route rides multihop and evicts nobody (see
@@ -374,9 +366,9 @@ pub(super) async fn send_unicast(
 ) -> Result<Delivered> {
     let warm = pool.send_if_warm(eid, bytes.clone().into_bytes()).await;
     match warm {
-        WarmSend::Sent => Ok(Delivered::Done),
+        WarmSend::Sent(outcome) => Ok(Delivered::Pending(outcome)),
         WarmSend::Cold | WarmSend::Refused => {
-            if warm == WarmSend::Cold && pool.is_cooling(eid).await {
+            if matches!(warm, WarmSend::Cold) && pool.is_cooling(eid).await {
                 return Err(anyhow::anyhow!("{COOLDOWN_REFUSED}")
                     .context(format!("unicast dial to {eid} failed")));
             }
@@ -390,8 +382,8 @@ pub(super) async fn send_unicast(
                     .send_registered(registration, eid, bytes.into_bytes())
                     .await
                     .with_context(|| format!("unicast dial to {eid} failed"));
-                if let Err(Err(error)) = outcome_tx.send(sent) {
-                    tracing::debug!(target: "habilis_network::gossip", %eid, %error, "background send not delivered");
+                if let Err(verdict) = outcome_tx.send(SendVerdict::of(sent)) {
+                    tracing::debug!(target: "habilis_network::gossip", %eid, %verdict, "background send not delivered");
                 }
             });
             Ok(Delivered::Pending(outcome))
@@ -441,7 +433,7 @@ async fn send_courtesy(
         .send_if_warm(eid, bytes.clone().into_bytes())
         .await
     {
-        WarmSend::Sent => true,
+        WarmSend::Sent(_) => true,
         WarmSend::Cold if dial_back || state.linked_endpoints.contains(&eid) => {
             state
                 .unicast_pool

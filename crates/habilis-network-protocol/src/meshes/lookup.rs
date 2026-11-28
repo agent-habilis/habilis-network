@@ -67,7 +67,9 @@ pub enum RelayChoice {
 pub struct LookupOpts {
     /// Whether peers are found on the local network.
     pub mdns: bool,
-    /// Whether peers are found on the mainline DHT.
+    /// Whether peers are found on the mainline DHT. Only the beacon publishes the rendezvous there.
+    /// With no relay lookup next to it, the record holds every address of the beacon, its private LAN
+    /// addresses too, so they are public in the DHT.
     pub dht: bool,
     /// How the relay is used to find peers.
     pub relay_lookup: RelayChoice,

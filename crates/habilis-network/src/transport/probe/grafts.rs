@@ -67,6 +67,13 @@ pub(crate) fn ensure_direct(
     // At its ceiling the node probes nobody: a probe evicts nobody, and a verdict that it did not
     // run is none. The alive tick asks again when a unit is free.
     if !state.unicast_pool.has_room_for_unprompted_dial(peer) {
+        tracing::debug!(
+            target: transport::LOG_TARGET,
+            local = %context.endpoint.id().fmt_short(),
+            %peer,
+            holders = %state.unicast_pool.unit_holders(),
+            "no probe at the ceiling"
+        );
         return false;
     }
     state.direct.insert(peer, DirectState::Pending);
@@ -126,7 +133,7 @@ pub(crate) async fn request_graft(
         tracing::debug!(target: transport::LOG_TARGET, %peer, "graft skipped: the pair rides the gossip rung");
         return Ok(());
     }
-    match graft_request(
+    let request = graft_request(
         state,
         GraftTarget {
             peer,
@@ -135,7 +142,16 @@ pub(crate) async fn request_graft(
         context.max_connections,
         Instant::now(),
         paced,
-    ) {
+    );
+    tracing::debug!(
+        target: transport::LOG_TARGET,
+        local = %context.endpoint.id().fmt_short(),
+        %peer,
+        ?request,
+        paced,
+        "graft request"
+    );
+    match request {
         GraftRequest::Join => context.sender.join_peers(vec![peer]).await,
         GraftRequest::Neighbor => context.sender.neighbor_peers(vec![peer]).await,
         GraftRequest::Skip => Ok(()),
@@ -198,6 +214,14 @@ pub(crate) async fn retry_direct(
     }
     // The lane offers are paced: a browser pays an ICE gathering budget per round. The members
     // left out are not touched, so that no `Pending` mark hides them from the next pass.
+    if state.linked_endpoints.is_empty() {
+        tracing::debug!(
+            target: transport::LOG_TARGET,
+            local = %context.endpoint.id().fmt_short(),
+            members = %regraft::candidate_reasons(state, context.rendezvous_id, now),
+            "retry with no link"
+        );
+    }
     let (lane, rest): (Vec<_>, Vec<_>) = regraft::retry_candidates(
         state,
         context.rendezvous_id,

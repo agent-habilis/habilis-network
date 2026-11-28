@@ -18,6 +18,7 @@ use habilis_network::membership::{
     self, Blocking, Inbound, Inspect, InspectHost, InspectTest, Membership, Messaging, Request,
     Routing, Rung,
 };
+use habilis_network::net::Bind;
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -64,7 +65,8 @@ impl Member {
     }
 
     async fn create_with(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .lookup(vec![Lookup::Relay]);
         let options = options
@@ -77,6 +79,7 @@ impl Member {
         let mesh = creator.membership.node.mesh_id().to_string();
         Self::open(
             &membership::JoinOptions::default()
+                .bind(Bind::Loopback)
                 .nick(Some(nick.to_owned()))
                 .mesh(Some(mesh)),
         )

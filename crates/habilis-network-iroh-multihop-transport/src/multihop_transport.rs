@@ -6,7 +6,7 @@
 //! - [`MultihopEndpoint`] ([`CustomEndpoint`]) surfaces terminally-delivered
 //!   packets to iroh via `poll_recv` and publishes our own dialable address.
 //! - [`MultihopSender`] ([`CustomSender`]) packs each outbound QUIC packet into a
-//!   cell and hands it to the [`Forwarder`] for its first hop.
+//!   cell for the destination that its address names, and hands it to the [`Forwarder`], which picks the next hop.
 
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -18,8 +18,7 @@ use iroh::endpoint::transports::{
 use iroh_base::CustomAddr;
 use tokio::sync::mpsc;
 
-use crate::cell::Cell;
-use crate::route::{Route, RouteHop};
+use crate::destination::Destination;
 use crate::underlay::{Delivered, Forwarder};
 
 /// State shared by the transport, its endpoint, and its senders.
@@ -27,7 +26,6 @@ use crate::underlay::{Delivered, Forwarder};
 pub(crate) struct Shared {
     /// Our own hop — app-layer id plus underlay dial address — stamped as the
     /// `source` of every cell we originate so destinations can reply.
-    pub(crate) self_hop: RouteHop,
     /// Our advertised address: a one-hop route straight to us. A direct
     /// underlay neighbour can dial it as-is; longer routes are computed by the
     /// initiator's address lookup.
@@ -48,11 +46,6 @@ pub(crate) struct MultihopTransport {
 
 impl MultihopTransport {
     /// The hop that this transport stamps as the source of the cells it originates.
-    #[cfg(test)]
-    pub(crate) fn self_hop(&self) -> RouteHop {
-        self.shared.self_hop
-    }
-
     // the transport and its handle share this state
     pub(crate) fn new(shared: Arc<Shared>, inbound: mpsc::Receiver<Delivered>) -> Self {
         Self {
@@ -161,9 +154,14 @@ impl CustomSender for MultihopSender {
     /// Decoding, not just tagging: a route iroh cannot actually be sent along is
     /// a path it should never select in the first place.
     fn is_valid_send_addr(&self, address: &CustomAddr) -> bool {
-        Route::decode(address).is_some()
+        Destination::decode(address).is_some()
     }
 
+    /// An error from this method is harmless for the path. iroh logs it at debug level ("dropped transmit", in
+    /// `socket/transports.rs` of the pinned fork, in `poll_send` of `Transport`), answers `Ok` to QUIC, and QUIC then
+    /// treats the packet as lost and sends it again. iroh does not close the path, does not mark the transport as
+    /// broken, and does not log once for each packet above debug level. So this method answers an error when the
+    /// node has no next hop for the destination now, which is normal for a moment after a link came or went.
     fn poll_send(
         &self,
         _cx: &mut Context<'_>,
@@ -171,36 +169,20 @@ impl CustomSender for MultihopSender {
         _src: Option<&CustomAddr>,
         transmit: &Transmit<'_>,
     ) -> Poll<io::Result<()>> {
-        let Some(route) = Route::decode(dst) else {
+        let Some(destination) = Destination::decode(dst) else {
             return Poll::Ready(Err(io::Error::other("undecodable multihop address")));
-        };
-        if revisits_us(&route, &self.shared.self_hop) {
-            // We would be the first node to execute the loop.
-            return Poll::Ready(Err(io::Error::other("multihop route revisits this node")));
-        }
-        let Some(first) = route.hops().first().copied() else {
-            return Poll::Ready(Err(io::Error::other("empty multihop route")));
         };
         // A GSO batch is several datagrams concatenated; each is an independent
         // QUIC packet and rides its own cell.
         for chunk in habilis_network_iroh_transport_util::datagrams(transmit) {
-            let cell = Cell {
-                path: route.clone(),
-                position: 0,
-                source: self.shared.self_hop,
-                packet: chunk.to_vec(),
-            };
-            self.shared.forwarder.enqueue(&first, cell);
+            let sent = self
+                .shared
+                .forwarder
+                .originate(destination.app_id(), chunk.to_vec());
+            if let Err(refused) = sent {
+                return Poll::Ready(Err(io::Error::other(refused.reason())));
+            }
         }
         Poll::Ready(Ok(()))
     }
-}
-
-/// Whether `route` runs back through `me`. A route is loop-free by construction,
-/// but nothing stops a *peer* advertising one that happens to include us.
-fn revisits_us(route: &Route, me: &RouteHop) -> bool {
-    route
-        .hops()
-        .iter()
-        .any(|hop| hop.underlay_id == me.underlay_id || hop.app_id == me.app_id)
 }

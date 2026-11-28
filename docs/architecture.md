@@ -121,7 +121,7 @@ The engine depends on `habilis-network-iroh-webrtc-transport` on both targets: t
 | `habilis-network-wasm` | The browser peer: `habilis_network::membership` and `habilis-network-stream` as wasm-bindgen classes. Runs only on wasm32. |
 | `habilis-network-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `habilis-network-blobs`. The engine keeps the chunked values of the shared state in it (section 8.3). |
 | `habilis-network-iroh-webrtc-transport` | An iroh custom transport: QUIC datagrams over a WebRTC data channel. |
-| `habilis-network-iroh-multihop-transport` | An iroh custom transport: source-routed relaying through peers. |
+| `habilis-network-iroh-multihop-transport` | An iroh custom transport: hop-by-hop relaying through peers. |
 
 The measurement that drove the split was a consumer binary where the engine cost 39.4 MiB of 40.7 MiB.
 
@@ -319,14 +319,64 @@ The split keeps bootstrap alive after the creator leaves: any member can take th
 | Co-hosts | Every member, permanently | One beacon: the holder of the lowest live rung |
 
 Two members can claim the beacon role inside each other's probe window.
-A periodic re-arbitration sheds the rival copy, so the single-beacon invariant holds eventually, not at claim time.
-A public holder that knows no member waits on the alone tier of the re-check (`RIVAL_RECHECK_ALONE`, 3600 s, plus up to the same again as jitter).
-A sign of a second group brings the next re-check back to the first-round delay and starts the rounds again from it.
-The first round waits `RIVAL_RECHECK_FIRST` (12 s) plus an offset of up to `RIVAL_RECHECK_OFFSET_SPAN` (8 s) from the endpoint id.
+A holder of a public rendezvous keeps its beacon and asks, every heal interval (15 s), which member serves the id on the rung of its own beacon.
+The beacon answers on its own ALPN, `habilis-mesh/beacon-who/1`, with the endpoint id of the member that serves it.
+The answer is `Ours`, `Rival(id)`, `Reached` or `Unknown`.
+`Reached` means that a connection came up and no valid frame followed.
+`Unknown` means that nothing was reached.
+A holder acts on `Rival`, and on three answers of `Reached` or `Unknown` in a row.
+It acts on no other answer.
+A rival with a lower id keeps the rendezvous, so the holder yields.
+A rival with a higher id loses it, so the holder claims again: it binds a new beacon, and then closes the old one.
+After two claims against the same rival, the holder yields to it, so a relay that keeps the older claim cannot hold two groups apart for ever.
+Three answers of `Reached` or `Unknown` in a row also make it claim again.
+Two answers of `Ours` in a row end a contest.
+The model in `beacon/holder_contest.rs` ends a contest of k holders within k + 2 asks, on each rule that a relay can use to pick the claim that it serves.
+A flag from a proven holder with a lower id brings the next ask to now.
+A sign of a second group brings the next ask to now too.
 Two things are a sign: a member that links to the beacon and that the holder does not know, and a LAN member that the holder is not linked to.
-A sign counts once per `RIVAL_RECHECK_MESHED` (300 s), so a burst of arrivals does not shed the beacon again and again.
-A node that nobody approaches keeps the long wait.
-A loopback mesh and the creator have no re-check armed, so a sign changes nothing for them.
+Flags and signs share one limit: the ask moves once per heal interval, so a burst of arrivals does not ask again and again.
+A flag never makes a holder yield by itself: the answer of the ask decides.
+A holder on another rung than the rival reads `Ours` and stays.
+The ladder rule above then brings the higher rung down, and the two holders meet on one rung.
+A loopback mesh has no ask armed, so a sign changes nothing for it. The creator of a public mesh asks like every other holder: it is the oldest holder, so it is the one that can read a joiner that claimed after it. A creator that yielded probes before its next claim, as any claimant does.
+The ask costs one throwaway endpoint for each heal interval (240 an hour), and it never rebinds the beacon.
+The old rule shed and rebound the beacon on a timer, and a rebind is the suspected road into a `recvmsg` spin.
+A permanently alone topic peer made about 138 rebinds an hour before the ramp existed, and about 8 an hour with the 300 s cap.
+Measured on a local relay: a lone topic peer ran for 1 hour (1 run) and used about 20.9 s of CPU, with no spin, 37 to 39 file descriptors and 12 to 14 UDP sockets.
+The number of asks in that run is not known: its log holds no beacon line, so none were counted. A topic peer arms an ask every 15 s by the code, so about 240 are expected.
+The old rule ran for 20 minutes (1 run) and used about 6.4 s of CPU (about 19 s an hour), with 37 file descriptors and 12 UDP sockets.
+The cost of the ask was measured apart, in 3 runs of a lone served holder (100, 300 and 1000 asks, the 300 at a load of up to 96): every ask read `Ours`, and the file descriptors went from 20 to 24 or 25 in each run, the same rise for 100 asks and for 1000.
+The UDP sockets were not counted in those 3 runs.
+A local relay has no loss and no fault, so the rate of `Unknown` on a real relay is not known from that data.
+A claim again binds a new endpoint with a new `WebRTC` handle, so a browser tab that negotiates with the old beacon loses the round.
+The tab offers again when its rendezvous link drops, and again on the next heal tick. A session that it still holds is detached on the second tick, so the loss is at most 2 heal intervals (30 s) and one round (read, not measured).
+A joiner that claims on an old free reading holds a newer claim than the members that claimed before it.
+The relay serves the newer claim, so only an older holder can read it, and it reads it at its next ask.
+Let P be the heal interval (15 s).
+An older holder asks at most P after the relay serves the claim, and the action of its answer applies at most `HEAL_PROBE` (5 s) later.
+The model in `beacon/holder_contest.rs` counts periods of P.
+The period model takes it that the relay serves a claim in the period of the claim.
+Under that condition, for 2 holders it ends the contest within 4 periods (60 s), on each relay rule that it tries.
+If the relay serves a claim 16 ticks or more after the bind, the 4 periods do not hold.
+A holder can act on the answer of the period before: a probe has a budget, and a claim takes time.
+Then all holders can yield, each on an answer that the yield of the other has made old.
+Nobody holds the rendezvous for 2 periods (30 s, `RECLAIM_PERIODS` in the model), and the first member that claims holds it, so it is not always the holder with the lowest id.
+The bound is then 7 periods (105 s) for 2 holders.
+These bounds are read from the model. No host has measured them.
+A scratch model with ticks of 1 s, which is not in the repository, read 30 ticks for 2 holders that claim together, and 33 ticks when the relay serves a claim 4 ticks late and the 2 claims are 3 ticks apart.
+When the relay serves a claim 14, 16 or 20 ticks late, the scratch model reads up to 52, 61 and 65 ticks for 2 holders, and up to 82, 91 and 94 ticks for 3, and an old answer adds up to 2 to 4 ticks for 2 holders and 4 to 6 ticks for 3.
+On a relay that serves the newest claim, the lowest id wins in each case, and no case has nobody holding the rendezvous.
+On a relay that alternates between the newest and the oldest claim (`Flip`, not measured), some of these cases do not end.
+The ask timer starts when the bind returns (`arm_holder_probe` in `daemon/cohost_arm.rs`), and the relay serves the claim later, by a delay that no host has measured.
+No log line marks that moment, so no host value of that delay exists.
+The 2 log lines `rendezvous read free twice: claiming` and `beacon assumed` of one node bound the local bind only.
+The log line of a holder probe has the fields `node`, `kind`, `cause`, `rival` and `action`, each one word, and `-` for a field that does not apply.
+The INFO line has a `kind` of `rival`, `reached` or `unknown`.
+An answer of `ours` writes the DEBUG line `holder probe: ours` and no other.
+The 14 words of `cause` are `dial_or_alpn_refused`, `no_connection`, `no_frame`, `frame_not_32_bytes`, `frame_not_an_id`, `no_stream`, `frame_not_read`, `prober_not_bound`, `probe_task_ended`, `cancelled`, `no_busy_rung`, `rung_answered_as_id`, `no_rung_answered` and `nothing_to_dial`.
+A claim writes `rendezvous read free twice: claiming` at its start. It ends with `beacon assumed`, or with `rendezvous claim ended with no beacon` and a `cause` of `slot_taken` or `no_bind`.
+A test pins each word and each line as written, because the soak counters and the analysers parse them.
 On a LAN, a member that sees a member of its mesh asks it to be a neighbor, at most 8 times a minute (`MAX_LAN_GRAFTS_PER_MINUTE` in `gossip/lan.rs`).
 The mDNS record does not change again, so no event comes for a request that was refused or lost.
 A member that was asked and is still not a neighbor is asked again from the heal tick: after `RETRY_FIRST` (60 s), then every `RETRY_STEADY` (300 s).
@@ -373,7 +423,7 @@ A holder checks the ladder at every heal tick:
 - A holder asks whether its own rung still answers as `Ours`. It sheds its beacon on the second consecutive reading that is not `Ours`, never on the first, and then claims again. The check does not see a beacon whose endpoint answers while its gossip is wedged.
 - The holder of rung 0 is never asked to yield: the lowest live rung wins.
 
-A loopback mesh has no timed rival re-check. The two checks above are its repair of a second beacon, which can stand up when a host is too loaded to answer.
+A loopback mesh has no periodic ask. The two checks above are its repair of a second beacon, which can stand up when a host is too loaded to answer.
 
 ## 6. The engine at run time
 
@@ -499,7 +549,7 @@ flowchart LR
     M["outbound message"] --> D{"sole addressee?"}
     D -->|no| B["Broadcast: iroh-gossip"]
     D -->|yes| K{"endpoint known?"}
-    K -->|yes| UC["Unicast: QUIC stream on habilis-mesh/unicast/1"]
+    K -->|yes| UC["Unicast: QUIC stream on habilis-mesh/unicast/2"]
     K -->|no| UN["Undeliverable"]
 ```
 
@@ -592,9 +642,9 @@ Large groups repair through a directed shard-repair request that a sender-side c
 
 A node holds two keys.
 The session key is new at each start. It signs the frames, it names the slice of its node, and it seals the directed frames.
-The member key is stored in `<state>.key` (mode 0600) and does not change. It signs one thing: the proof of a session.
+The seed of the member key is stored in `<state>.key` (mode 0600) and does not change. The member key of a mesh is derived from the seed and the mesh id, so one state path shows another member key on each mesh, and no two meshes are linked by the key. It signs one thing: the proof of a session.
 The proof is a signature over the session key, the nickname, the mesh and the run number. The run number rises by 1 at each start (`<state>.run`).
-A lock file `<state>.key.lock` is an OS lock that the node holds for its whole life. A second start on the same state path fails and names the file. A start that finds a holder that is stopping waits up to 2 s for it. A node that leaves removes its key and run files with its state file. The run counter has its own lock file, `<state>.run.lock`, which a start holds for one read and one write of the counter. A start that finds it held tries again every 50 ms. The wait ends with an error when the counter file has not been written for 2 s, and in any case after 30 s. The write is read from the modification time of the counter file, with no link followed, so a file system with a coarse clock (FAT keeps 2 s) shows a write late, which the cap of 30 s bounds.
+A lock file `<state>.key.lock` is an OS lock that the node holds for its whole life. A second start on the same state path fails and names the file. A start that finds a holder that is stopping waits up to 2 s for it. A node that leaves removes its state file. It keeps the key file and the run file when the run has an owner (`--owner-pid`) or a state file that the caller named; a run with neither removes them with the state file. The run counter has its own lock file, `<state>.run.lock`, which a start holds for one read and one write of the counter. A start that finds it held tries again every 50 ms. The wait ends with an error when the counter file has not been written for 2 s, and in any case after 30 s. The write is read from the modification time of the counter file, with no link followed, so a file system with a coarse clock (FAT keeps 2 s) shows a write late, which the cap of 30 s bounds.
 The state folder must be private to the user. If another user owns it (root excepted), or if its group or other users can write it and it has no sticky bit (as `/tmp` has), the start fails and names the folder, because another user could remove the key file, the run file or the lock while they are held. A folder that only the group can write is refused too, because a trusted group cannot be known: a folder at mode 0775 needs `chmod g-w`. The folders above the state folder are not checked. The state folder is checked by its path, and the files in it are opened by their path, so a folder above it that others can write without the sticky bit can swap the checked folder between the check and the open. This is a known limit: the fix would open the files relative to a handle of the folder that is opened with no link followed.
 The `joined` frame carries the proof.
 A node that holds a session with no proof asks the session for it with a `ProofRequest`, addressed to the session key, and the session answers with its `joined` frame.
@@ -605,6 +655,14 @@ The ask goes when a path comes up: when the gossip link to the endpoint of the s
 A session is asked once for each wait (30 s, then 60 s, then 120 s, then every 10 minutes for as long as the session is visible and has no proof), whatever number of frames come. A node sends at most 8 proof requests to one endpoint for each 10 s window, and the count is made before the request is signed: a peer that makes fresh session keys cannot set off a signature and a task for each key. In all, the requests after the first of an endpoint stop when 64 requests were sent in the window. The first request to an endpoint in a window is exempt from that limit, so one peer that uses all of the 64 cannot starve the other endpoints; the first requests have a limit of their own, 256 for each window. So a window holds at most 256 first requests plus the requests after them up to the 64, whatever the number of endpoints that have a path to the node (a link, a warm connection, or the endpoint that just sent a unicast frame). A session that claims OUR nickname (another member with its own key) is asked for its proof too, on any frame that it sends (a claimant that is chatty sends no `alive`, so its `PeerInfo` and its app frames count), by the same path and under the same budgets (its requests count in the 4 open asks for a nickname and in the reserve below): its answer is the frame that tells this node that another member holds the nickname, and the start `joined` of the claimant, which a node that is not yet its neighbor misses, is sent only once. The requests for a session that claims a bound nickname (a restart of the member that holds the name, or an intruder) have a reserve of their own: 64 for each window, outside the shared 256 and the 64, and at most 4 for each nickname, while the endpoint is under its 8 requests; so they go even when an attacker has used the shared budgets and filled the table. When the table holds only live counts, such a request goes out untracked (it counts in the reserve and in the work in all), and no live count is dropped for it. The limit of the reserve: an attacker that claims 16 bound nicknames with 4 fresh sessions each uses the whole reserve in a window, and the restart of another bound nickname waits for the next window (its request comes again then; no nickname is lost). The limit of the shared budget: an attacker that keeps more than 256 endpoints with a path asking in every window delays the requests for new members under free nicknames, which wait in the map below; it costs the attacker a connection for each endpoint. The count of an endpoint is kept for its whole window: the table holds 256 endpoints, drops only a count that is outside its window, and a request from an endpoint that the full table does not track waits in the map below. An ask over the budget waits in the same map as the asks that wait for a path, and goes when the window has moved.
 A member signs its answer once for each run, and every asker gets that same frame. The member holds that frame once, so the answers of a join wave do not spread through the mesh as new frames.
 A calm mesh carries no proof bytes beyond the `joined` frames. A host with no files (the browser) holds no member key and sends no proof.
+
+A stable member is the same node that starts again on the same state path: a leave and a join on that path keep the seed and the run counter, so the member key of a mesh is the same, one run later.
+A run that has an owner binds the key file to the start time of the owner process (`set_owner_pid`): another process that names the same state file, such as a later process with a reused pid, starts as a new member. A state file that the caller named, with no owner, is reused as it is: the engine cannot tell a path that a person chose from a path that a tool built, so a tool that names its state file by a pid must give the engine the process that the file belongs to.
+A member is stable for as long as its files live: the default runtime base is under `/tmp`, so a reboot, or a sweep of `/tmp`, ends it. The seed stays readable by every process of the same user for as long as the file lives, and a copy of it lets a process sign a higher run and end the session of the real node. The key links the runs of a node: the key of a mesh is derived per mesh, so two meshes are not linked by it, and a caller that wants two runs not to be linked uses two state paths.
+One runtime base holds one live daemon for each mesh and nickname. The chunk folder, the control socket and the tracing log are named by the mesh and the nickname alone, so a start takes the lock `<runtime base>/locks/<mesh folder>-<nickname>.lock` before it creates any file, and a second start of the same pair is refused at once with the pid of the holder, whatever state file it names. A start that comes right after a leave meets no holder, because the leave waits for the daemon to end (`wait_daemon_lock`). The key lock of a state file refuses at once too.
+The locks folder is a registry of the daemons. It has mode 700 and nothing removes its files: it stays until the runtime base goes (a reboot, or a sweep of `/tmp`), one small file for each mesh and nickname that was used. The daemon writes one line of JSON into its lock file after it took the lock: `{"pid":N,"start":N,"mesh":"<mesh id>","nickname":"<nickname>","state_file":"<absolute path>"}`. `start` is the start of the process (`ProcessStart`), and `state_file` is the real state file, or the default path of the pair when the run has none. `habilis_network::runtime` gives `registry` (the lock files), `read_record` and `DaemonRecord::state` (Live, Gone or Unknown, from the pid and the start, with no lock), and `wait_daemon_lock` (blocks until the daemon of a lock file ends). The record is a hint, and a reader takes no lock. A clean stop removes the socket and the chunk folder of the daemon. After a crash the next start of the same pair cleans its member: it unlinks the stale socket, clears the chunk folder, and writes its state file again; a restart with another state file leaves the old state file where it was.
+A roster row shows the member key as `member`, and the snapshot shows our own as `own_member`. A row shows a member key only when a proof that the node verified for exactly that session, and for the nickname of the row, is held as active. A pending proof, a proof for another nickname, and no proof show `null`. `null` means that no proof was verified, and it never shows a key that a peer wrote in a card or in the meta document.
+What the binding covers: a nickname is protected only while a session of its holder is in the roster. After the holder leaves, the name is free again for any member, so a reader that must keep the name for one member pins the member key for each nickname: the pinned key then refuses another member under that name, also after a leave.
 
 A nickname is bound to the member key that proved it, while a session of that member is in the roster, live or quiet.
 - A session that claims a bound nickname with no proof of that member is not admitted. Its presence, ping, pong and link-state frames are dropped. Its data frames are stored and relayed and change no roster entry.
@@ -746,6 +804,9 @@ An id of version 1, minted before the policy had its own byte, is refused with a
 
 Every create surface names three mesh-wide choices apart, because they are three concepts.
 `lookup` (`--lookup mdns,dht,relay` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
+Only the beacon publishes the rendezvous to the DHT, under its own key, and a peer never publishes.
+With a relay lookup the record holds the relay URL and no IP address.
+A mesh with no relay lookup (`dht` alone, or `dht` with `mdns`) has no relay URL, so the beacon publishes its addresses, with no filter: **a DHT-only gossip puts every address of the beacon in the public DHT**, its private LAN addresses too, under a key that only the holders of the mesh id can compute.
 `transport` (`--transport udp,webrtc,multihop,gossip,relay`, `transport: ['udp', 'webrtc', 'multihop', 'gossip', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, `multihop` and `gossip` need one of the two next to them, and `udp,webrtc,multihop,relay` is the default (gossip is off, and `relay` is dropped from the default when there is no relay lookup).
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
 `habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
@@ -807,8 +868,10 @@ Without the custom selector, the connection settles on the relay for its whole l
 
 `habilis-network-iroh-multihop-transport` reaches peers through relaying peers when no direct path exists.
 Each node broadcasts a link vector, and every node folds the freshest vectors into one metric-weighted graph.
-Route computation is a local Dijkstra run.
-A route is a **source route**: the sender packs the full hop list into the address.
+The next hop of a cell is computed by each node from its own table: one Dijkstra from the destination over the reversed links gives the distance of each neighbor, and the cost of a neighbor is its link plus its distance.
+The gate of the node puts each neighbor in one of three states. A neighbor that admits cells is taken before a neighbor that waits for a direct path, whatever the cost. A neighbor that waited for the whole deadline (`relay_stuck_after`, 20 s) is stuck: it is no candidate and it leaves the link vector. An equal cost goes to the lowest app id, and a cell never goes back to the hop that it came from.
+The cells for a neighbor in wait stay in the bounded queue of its writer and go out when a direct path is selected. At the deadline they are dropped and counted. A queue that is full drops the cell and counts it, with a debug line.
+The address of a peer is its application id and nothing more: no route is stored in iroh, so none can go stale.
 
 Every node advertises one cost for the links that leave it, `HandleConfig::link_cost`: 10 for a native node.
 A browser advertises ten times more (`HandleConfig::for_browser`, 100), so a route avoids a browser as a hop.
@@ -822,21 +885,26 @@ With measured costs that differ, the guard becomes a relation on the measured fl
 
 ```mermaid
 flowchart LR
-    A["A (source)"] -->|"cell: path=[B,C], pos=0"| B["B (relay)"]
-    B -->|"cell: pos=1"| C["C (destination)"]
-    C -->|"reverse route"| B
+    A["A (source)"] -->|"cell: dst=C, src=A, hops_left=8"| B["B (relay)"]
+    B -->|"cell: hops_left=7"| C["C (destination)"]
+    C -->|"cell: dst=A, src=C"| B
     B --> A
 ```
 
-The unit of forwarding is a cell: a length prefix and a postcard body with the path, the position, and the packet.
-The only decision a relay makes is "forward to the next hop" or "deliver".
+The unit of forwarding is a cell: a length prefix and a postcard body with the destination, the source, the forwards left, and the packet.
+A node that holds a cell delivers it if it is for the node, drops it if no forward is left, and else sends it to the next hop that its own table gives.
+A cell is dropped, and counted, when no neighbor reaches the destination (`no_next_hop`), when the best neighbor is the hop it came from (`turned_back`), or when it has no forward left or claims more than the limit of 8 (`hop_limit`).
+The source of a cell is a claim, and QUIC protects the connection: a forged source costs a dropped packet.
+The underlay endpoint accepts a connection from any peer that can dial it and speaks the forward protocol, and the limit of forwards bounds the work that a stranger can make.
 QUIC runs end to end, so relays forward opaque, already-encrypted packets.
 The transport owns a dedicated underlay endpoint, because the application endpoint cannot recursively carry itself.
-The reverse route derives from the forward route, so a reply needs no fresh lookup.
-A hop in a route is two ids, the application endpoint and its underlay endpoint, and no address.
-A forwarder dials a hop only at the address of the vector that the hop signed.
-iroh names a path by the bytes of its address, so an address inside the route would make one route two paths as soon as the two ends hold different versions of it.
+A reply goes to the source of the cell, by the table of each node on the way: the destination needs the vector of the sender, which a node sends at once when a link comes up.
+A forwarder dials a next hop only at the address of the vector that the hop signed, and a neighbor that has no vector yet is no candidate.
+iroh names a path by the bytes of its address, so the address holds the destination only: one peer is one address and one path for the whole life of the pair.
 A relay also never dials an address that a cell carries.
+Between the death of a link and the agreement of the tables, cells that pass the node at that link are lost unless that node has another neighbor toward the destination; that node switches at once, because that neighbor admits and the other one waits.
+Known limit: a neighbor that keeps its connection alive and reads nothing stalls the writer of its hop. The hop stays in the state admit, the queue fills, and the cells for it are dropped and counted.
+Known limit: while two links to one node are down at once, cells can be turned back between two nodes that each hold a vector that names the other way. The loss is bounded by `relay_stuck_after`, each cell is counted (`turned_back`), and QUIC above sends it again.
 
 ### 9.4 Byte streams
 

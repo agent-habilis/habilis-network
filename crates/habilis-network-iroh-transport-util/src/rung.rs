@@ -2,7 +2,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use iroh::endpoint::transports::{Addr, PathSelectionData, Transmit};
+use iroh::endpoint::transports::{Addr, FourTuple, PathSelectionData, Transmit};
 
 #[cfg(feature = "test-hooks")]
 use std::sync;
@@ -11,13 +11,24 @@ use std::sync::atomic;
 #[cfg(feature = "test-hooks")]
 use std::sync::atomic::Ordering;
 use std::{iter, net};
-/// The lowest-RTT path in `iter`.
+/// The RTT that another path of a rung must beat the current path by before the selection moves to it. It is
+/// the value of `RTT_SWITCHING_MIN` in the default selector of iroh (`BiasedRttPathSelector`, in
+/// `iroh/src/socket/biased_rtt_path_selector.rs`), which keeps that constant private.
+const RTT_SWITCHING_MIN: Duration = Duration::from_millis(5);
+
+/// The path of `iter` that the selection takes: the current path stays while it is in `iter` and no other path is
+/// faster than it by `RTT_SWITCHING_MIN`, and otherwise the lowest-RTT path.
+///
+/// A host with several interfaces (a LAN, a VM bridge, a VPN) has several IP paths to one peer, and their RTTs
+/// differ by the noise of the measure. A selection that follows the lowest RTT moves at each event, and each move
+/// makes iroh close the paths that are not selected, so the path in use is never the one that stays open.
 ///
 /// A path whose stats are not readable yet — freshly added, not yet validated —
 /// still counts as a candidate, so an unmeasured path is never skipped in
 /// favour of the fallback it is meant to replace. That is the load-bearing
 /// half: without it a new direct path loses to the relay forever, because it
-/// never gets the traffic that would measure it.
+/// never gets the traffic that would measure it. A current path with no stats stays: it is the path in use,
+/// and it is measured next.
 ///
 /// # Examples
 ///
@@ -28,11 +39,29 @@ use std::{iter, net};
 /// use iroh::endpoint::transports::PathSelectionData;
 ///
 /// # fn demo<'a>(paths: &'a [PathSelectionData<'a>]) -> Option<&'a PathSelectionData<'a>> {
-/// best_of(paths.iter())
+/// best_of(None, paths.iter())
 /// # }
 /// ```
 #[must_use]
-pub fn best_of<'a>(
+pub fn best_of<'a, Paths>(
+    current: Option<&FourTuple>,
+    iter: Paths,
+) -> Option<&'a PathSelectionData<'a>>
+where
+    Paths: Iterator<Item = &'a PathSelectionData<'a>> + Clone,
+{
+    let best = lowest_rtt(iter.clone())?;
+    // One network path can be listed more than once: the current path is read at its best instance.
+    let kept =
+        current.and_then(|current| lowest_rtt(iter.filter(|path| path.network_path() == current)));
+    match kept {
+        Some(kept) if stays(kept, best) => Some(kept),
+        Some(_) | None => Some(best),
+    }
+}
+
+/// The lowest-RTT path in `iter`, or its first path when none has stats.
+fn lowest_rtt<'a>(
     iter: impl Iterator<Item = &'a PathSelectionData<'a>>,
 ) -> Option<&'a PathSelectionData<'a>> {
     let mut best: Option<(&PathSelectionData<'_>, Duration)> = None;
@@ -49,6 +78,15 @@ pub fn best_of<'a>(
         }
     }
     best.map(|(path, _)| path).or(fallback)
+}
+
+/// Whether the current path `kept` stays selected against `best`: it has no stats yet, or `best` is not faster than it by
+/// `RTT_SWITCHING_MIN`.
+fn stays(kept: &PathSelectionData<'_>, best: &PathSelectionData<'_>) -> bool {
+    let (Some(kept_stats), Some(best_stats)) = (kept.stats(), best.stats()) else {
+        return true;
+    };
+    kept_stats.rtt < best_stats.rtt + RTT_SWITCHING_MIN
 }
 
 /// One rung of the path ladder, best first: a direct IP path, then `WebRTC`, then
@@ -196,11 +234,12 @@ pub fn expected_rung(
 /// use iroh::endpoint::transports::PathSelectionData;
 ///
 /// # fn demo<'a>(paths: &'a [PathSelectionData<'a>]) -> Option<&'a PathSelectionData<'a>> {
-/// climb(paths, custom_rung, |rung, _path| matches!(rung, Rung::Ip))
+/// climb(None, paths, custom_rung, |rung, _path| matches!(rung, Rung::Ip))
 /// # }
 /// ```
 #[must_use]
 pub fn climb<'a>(
+    current: Option<&FourTuple>,
     paths: &'a [PathSelectionData<'a>],
     custom: impl Fn(u64) -> Rung,
     usable: impl Fn(Rung, &PathSelectionData<'_>) -> bool,
@@ -212,7 +251,7 @@ pub fn climb<'a>(
         |_| true,
         |rung| paths.iter().any(|path| usable_on(rung, path)),
     )?;
-    best_of(paths.iter().filter(|path| usable_on(rung, path)))
+    best_of(current, paths.iter().filter(|path| usable_on(rung, path)))
 }
 
 /// The IP address a path leads to, or `None` for a relay or custom path.
@@ -629,4 +668,168 @@ pub fn split_segments(contents: &[u8], segment_size: Option<usize>) -> impl Iter
             &contents[0..0]
         })
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    use iroh::endpoint::PathStats;
+    use iroh::endpoint::transports::{Addr, FourTuple, PathSelectionData};
+
+    use super::{best_of, climb, custom_rung};
+
+    /// An IP path to `port` on the host.
+    fn ip(port: u16) -> FourTuple {
+        let remote: SocketAddr = ([127, 0, 0, 1], port).into();
+        FourTuple::from_remote(Addr::Ip(remote))
+    }
+
+    /// The candidate for `tuple` with this RTT; `None` is a path with no stats yet.
+    fn candidate(tuple: &FourTuple, rtt_ms: Option<u64>) -> PathSelectionData<'_> {
+        let stats = rtt_ms.map(|rtt| {
+            // PathStats is non-exhaustive: build it from the default.
+            let mut stats = PathStats::default();
+            stats.rtt = Duration::from_millis(rtt);
+            stats
+        });
+        PathSelectionData::for_test(tuple, stats)
+    }
+
+    /// The selected tuple of `paths`, given the current one.
+    fn chosen<'a>(
+        current: Option<&FourTuple>,
+        paths: &'a [PathSelectionData<'a>],
+    ) -> Option<&'a FourTuple> {
+        best_of(current, paths.iter()).map(PathSelectionData::network_path)
+    }
+
+    /// The current path stays while no other path of its rung is faster by the threshold: 2 paths of one host
+    /// differ by a millisecond of noise, and a flip closes the path that was just opened.
+    #[test]
+    fn the_current_path_stays_when_another_is_only_a_little_faster() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (slow, fast) = (ip(1), ip(2));
+        let paths = [candidate(&slow, Some(10)), candidate(&fast, Some(9))];
+
+        let kept = chosen(Some(&slow), &paths);
+
+        assert_eq!(
+            kept,
+            Some(&slow),
+            "1 ms of gain does not move the selection"
+        );
+    }
+
+    /// One network path can appear twice in the list (two connections to the same peer, or two path ids). The
+    /// current path is read at its best instance: the slow one that comes first does not make it lose.
+    #[test]
+    fn the_current_path_is_read_at_its_best_instance() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (current, other) = (ip(1), ip(2));
+        let paths = [
+            candidate(&current, Some(30)),
+            candidate(&current, Some(10)),
+            candidate(&other, Some(9)),
+        ];
+
+        let kept = chosen(Some(&current), &paths);
+
+        assert_eq!(
+            kept,
+            Some(&current),
+            "the current path at 10 ms is 1 ms behind the other path, so it stays"
+        );
+    }
+
+    /// A path that is faster by more than the threshold takes the selection.
+    #[test]
+    fn a_path_that_is_much_faster_takes_the_selection() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (slow, fast) = (ip(1), ip(2));
+        let paths = [candidate(&slow, Some(30)), candidate(&fast, Some(10))];
+
+        let taken = chosen(Some(&slow), &paths);
+
+        assert_eq!(taken, Some(&fast), "20 ms of gain moves the selection");
+    }
+
+    /// With no current path in the list, the best path is taken, and the current path that is gone costs nothing.
+    #[test]
+    fn the_best_path_is_taken_when_the_current_path_is_gone() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (gone, near, far) = (ip(1), ip(2), ip(3));
+        let paths = [candidate(&near, Some(5)), candidate(&far, Some(8))];
+
+        let taken = chosen(Some(&gone), &paths);
+
+        assert_eq!(
+            taken,
+            Some(&near),
+            "the lowest RTT of the paths that remain"
+        );
+    }
+
+    /// A current path with no stats yet stays: it is the path in use, and it gets measured next.
+    #[test]
+    fn a_current_path_with_no_stats_stays() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (fresh, measured) = (ip(1), ip(2));
+        let paths = [candidate(&fresh, None), candidate(&measured, Some(1))];
+
+        let kept = chosen(Some(&fresh), &paths);
+
+        assert_eq!(kept, Some(&fresh), "an unmeasured current path is kept");
+    }
+
+    /// The bug: 3 IP paths to one host, whose RTTs move by 1 ms from one event to the next, over 50 events. The
+    /// selection is made once and changes 0 times after that. (The old rule changed it at almost each event.)
+    #[test]
+    fn the_selection_does_not_flap_over_paths_of_one_host_with_noisy_rtts() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let tuples = [ip(1), ip(2), ip(3)];
+        let mut current: Option<FourTuple> = None;
+        let mut changes = 0_u32;
+
+        for event in 0..50_u64 {
+            let paths: Vec<PathSelectionData<'_>> = tuples
+                .iter()
+                .zip(0_u64..)
+                .map(|(tuple, index)| candidate(tuple, Some(10 + (event + index) % 3)))
+                .collect();
+            let next = chosen(current.as_ref(), &paths).cloned();
+            if next != current && current.is_some() {
+                changes += 1;
+            }
+            current = next;
+        }
+
+        assert_eq!(
+            changes, 0,
+            "the selection changed {changes} times after the first choice"
+        );
+    }
+
+    /// The hysteresis is inside a rung. A connection that is on the relay (a lower rung) climbs at once to a
+    /// path of a higher rung: the current path is not in that rung, so it holds nothing.
+    #[test]
+    fn a_current_path_on_a_lower_rung_does_not_hold_the_ladder_down() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let url: iroh::RelayUrl = "https://relay.example/".parse().expect("a relay URL");
+        let relay = FourTuple::from_remote(Addr::Relay(
+            url,
+            iroh::EndpointId::from_bytes(&[0u8; 32]).expect("an id"),
+        ));
+        let direct = ip(7);
+        let paths = [candidate(&relay, Some(1)), candidate(&direct, Some(40))];
+
+        let climbed = climb(Some(&relay), &paths, custom_rung, |_, _| true);
+
+        assert_eq!(
+            climbed.map(PathSelectionData::network_path),
+            Some(&direct),
+            "a direct path beats the relay whatever the RTT"
+        );
+    }
 }

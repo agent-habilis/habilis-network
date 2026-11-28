@@ -18,6 +18,9 @@ pub mod log_config;
 /// Process helpers for the daemon: the parent-process walk that the orphan watch uses.
 #[cfg(feature = "host")]
 pub mod process;
+/// What the system says about the start of a process: running, gone, or unknown.
+#[cfg(feature = "host")]
+pub mod process_start;
 pub mod unix_secs;
 // Portable: the reading itself is `cfg`'d down to `None` off a libc host, so
 // the leak gauge compiles everywhere and simply reports 0 in a browser. Keeping

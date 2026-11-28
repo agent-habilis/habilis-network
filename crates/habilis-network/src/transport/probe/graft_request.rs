@@ -38,6 +38,8 @@ pub(crate) struct GraftTarget {
 /// with a `Join` instead when the node is starved, at most once per `STARVED`: it held fewer
 /// than G peers for `STARVED`, and it is 2 or more peers short, or 1 short and a peer refused
 /// it within the last `STARVED` (`GraftBackoff::has_refusal`). A `PeerInfo` graft is not paced.
+/// A node with no neighbor at all, whose `Neighbor` request was read as refused, is starved at once:
+/// its `Join` does not wait for `STARVED`, and the next one waits for it, as for any starved node.
 ///
 /// The `Join` ignores the backoff of the peer, but the guard of a node that is 1 peer short does
 /// not: it needs a refusal read within the last `STARVED`, and the wait of the backoff can reach
@@ -69,11 +71,20 @@ pub(crate) fn graft_request(
         rendezvous: rendezvous_id,
     } = target;
     if peer == rendezvous_id {
+        tracing::debug!(target: transport::LOG_TARGET, %peer, "graft: a Join to the rendezvous");
         return GraftRequest::Join;
     }
     state.note_link_count(max_connections, now);
     if paced && state.starved_join_due(now) {
         // A `Join` is not refused, so it ignores the backoff of the peer.
+        tracing::info!(
+            target: transport::LOG_TARGET,
+            %peer,
+            linked = state.linked_endpoints.len(),
+            links_short = state.links_short,
+            "graft: a starved node asks with a Join"
+        );
+        state.note_join_target(peer);
         GraftRequest::Join
     } else if paced && state.graft_backoff.is_blocked(&peer, now) {
         tracing::debug!(target: transport::LOG_TARGET, %peer, "graft skipped: the peer refused lately");
@@ -164,6 +175,40 @@ mod tests {
             ask(&mut state, candidates[2], start + STARVED * 2),
             GraftRequest::Join,
             "STARVED after the Join, the refusal that was read is older than STARVED: no Join"
+        );
+    }
+
+    /// The state that the at-cap flake reaches (2 of 100 runs): a node with no neighbor, and every
+    /// other node full and silent. A retry at each alive tick (15 s) asks each of them with a
+    /// `Neighbor` request. The silence is read as a refusal 20 s after the first ask, and the
+    /// node, with no neighbor and a refusal read, asks with a `Join` at once. Before the fix the
+    /// clock of an ask restarted with each retry, so no refusal was read and the node asked
+    /// `Neighbor` for ever.
+    #[test]
+    fn a_node_with_no_neighbor_that_every_peer_leaves_unanswered_asks_a_join_by_the_second_retry() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let mut state = state_with_links(0);
+        let start = Instant::now();
+        let candidates = [endpoint_id(2), endpoint_id(3)];
+        let retry_every = SECOND * 15;
+
+        let mut asked: Vec<GraftRequest> = Vec::new();
+        for tick in 0..=2_u32 {
+            let now = start + retry_every * tick;
+            state.settle_graft_backoff(now);
+            for candidate in candidates {
+                asked.push(ask(&mut state, candidate, now));
+            }
+        }
+        assert!(
+            asked[..4]
+                .iter()
+                .all(|request| *request == GraftRequest::Neighbor),
+            "the first 2 retries, 0 s and 15 s: no refusal is read yet, so every ask is a Neighbor"
+        );
+        assert!(
+            asked[4..].contains(&GraftRequest::Join),
+            "the retry at 30 s: the silence of 30 s is a refusal, so the node asks with a Join: {asked:?}"
         );
     }
 

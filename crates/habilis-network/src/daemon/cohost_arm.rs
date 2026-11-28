@@ -8,11 +8,10 @@
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::daemon::state::TestHold;
-use crate::daemon::state::{BeaconNote, RendezvousFlag, Standing};
-use std::time::Duration;
+use crate::daemon::state::{RendezvousFlag, Standing};
 use tokio::sync::oneshot;
 
-use iroh::{Endpoint, EndpointId};
+use iroh::EndpointId;
 
 use super::config::CoHostPolicy;
 use super::handler_ctx::HandlerCtx;
@@ -48,8 +47,8 @@ use crate::util::tuning;
 /// of its own, and so do the rung probes that are still out: each closes a
 /// prober endpoint of its own, which a departure would drop open. The
 /// endpoints of the node close with them. All of these close
-/// concurrently, so the whole release costs one close budget, which is what
-/// `NODE_LEAVE` is sized for.
+/// concurrently, so the whole release costs one close budget. `NODE_LEAVE` adds the
+/// 2 steps of `Loop::finish` that follow it.
 pub(super) async fn release_rendezvous(
     rendezvous: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
@@ -220,7 +219,7 @@ pub(super) async fn maybe_cohost(
         };
         match held {
             beacon::Held::Claimed => {
-                schedule_rival_recheck(state, arm.policy, arm.params, context.endpoint);
+                arm_holder_probe(state, arm.policy, arm.params);
                 // The new rendezvous never dials us; the reclaim tick re-grafts it.
                 state.arm_reclaim(Instant::now());
                 offer_to_the_new_holder(state, context);
@@ -256,7 +255,7 @@ fn note_no_rung_free(state: &mut EventLoopState, context: &HandlerCtx<'_>, ports
 
 /// Offer to our new beacon at once, to the address that the claim just registered. The round of
 /// this member that was started while nobody held the rendezvous was ended by
-/// [`schedule_rival_recheck`].
+/// [`arm_holder_probe`].
 pub(super) fn offer_to_the_new_holder(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     webrtc::rendezvous::offer_rendezvous_off_tick(state, context);
 }
@@ -322,7 +321,7 @@ pub(super) async fn maybe_reclaim(
         };
         match held {
             beacon::Held::Claimed => {
-                schedule_rival_recheck(state, arm.policy, arm.params, context.endpoint);
+                arm_holder_probe(state, arm.policy, arm.params);
                 offer_to_the_new_holder(state, context);
                 return;
             }
@@ -380,7 +379,7 @@ fn shed_beacon(
         .rung_in(&params.bind_ports)
         .map(|index| params.bind_ports[index]);
     state.beacon_closing = Some(held.shed_then());
-    state.next_rival_recheck = None;
+    state.next_holder_probe = None;
     state.cancel_rendezvous_round();
     forget_the_shed_rung(state, params, released);
     state.rendezvous_flags.remove(&RendezvousFlag::Linked);
@@ -459,117 +458,36 @@ pub(super) fn shed_on_request(
 fn regrafts_rendezvous(rendezvous_linked: bool, rendezvous_wanted: bool) -> bool {
     !rendezvous_linked && rendezvous_wanted
 }
-/// Whether this session's beacon is subject to the periodic rival
-/// re-check shed: any **public** co-host that had to *probe* for the
-/// identity rather than owning it.
+/// Whether the holder of this session's beacon asks, every heal tick, who serves the rendezvous:
+/// every co-host of a **public** mesh, the creator included. The relay serves the newest claim, so
+/// only the older holder can read a claim that came after it, and the creator is the oldest holder
+/// of a mesh: a creator that asked nothing would never read a joiner that claimed on a free reading
+/// by error, and the two would stay 2 groups. An ask sheds nothing, so the reason that once kept
+/// the creator out (a shed would churn the only beacon of a cold mesh) does not hold.
 ///
-/// `EagerProbed` claimants share a `rendezvous_id` with concurrent peers
-/// (topic joiners, directory advertisers) and can double-claim inside each
-/// other's probe window. `Deferred` was excluded here on the premise that it
-/// "meshes before claiming" — but `may_cohost` also lets an unmeshed joiner
-/// claim after the co-host grace, and a meshed one still claims on the word of
-/// a probe. When that probe could not resolve the id (the defect
-/// `beacon::spawn_rival_probe` documents), *every* survivor of a departed
-/// origin claimed a duplicate, and this shed was the one mechanism that would
-/// have re-arbitrated it — switched off for the policy that needed it. So the
-/// gate is now "did a probe decide this claim", which is the property that
-/// makes a same-id split possible in the first place.
-///
-/// Still excluded: `Eager` (the mesh origin owns the identity from t=0, and
-/// shedding it would churn the only beacon a cold mesh has), `Never` (claims
-/// nothing), and every loopback mesh. A port ladder arbitrates atomically at
-/// bind time, but the identity probe that follows a failed bind can read a
-/// loaded host wrongly, and two holders then serve one mesh. The loopback
-/// repair is not this timer: a holder above the first rung asks, on every heal
-/// tick, whether a lower rung answers as our mesh, and yields on a positive
-/// answer only (`maybe_cohost`, `beacon::lower_rung_that_answers`).
-pub(super) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool {
-    matches!(policy, CoHostPolicy::EagerProbed | CoHostPolicy::Deferred) && public
+/// Not `Never` (it claims nothing) and not a loopback mesh. A port ladder arbitrates atomically at
+/// bind time, but the identity probe that follows a failed bind can read a loaded host wrongly,
+/// and two holders then serve one mesh. The loopback repair is a holder above the first rung that
+/// asks, on every heal tick, whether a lower rung answers as our mesh, and that yields on a
+/// positive answer only (`maybe_cohost`, `beacon::lower_rung_that_answers`).
+pub(crate) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool {
+    public
+        && match policy {
+            CoHostPolicy::Eager | CoHostPolicy::EagerProbed | CoHostPolicy::Deferred => true,
+            CoHostPolicy::Never => false,
+        }
 }
-/// When the next rival re-check shed should run, from the moment of a
-/// claim. Round 0 (a startup claim) is the *fast first* check plus a
-/// deterministic endpoint-id phase offset — the tie-break that orders
-/// simultaneous claimants so the earlier one sheds, finds the later
-/// one's still-held beacon, and yields. Later rounds run the steady
-/// cadence plus fresh random jitter, breaking the residual
-/// both-shed-together collision geometrically.
-///
-/// `roster` is the membership count (`EventLoopState::peers`), and it picks
-/// the steady tier: a shed's cost is what the blip disturbs, which is how
-/// many members may be bootstrapped through this beacon. The live-link count
-/// this used to read mismeasured exactly when it mattered — a survivor
-/// claiming right after an origin's death holds two links in a twenty-member
-/// mesh, links regrow over seconds, and by shed time the whole mesh paid a
-/// cadence priced for a two-tab room. The roster survives that churn. See
-/// [`RIVAL_RECHECK_SMALL_ROSTER`](crate::util::tuning::RIVAL_RECHECK_SMALL_ROSTER).
-///
-/// Small rosters also back off geometrically: each steady round doubles the
-/// brisk base, capped at the island backstop. A re-check that keeps finding
-/// no rival is evidence there is none, and without the backoff a stable
-/// two-tab mesh blipped its beacon every 30-60s forever. Rounds reset when a
-/// rival wins an arbitration, so a fresh claim epoch starts brisk again.
-///
-/// An **empty** roster ramps past the island backstop to
-/// [`RIVAL_RECHECK_ALONE`](crate::util::tuning::RIVAL_RECHECK_ALONE).
-/// The brisk rounds are the same — a double-claim inside a probe window is
-/// repaired by the first few sheds, and those are untouched — but a node that
-/// has found no rival and knows no peer has nothing left to arbitrate, and the
-/// 300s cap only rebinds its public endpoint every few minutes forever. The
-/// tier is `roster == 0`, not "small": two survivors of a departed origin each
-/// count the other, and that split is the one the brisk cap exists for.
-pub(super) fn next_recheck_delay(round: u32, roster: usize, endpoint_id: EndpointId) -> Duration {
-    use crate::util::clock;
-    use crate::util::tuning::{
-        RIVAL_RECHECK_OFFSET_SPAN, RIVAL_RECHECK_SMALL_ROSTER, rival_recheck, rival_recheck_alone,
-        rival_recheck_first, rival_recheck_meshed,
-    };
 
-    if round == 0 {
-        let mut prefix = [0u8; 8];
-        prefix.copy_from_slice(&endpoint_id.as_bytes()[..8]);
-        // Pubkey bytes are already uniform — no hashing needed.
-        let offset_ms =
-            u64::from_le_bytes(prefix) % clock::millis_saturating(RIVAL_RECHECK_OFFSET_SPAN);
-        return rival_recheck_first() + Duration::from_millis(offset_ms);
+/// The policy of a node after its holder yielded to a rival. The creator owns the rendezvous from
+/// t=0 and claims it with no probe, but a creator that yielded is a claimant like any other: its
+/// next claim reads the id first, or it would bind again at once on its next reclaim tick, take
+/// the newest claim from the rival that it just yielded to, and the contest would go round again.
+pub(super) fn cohost_after_a_yield(policy: CoHostPolicy) -> CoHostPolicy {
+    match policy {
+        CoHostPolicy::Eager => CoHostPolicy::EagerProbed,
+        CoHostPolicy::EagerProbed | CoHostPolicy::Deferred | CoHostPolicy::Never => policy,
     }
-    let base = if roster > RIVAL_RECHECK_SMALL_ROSTER {
-        rival_recheck_meshed()
-    } else {
-        let backstop = if roster == 0 {
-            rival_recheck_alone()
-        } else {
-            rival_recheck_meshed()
-        };
-        // Seven doublings reach the alone ceiling from the brisk base
-        // (30s << 7 = 3840s); capped well before the shift could overflow, and
-        // the base is capped at the backstop regardless.
-        let doublings = round.saturating_sub(1).min(7);
-        rival_recheck()
-            .saturating_mul(1u32 << doublings)
-            .min(backstop)
-    };
-    // Jitter spans the full base: two split holders re-jitter from
-    // near-aligned schedules every round, and the wider the span the more
-    // likely one's probe window lands while the other still holds.
-    base + rand::Rng::random_range(&mut rand::rng(), Duration::ZERO..=base)
 }
-/// How many steady intervals a shed may be held back while a data-channel
-/// peer depends on this beacon.
-///
-/// A shed drops the rendezvous a browser reached us through, and a browser
-/// has no second path to fall back on: the tab's roster empties and its
-/// transfer stops. Native peers re-dial, so the wait is for the lane that
-/// cannot. Bounded rather than indefinite because the shed is also how two
-/// split holders discover each other, and a pair that each kept a tab would
-/// otherwise never merge.
-const MAX_SHED_DEFERRALS: u32 = 3;
-
-/// Whether this due shed waits a round: someone is on the data channel, or
-/// negotiating one, and we have not already waited our limit.
-pub(super) fn defer_shed(dependents: usize, deferrals: u32) -> bool {
-    dependents > 0 && deferrals < MAX_SHED_DEFERRALS
-}
-
 /// Whether a member that does not hold the rendezvous may probe it in order to claim it. Not
 /// while it knows a holder: its own shed makes the shared id read free for a moment, and a claim
 /// on that reading stands up the second holder again.
@@ -582,88 +500,110 @@ pub(super) fn verdict_after_known_holders(found_rival: bool, state: &EventLoopSt
     found_rival || state.rival_holder_known()
 }
 
-/// Arm the next rival re-check after a fresh claim (a `None` → live
-/// `beacon::ensure` transition). No-op for sessions the shed doesn't
-/// apply to, so every claim site can call it unconditionally. A fresh claim
-/// is a new beacon, so it also starts with the full shed wait: a beacon
-/// replaced without a shed would otherwise inherit its predecessor's count.
-///
-/// The one funnel every claim passes, so it also ends the round of this member that was started
-/// while nobody held the rendezvous: that round cannot find the beacon just claimed.
-pub(super) fn schedule_rival_recheck(
+/// Arm the probe of the holder after a claim, and end the round of this member that was started
+/// while nobody held the rendezvous: that round cannot find the beacon just claimed. The one funnel
+/// that every claim passes. A claim again passes it too, so it does not reset the contest: the
+/// count of claims against a rival must survive a claim. A contest starts clean where a holder
+/// starts or ends (the first claim, [`release_to_rival`], a rehome).
+pub(super) fn arm_holder_probe(
     state: &mut EventLoopState,
     policy: CoHostPolicy,
     params: &beacon::RendezvousParams,
-    endpoint: &Endpoint,
 ) {
     state.cancel_rendezvous_round();
-    state.rival_recheck_deferrals = 0;
-    state.beacon_notes.remove(&BeaconNote::YieldToLower);
     if !rival_recheck_applies(policy, params.bind_ports.is_empty()) {
         return;
     }
-    let delay = next_recheck_delay(state.rival_recheck_rounds, state.peers.len(), endpoint.id());
-    state.next_rival_recheck = Some(Instant::now() + delay);
+    state.next_holder_probe = Some(Instant::now() + tuning::heal_interval());
 }
-/// The rival re-check itself: at the scheduled deadline, **release** the
-/// held beacon and let probe-before-claim re-arbitrate on the reclaim
-/// burst. Two `EagerProbed` members that claimed inside each other's
-/// probe window both hold the same `rendezvous_id` and each captures its
-/// own bootstrap dial — a split nothing else repairs, because a holder's
-/// dial of the shared id preferentially reaches itself. Dropping our copy
-/// first removes us from every resolution channel (relay registration,
-/// mDNS record, pooled connection), so the re-probe's answer is finally
-/// meaningful: *connects* ⇒ a rival serves it, stay a peer and let
-/// the heal re-graft merge the overlays; *times out* ⇒ genuinely alone,
-/// re-claim. Returns whether a shed happened (the caller then skips this
-/// tick's synchronous re-claim).
-pub(super) fn shed_rival_beacon_if_due(
+
+/// Start the probe of the holder when it is due: it asks who serves the rendezvous on the rung of
+/// its own beacon. One period after the start, the next one is due, whether or not this one could
+/// start.
+pub(super) async fn start_holder_probe_if_due(
+    state: &mut EventLoopState,
+    arm: &CohostArm<'_>,
+    rendezvous: Option<&beacon::Rendezvous>,
+    probe: &mut Option<beacon::RivalProbe>,
+    node: EndpointId,
+) {
+    if rendezvous.is_none()
+        || probe.is_some()
+        || !rival_recheck_applies(arm.policy, arm.params.bind_ports.is_empty())
+    {
+        return;
+    }
+    if state
+        .next_holder_probe
+        .is_none_or(|deadline| Instant::now() < deadline)
+    {
+        return;
+    }
+    state.next_holder_probe = Some(Instant::now() + tuning::heal_interval());
+    *probe = beacon::spawn_holder_probe(arm.params, node).await;
+}
+
+/// The answer of the probe of the holder. The contest decides: stay, claim again (make before
+/// break: the new beacon binds first and the old one closes in the same step), or yield to the
+/// rival. An answer that comes after the beacon went is about nothing and is dropped. It returns the
+/// policy of the node after the answer: a holder that yielded is a claimant like any other
+/// (`cohost_after_a_yield`), and the loop must keep what this returns.
+#[must_use = "the policy after a yield is what the node claims by: the loop must keep it"]
+pub(super) async fn apply_holder_answer(
+    state: &mut EventLoopState,
+    context: &HandlerCtx<'_>,
+    arm: &CohostArm<'_>,
+    rendezvous: &mut Option<beacon::Rendezvous>,
+    answer: beacon::WhoAnswer,
+) -> CoHostPolicy {
+    if rendezvous.is_none() {
+        return arm.policy;
+    }
+    let mut policy = arm.policy;
+    let node = context.endpoint.id();
+    let action = state.holder_contest.on_answer(node, answer);
+    beacon::log_holder_probe(node, answer, action);
+    match action {
+        beacon::ContestAction::Stay => {}
+        beacon::ContestAction::ClaimAgain => {
+            let held = beacon::claim::claim_again(
+                arm.params,
+                context.endpoint,
+                &state.address_book,
+                rendezvous,
+                &mut state.rungs,
+            )
+            .await;
+            if held == beacon::Held::Claimed {
+                arm_holder_probe(state, arm.policy, arm.params);
+                state.arm_reclaim(Instant::now());
+                offer_to_the_new_holder(state, context);
+            } else if let Some(miss) = beacon::Miss::of(held) {
+                beacon::log_claim_missed(node, miss);
+            }
+        }
+        beacon::ContestAction::YieldTo(rival) => {
+            tracing::info!(
+                target: "habilis_network::beacon",
+                node = %node.fmt_short(),
+                rival = %rival.fmt_short(),
+                "beacon yielded: another member serves the rendezvous"
+            );
+            release_to_rival(state, arm, rendezvous);
+            policy = cohost_after_a_yield(arm.policy);
+        }
+    }
+    policy
+}
+
+/// Let go of the beacon for a rival that keeps the rendezvous, and read the ladder again: the
+/// endpoint closes, the address of the beacon leaves the book, and the reclaim window opens, so that
+/// the next walk reads the rival and the overlays merge.
+fn release_to_rival(
     state: &mut EventLoopState,
     arm: &CohostArm<'_>,
     rendezvous: &mut Option<beacon::Rendezvous>,
-    peer: EndpointId,
-) -> bool {
-    if rendezvous.is_none() || !rival_recheck_applies(arm.policy, arm.params.bind_ports.is_empty())
-    {
-        return false;
-    }
-    let due = state
-        .next_rival_recheck
-        .is_some_and(|deadline| Instant::now() >= deadline);
-    if !due {
-        return false;
-    }
-    let dependents = rendezvous
-        .as_ref()
-        .map_or_else(beacon::Dependents::default, |held| held.dependents(peer));
-    if !state.beacon_notes.contains(&BeaconNote::YieldToLower)
-        && defer_shed(dependents.count(), state.rival_recheck_deferrals)
-    {
-        state.rival_recheck_deferrals = state.rival_recheck_deferrals.saturating_add(1);
-        state.next_rival_recheck = Some(Instant::now() + tuning::rival_recheck());
-        let live_ids = dependents.live_ids();
-        let own_ids = dependents.own_ids();
-        tracing::info!(
-            target: "habilis_network::gossip",
-            node = %peer.fmt_short(),
-            dependents = dependents.count(),
-            dependent_ids = ?dependents.foreign_ids(),
-            live_ids = ?live_ids,
-            own_ids = ?own_ids,
-            in_flight = dependents.in_flight,
-            deferrals = state.rival_recheck_deferrals,
-            "beacon rival re-check deferred: a data-channel peer is hanging off this beacon"
-        );
-        return false;
-    }
-    state.rival_recheck_deferrals = 0;
-    tracing::info!(
-        target: "habilis_network::gossip",
-        node = %peer.fmt_short(),
-        yield_to_lower = state.beacon_notes.contains(&BeaconNote::YieldToLower),
-        "beacon rival re-check: releasing the rendezvous to re-probe for a same-id co-host"
-    );
-    state.beacon_notes.remove(&BeaconNote::YieldToLower);
+) {
     // `shed`, not a plain drop: the graceful endpoint close turns the
     // peer's link to its own dead beacon into an immediate
     // `NeighborDown` instead of a zombie that only dies at the QUIC idle
@@ -676,8 +616,8 @@ pub(super) fn shed_rival_beacon_if_due(
             .map(|index| arm.params.bind_ports[index]);
         state.beacon_closing = Some(held.shed_then());
     }
-    state.next_rival_recheck = None;
-    state.rival_recheck_rounds = state.rival_recheck_rounds.saturating_add(1);
+    state.next_holder_probe = None;
+    state.holder_contest = beacon::HolderContest::default();
     // A round that was running against our own beacon now has nothing to find.
     state.cancel_rendezvous_round();
     // The book still names the beacon just shed; the next holder writes its own address.
@@ -693,7 +633,6 @@ pub(super) fn shed_rival_beacon_if_due(
     // beacon's `NeighborDown` to do it — the re-probe (and the re-claim
     // when no rival exists) then runs within ~RECLAIM_INTERVAL.
     state.arm_reclaim(Instant::now());
-    true
 }
 
 #[cfg(test)]
@@ -701,16 +640,18 @@ mod tests {
     use super::super::config::CoHostPolicy;
     use super::super::state::RivalFlag;
     use super::{
-        MAX_SHED_DEFERRALS, claims_at_startup, defer_shed, next_recheck_delay, probes_before_claim,
-        regrafts_rendezvous, rival_recheck_applies,
+        claims_at_startup, probes_before_claim, regrafts_rendezvous, rival_recheck_applies,
     };
-    use crate::daemon::state::{BeaconNote, Standing};
+    use crate::daemon::state::Standing;
     use std::time::Duration;
 
     use crate::beacon::claim;
+    use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::{cohost_arm, config, state};
-    use crate::protocol::meshes;
-    use crate::transport::PayloadPath;
+    use crate::gossip::event::SilentSink;
+    use crate::protocol::identity::Identity;
+    use crate::protocol::{MeshId, Nickname, meshes};
+    use crate::transport::{MeshSender, PayloadPath};
     use crate::util::{clock, tuning};
     use crate::{beacon, lookup, protocol, testing};
     use iroh_gossip::proto;
@@ -863,17 +804,7 @@ mod tests {
         );
     }
 
-    /// A shed cuts the rendezvous a browser reached us through, and the tab
-    /// has nothing else: its roster empties mid-transfer. Observed as a
-    /// terminal cycling claim and release while a tab saw no peers at all.
-    #[test]
-    fn a_due_shed_waits_while_a_data_channel_peer_depends_on_us() {
-        let _guard = ::habilis_network_test_tracing::init();
-        assert!(defer_shed(1, 0), "a tab is hanging off this beacon");
-        assert!(!defer_shed(0, 0), "nobody on the channel: shed on time");
-    }
-
-    /// Public-mesh rendezvous parameters: the rival re-check applies to them.
+    /// Public-mesh rendezvous parameters: the ask of the holder applies to them.
     fn public_params() -> beacon::RendezvousParams {
         let secret = iroh::SecretKey::generate();
         beacon::RendezvousParams {
@@ -885,6 +816,7 @@ mod tests {
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
             rung_tx: mpsc::unbounded_channel().0,
+            bind_options: lookup::TransportOpts::default(),
         }
     }
 
@@ -904,51 +836,293 @@ mod tests {
         endpoint
     }
 
-    /// A held beacon with one tab negotiating on it. The tab counts as a
-    /// dependent for as long as the returned guard lives.
-    fn beacon_with_a_negotiating_tab(
-        params: &beacon::RendezvousParams,
+    /// A member for the tests of the holder probe: its endpoint, the pieces of a handler context, its
+    /// state, and the beacon that it holds.
+    struct Member {
         endpoint: iroh::Endpoint,
-    ) -> (Option<beacon::Rendezvous>, impl Sized) {
-        use crate::transport::SignalAdmission;
-        use crate::util::tuning::MAX_CONNECTIONS;
-        let handle = lookup::build_webrtc_handle(params.id);
-        let admission = SignalAdmission::new(MAX_CONNECTIONS);
-        let tab = iroh::SecretKey::generate().public();
-        let round = admission.try_admit(tab, &handle).expect("a free slot");
-        let rendezvous = beacon::Rendezvous::for_test(endpoint, Some((handle, admission)));
-        (Some(rendezvous), round)
+        sender: MeshSender,
+        mesh: MeshId,
+        author: Nickname,
+        identity: Identity,
+        sink: SilentSink,
+        state: state::EventLoopState,
+        rendezvous: Option<beacon::Rendezvous>,
     }
 
-    /// A tab negotiating with the beacon has no session yet, and a shed then
-    /// cuts the rendezvous it is about to link through. Observed: a shed 7 ms
-    /// before the tab's session attached, after which the tab found the
-    /// rendezvous free and claimed it. The count is the beacon's own answerer:
-    /// the peer's handle never holds a tab's session with the beacon.
-    #[test]
-    fn a_due_shed_waits_for_a_tab_negotiating_with_the_beacon() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let params = public_params();
+    impl Member {
+        async fn new(params: &beacon::RendezvousParams) -> Self {
+            use iroh_gossip::net::Gossip;
+
+            let endpoint = loopback_endpoint().await;
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let (gossip_sender, _receiver) = gossip
+                .subscribe(params.topic_id, Vec::new())
+                .await
+                .expect("subscribe without a bootstrap")
+                .split();
+            let mut state = testing::fresh_state();
+            state.rungs = beacon::RungWatch::detached();
+            Self {
+                endpoint,
+                sender: MeshSender::new(gossip_sender),
+                mesh: MeshId::from("test"),
+                author: testing::nick("member"),
+                identity: Identity::generate(),
+                sink: SilentSink,
+                state,
+                rendezvous: None,
+            }
+        }
+
+        async fn claim(&mut self, params: &beacon::RendezvousParams) {
+            let book = lookup::address_book(&self.endpoint);
+            let claimed = claim::claim(params, &self.endpoint, &book, &mut self.rendezvous).await;
+            assert!(claimed, "the member claims the rendezvous");
+        }
+
+        /// The probe of the holder, as the loop runs it: ask who serves the id on the own rung from a
+        /// throwaway endpoint, then give the answer to the contest.
+        async fn ask_and_apply(&mut self, params: &beacon::RendezvousParams) {
+            use iroh::endpoint::presets;
+            use iroh::{EndpointAddr, RelayMode};
+
+            let rung = params.bootstrap_relay.clone().expect("a rung");
+            let prober: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::custom([rung.clone()]))
+                .bind()
+                .await
+                .expect("a prober");
+            let target = EndpointAddr::new(params.id).with_relay_url(rung);
+            let answer =
+                beacon::ask_who(&prober, target, self.endpoint.id(), tuning::HEAL_PROBE).await;
+            prober.close().await;
+            self.apply(params, answer).await;
+        }
+
+        /// The answer of the probe of the holder, given to the contest as the loop gives it.
+        async fn apply(&mut self, params: &beacon::RendezvousParams, answer: beacon::WhoAnswer) {
+            self.apply_as(CoHostPolicy::EagerProbed, params, answer)
+                .await;
+        }
+
+        /// [`Self::apply`] for a node of the policy `policy`; it gives the policy that the node has
+        /// after the answer.
+        async fn apply_as(
+            &mut self,
+            policy: CoHostPolicy,
+            params: &beacon::RendezvousParams,
+            answer: beacon::WhoAnswer,
+        ) -> CoHostPolicy {
+            let context = HandlerCtx {
+                sender: &self.sender,
+                endpoint: &self.endpoint,
+                mesh: &self.mesh,
+                author: &self.author,
+                identity: &self.identity,
+                our_pubkey: self.identity.author_key(),
+                max_connections: 16,
+                rendezvous_id: params.id,
+                external_msg_tx: None,
+                sink: &self.sink,
+            };
             let arm = super::CohostArm {
-                policy: CoHostPolicy::EagerProbed,
-                params: &params,
+                policy,
+                params,
                 started: clock::Instant::now(),
             };
-            let mut state = testing::fresh_state();
-            state.next_rival_recheck = Some(clock::Instant::now());
-            let (mut rendezvous, _round) =
-                beacon_with_a_negotiating_tab(&params, loopback_endpoint().await);
+            super::apply_holder_answer(
+                &mut self.state,
+                &context,
+                &arm,
+                &mut self.rendezvous,
+                answer,
+            )
+            .await
+        }
 
-            assert!(
-                !super::shed_rival_beacon_if_due(
-                    &mut state,
-                    &arm,
-                    &mut rendezvous,
-                    iroh::SecretKey::generate().public(),
-                ),
-                "a due shed waits while a tab negotiates with the beacon"
+        fn sockets(&self) -> Vec<net::SocketAddr> {
+            self.rendezvous
+                .as_ref()
+                .map(|held| held.endpoint.bound_sockets())
+                .unwrap_or_default()
+        }
+    }
+
+    /// **The count of claims against a rival survives a claim again, so the bound acts.**
+    ///
+    /// On a relay that keeps the older claim served, a holder with the lower id reads the same rival
+    /// each period. It claims again `CLAIMS_BEFORE_YIELD` times, and then yields. If a claim reset the
+    /// count, it would claim for ever and the 2 groups would never merge.
+    #[test]
+    fn a_holder_that_keeps_reading_the_same_higher_rival_yields_after_its_claims() {
+        use crate::lookup::test_relay;
+        use crate::protocol::meshes::{LookupOpts, RelayChoice};
+
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Another endpoint connected with the same endpoint id",
             );
-            assert!(rendezvous.is_some(), "the beacon is still held");
+            let (relay, _server) = test_relay::spawn_plain().await.expect("a local relay");
+            let mut params = public_params();
+            params.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay.clone()]));
+            params.bootstrap_relay = Some(relay);
+            let mut holder = Member::new(&params).await;
+            holder.claim(&params).await;
+            let mut rival = iroh::SecretKey::generate().public();
+            while rival < holder.endpoint.id() {
+                rival = iroh::SecretKey::generate().public();
+            }
+            let answer = beacon::WhoAnswer::Rival(rival);
+
+            let first = holder.sockets();
+            holder.apply(&params, answer).await;
+            assert!(
+                holder.rendezvous.is_some(),
+                "the first read: claim again, not yield"
+            );
+            let second = holder.sockets();
+            assert_ne!(first, second, "the first read made a new claim");
+            holder.apply(&params, answer).await;
+            assert!(
+                holder.rendezvous.is_some(),
+                "the second read: claim again, not yield"
+            );
+            assert_ne!(second, holder.sockets(), "the second read made a new claim");
+            holder.apply(&params, answer).await;
+            assert!(
+                holder.rendezvous.is_none(),
+                "the third read of the same rival: the holder yields"
+            );
+            super::wait_for_shed_close(&mut holder.state).await;
+            holder.endpoint.close().await;
+        });
+    }
+
+    /// **A claim does not clear the count of answers with no proof.**
+    ///
+    /// 2 `Unknown`, a claim that the funnel of every claim sees, and 1 more `Unknown` make 3 in a
+    /// row: the holder claims again, as if the claim had not come between.
+    #[test]
+    fn a_claim_between_unknown_answers_does_not_clear_their_count() {
+        use crate::lookup::test_relay;
+        use crate::protocol::meshes::{LookupOpts, RelayChoice};
+
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Another endpoint connected with the same endpoint id",
+            );
+            let (relay, _server) = test_relay::spawn_plain().await.expect("a local relay");
+            let mut params = public_params();
+            params.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay.clone()]));
+            params.bootstrap_relay = Some(relay);
+            let mut holder = Member::new(&params).await;
+            holder.claim(&params).await;
+            let unknown = beacon::WhoAnswer::Unknown(beacon::Cause::NoConnection);
+            let before = holder.sockets();
+
+            holder.apply(&params, unknown).await;
+            holder.apply(&params, unknown).await;
+            assert_eq!(before, holder.sockets(), "2 unknown answers claim nothing");
+            super::arm_holder_probe(&mut holder.state, CoHostPolicy::EagerProbed, &params);
+            holder.apply(&params, unknown).await;
+
+            assert_ne!(
+                before,
+                holder.sockets(),
+                "the third unknown answer in a row claims again"
+            );
+            let held = holder.rendezvous.take().expect("the beacon");
+            held.shed_and_wait().await;
+            holder.endpoint.close().await;
+        });
+    }
+
+    /// **Two holders of one rendezvous id end with one, and the lower id keeps it.**
+    ///
+    /// On a relay that serves the newest claim, in both orders of the first claims. A holder that is
+    /// not served and has the lower id claims again, make before break; the other reads the rival and
+    /// yields. The loop of asks is the one of the event loop, without its timers.
+    #[test]
+    fn two_holders_of_one_rendezvous_end_with_one_and_the_lower_id_keeps_it() {
+        use crate::lookup::test_relay;
+        use crate::protocol::meshes::{LookupOpts, RelayChoice};
+
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            // The second claim of one id displaces the first on the relay, and the relay tells the
+            // session that it displaced. A handover does the same by design.
+            ::habilis_network_test_tracing::expect_warn(
+                "iroh::socket::transports::relay::actor",
+                "Another endpoint connected with the same endpoint id",
+            );
+            let (relay, _server) = test_relay::spawn_plain().await.expect("a local relay");
+            for lower_claims_first in [true, false] {
+                let mut params = public_params();
+                params.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay.clone()]));
+                params.bootstrap_relay = Some(relay.clone());
+                let first = Member::new(&params).await;
+                let second = Member::new(&params).await;
+                let (mut lower, mut higher) = if first.endpoint.id() < second.endpoint.id() {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                if lower_claims_first {
+                    lower.claim(&params).await;
+                    higher.claim(&params).await;
+                } else {
+                    higher.claim(&params).await;
+                    lower.claim(&params).await;
+                }
+
+                let mut rounds = 0;
+                let mut claimed_again = 0;
+                while lower.rendezvous.is_some() && higher.rendezvous.is_some() {
+                    assert!(rounds < 6, "the contest did not end in 6 rounds");
+                    let before = lower.rendezvous.as_ref().map(|held| held.endpoint.clone());
+                    lower.ask_and_apply(&params).await;
+                    // A node has 1 live endpoint of the id after a claim again: the old one closed in
+                    // the same step as the new one bound.
+                    if let (Some(old), Some(held)) = (before, lower.rendezvous.as_ref())
+                        && old.bound_sockets() != held.endpoint.bound_sockets()
+                    {
+                        for _ in 0..100 {
+                            if old.is_closed() {
+                                break;
+                            }
+                            time::sleep(Duration::from_millis(50)).await;
+                        }
+                        assert!(
+                            old.is_closed(),
+                            "the old endpoint closed after the claim again"
+                        );
+                        assert!(!held.endpoint.is_closed(), "the new endpoint is live");
+                        claimed_again += 1;
+                    }
+                    higher.ask_and_apply(&params).await;
+                    rounds += 1;
+                }
+                assert_eq!(
+                    claimed_again,
+                    u32::from(lower_claims_first),
+                    "the lower id claims again once, when it is not served"
+                );
+                assert!(
+                    lower.rendezvous.is_some(),
+                    "the lower id keeps the rendezvous (it claimed first: {lower_claims_first})"
+                );
+                assert!(
+                    higher.rendezvous.is_none(),
+                    "the higher id yielded (the lower claimed first: {lower_claims_first})"
+                );
+                // The node that claimed again closed its old endpoint: one endpoint of the id.
+                let held = lower.rendezvous.take().expect("the beacon of the lower id");
+                held.shed_and_wait().await;
+                super::wait_for_shed_close(&mut higher.state).await;
+                lower.endpoint.close().await;
+                higher.endpoint.close().await;
+            }
         });
     }
 
@@ -1023,113 +1197,6 @@ mod tests {
         );
     }
 
-    /// A lower holder in our overlay already settled who keeps the rendezvous, so a tab on this
-    /// beacon must not hold the release back: the tab re-dials, and two holders that each
-    /// kept a tab would stay split.
-    #[test]
-    fn a_due_shed_does_not_wait_when_a_lower_holder_was_seen() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let params = public_params();
-            let arm = super::CohostArm {
-                policy: CoHostPolicy::EagerProbed,
-                params: &params,
-                started: clock::Instant::now(),
-            };
-            let mut state = testing::fresh_state();
-            state.next_rival_recheck = Some(clock::Instant::now());
-            state.beacon_notes.insert(BeaconNote::YieldToLower);
-            let (mut rendezvous, _round) =
-                beacon_with_a_negotiating_tab(&params, loopback_endpoint().await);
-
-            assert!(
-                super::shed_rival_beacon_if_due(
-                    &mut state,
-                    &arm,
-                    &mut rendezvous,
-                    iroh::SecretKey::generate().public(),
-                ),
-                "a due shed does not wait when a lower holder was seen"
-            );
-            assert!(rendezvous.is_none(), "the beacon was released");
-            assert!(
-                !state.beacon_notes.contains(&BeaconNote::YieldToLower),
-                "the release uses the request up"
-            );
-        });
-    }
-
-    /// A yield request belongs to the beacon it was made for: a new claim starts clean.
-    #[test]
-    fn a_new_claim_forgets_a_yield_request() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let params = public_params();
-            let endpoint = loopback_endpoint().await;
-            let mut state = testing::fresh_state();
-            state.beacon_notes.insert(BeaconNote::YieldToLower);
-
-            super::schedule_rival_recheck(
-                &mut state,
-                CoHostPolicy::EagerProbed,
-                &params,
-                &endpoint,
-            );
-
-            assert!(
-                !state.beacon_notes.contains(&BeaconNote::YieldToLower),
-                "a new claim forgets a yield request"
-            );
-        });
-    }
-
-    /// A beacon claimed after another went without a shed (a co-host task
-    /// ended, `ensure` claimed again) is a new beacon: the deferrals its
-    /// predecessor used up must not cut short the wait for a tab on this one.
-    #[test]
-    fn a_new_claim_starts_with_the_full_wait() {
-        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let params = public_params();
-            let arm = super::CohostArm {
-                policy: CoHostPolicy::EagerProbed,
-                params: &params,
-                started: clock::Instant::now(),
-            };
-            let endpoint = loopback_endpoint().await;
-            let mut state = testing::fresh_state();
-            // The previous beacon waited its limit.
-            state.rival_recheck_deferrals = MAX_SHED_DEFERRALS;
-
-            super::schedule_rival_recheck(&mut state, arm.policy, &params, &endpoint);
-
-            let (mut rendezvous, _round) = beacon_with_a_negotiating_tab(&params, endpoint);
-            state.next_rival_recheck = Some(clock::Instant::now());
-            assert!(
-                !super::shed_rival_beacon_if_due(
-                    &mut state,
-                    &arm,
-                    &mut rendezvous,
-                    iroh::SecretKey::generate().public()
-                ),
-                "the new beacon's first due shed must wait for its tab"
-            );
-            assert!(rendezvous.is_some(), "the beacon is still held");
-        });
-    }
-
-    /// Bounded, or two holders that each kept a tab would never find each
-    /// other and the overlays would stay split for good.
-    #[test]
-    fn the_wait_runs_out() {
-        let _guard = ::habilis_network_test_tracing::init();
-        assert!(
-            defer_shed(2, MAX_SHED_DEFERRALS - 1),
-            "the deferral wait runs out at its last deferral"
-        );
-        assert!(
-            !defer_shed(2, MAX_SHED_DEFERRALS),
-            "past the limit the shed happens anyway, so split holders still merge"
-        );
-    }
-
     /// Regression for a two-peer loopback mesh that never formed: a peer
     /// whose rendezvous link dropped in the first milliseconds after
     /// joining waited for the 15s heal tick to re-graft, and the mesh
@@ -1186,6 +1253,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: mpsc::unbounded_channel().0,
+                bind_options: lookup::TransportOpts::default(),
             };
 
             let endpoint = lookup::build_endpoint(
@@ -1283,6 +1351,7 @@ mod tests {
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: None,
             rung_tx: mpsc::unbounded_channel().0,
+            bind_options: lookup::TransportOpts::default(),
         };
 
         // The holder: another member of the same room, on the only rung.
@@ -1472,6 +1541,7 @@ mod tests {
                     relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
                     rung_tx: mpsc::unbounded_channel().0,
+                    bind_options: lookup::TransportOpts::default(),
                 }
             };
             let params = params_of(6);
@@ -1597,6 +1667,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: mpsc::unbounded_channel().0,
+                bind_options: lookup::TransportOpts::default(),
             };
             // A beacon of another mesh holds the first rung: this member reads it as foreign and
             // binds the second.
@@ -1610,6 +1681,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: mpsc::unbounded_channel().0,
+                bind_options: lookup::TransportOpts::default(),
             };
             let other_endpoint = loopback_endpoint().await;
             let other_book = lookup::address_book(&other_endpoint);
@@ -2019,9 +2091,9 @@ mod tests {
 
     /// The book kept the address of every beacon that this process held under the id, so a dial to
     /// the id tried the ports of beacons that were gone (the N=2 round: a claim-time offer that hung
-    /// for the whole connect bound while the next offer took 37 ms). A shed takes the entry out.
+    /// for the whole connect bound while the next offer took 37 ms). A release takes the entry out.
     #[test]
-    fn a_shed_takes_the_address_of_the_shed_beacon_out_of_the_book() {
+    fn a_release_takes_the_address_of_the_released_beacon_out_of_the_book() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let params = public_params();
             let arm = super::CohostArm {
@@ -2031,21 +2103,13 @@ mod tests {
             };
             let endpoint = loopback_endpoint().await;
             let mut state = testing::fresh_state();
-            state.next_rival_recheck = Some(clock::Instant::now());
             let old_beacon = iroh::EndpointAddr::new(params.id)
                 .with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
             lookup::add_peer_addr(&state.address_book, old_beacon);
-            let mut rendezvous = Some(beacon::Rendezvous::for_test(endpoint, None));
+            let mut rendezvous = Some(beacon::Rendezvous::for_test(endpoint));
 
-            assert!(
-                super::shed_rival_beacon_if_due(
-                    &mut state,
-                    &arm,
-                    &mut rendezvous,
-                    iroh::SecretKey::generate().public(),
-                ),
-                "a shed takes the address of the shed beacon out of the book"
-            );
+            super::release_to_rival(&mut state, &arm, &mut rendezvous);
+            assert!(rendezvous.is_none(), "the beacon was released");
 
             assert!(
                 state.address_book.get_endpoint_info(params.id).is_none(),
@@ -2054,7 +2118,7 @@ mod tests {
         });
     }
 
-    /// Every claim passes `schedule_rival_recheck`, the verdict arm of the event loop among them,
+    /// Every claim passes `arm_holder_probe`, the verdict arm of the event loop among them,
     /// and the claim of the split round came through that arm: it ends the round that ran against
     /// the missing holder.
     #[test]
@@ -2084,12 +2148,7 @@ mod tests {
                 "one admission slot is in flight after the claim funnel"
             );
 
-            super::schedule_rival_recheck(
-                &mut state,
-                CoHostPolicy::EagerProbed,
-                &params,
-                &endpoint,
-            );
+            super::arm_holder_probe(&mut state, CoHostPolicy::EagerProbed, &params);
 
             let round_running = state.webrtc_admission.in_flight() != 0;
             endpoint.close().await;
@@ -2133,6 +2192,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: mpsc::unbounded_channel().0,
+                bind_options: lookup::TransportOpts::default(),
             };
 
             let endpoint = lookup::build_endpoint(
@@ -2239,6 +2299,7 @@ mod tests {
                 relay_transport: PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: mpsc::unbounded_channel().0,
+                bind_options: lookup::TransportOpts::default(),
             };
 
             let endpoint = lookup::build_endpoint(
@@ -2344,6 +2405,113 @@ mod tests {
         );
     }
 
+    /// **The creator of a public mesh arms the ask of the holder.** A joiner that claims on a free
+    /// reading while the creator holds is the newer claim, so the relay serves the joiner, and only
+    /// the older holder, the creator, can read it. A creator that arms no ask never reads the
+    /// rival, and nothing repairs the pair.
+    #[test]
+    fn a_creator_arms_the_ask_of_the_holder() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let params = public_params();
+            let mut holder = Member::new(&params).await;
+            super::arm_holder_probe(&mut holder.state, CoHostPolicy::Eager, &params);
+            let armed = holder.state.next_holder_probe.is_some();
+            holder.endpoint.close().await;
+            assert!(
+                armed,
+                "the creator of a public mesh arms no ask of the holder, so it never reads a rival that claimed after it"
+            );
+        });
+    }
+
+    /// **A creator that yielded claims like any other member.** The creator claims with no probe,
+    /// since it owns the id at t=0. After it yielded to a rival, the same rule would bind it again
+    /// at its next reclaim tick, with no read of the id, and it would take the newest claim back.
+    #[test]
+    fn a_creator_that_yielded_probes_before_it_claims_again() {
+        let _guard = ::habilis_network_test_tracing::init();
+        assert!(
+            !probes_before_claim(CoHostPolicy::Eager),
+            "a creator claims at t=0 with no probe"
+        );
+        assert!(
+            probes_before_claim(super::cohost_after_a_yield(CoHostPolicy::Eager)),
+            "a creator that yielded probes before its next claim"
+        );
+        for policy in [
+            CoHostPolicy::EagerProbed,
+            CoHostPolicy::Deferred,
+            CoHostPolicy::Never,
+        ] {
+            assert_eq!(
+                super::cohost_after_a_yield(policy),
+                policy,
+                "a yield changes no other policy"
+            );
+        }
+    }
+
+    /// **The holder that yields changes the policy of its node.** The loop gives the answer of the
+    /// probe to `apply_holder_answer` and keeps the policy that the arm holds afterwards, so a
+    /// creator that yields to a rival with a lower id is an `EagerProbed` node from then on; a
+    /// creator that claims again (a rival with a higher id) stays the creator.
+    #[test]
+    fn a_creator_that_yields_to_a_rival_changes_its_policy() {
+        use crate::lookup::test_relay;
+        use crate::protocol::meshes::{LookupOpts, RelayChoice};
+
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            ::habilis_network_test_tracing::allow_warn(
+                "iroh::socket::transports::relay::actor",
+                "Another endpoint connected with the same endpoint id",
+            );
+            let (relay, _server) = test_relay::spawn_plain().await.expect("a local relay");
+            let mut params = public_params();
+            params.lookups = LookupOpts::new(RelayChoice::Custom(vec![relay.clone()]));
+            params.bootstrap_relay = Some(relay);
+            let mut holder = Member::new(&params).await;
+            holder.claim(&params).await;
+            let own = holder.endpoint.id();
+            let mut lower = iroh::SecretKey::generate().public();
+            while lower >= own {
+                lower = iroh::SecretKey::generate().public();
+            }
+            let mut higher = iroh::SecretKey::generate().public();
+            while higher <= own {
+                higher = iroh::SecretKey::generate().public();
+            }
+
+            let claims_again = holder
+                .apply_as(
+                    CoHostPolicy::Eager,
+                    &params,
+                    beacon::WhoAnswer::Rival(higher),
+                )
+                .await;
+            assert_eq!(
+                claims_again,
+                CoHostPolicy::Eager,
+                "a creator that claims again against a rival with a higher id stays the creator"
+            );
+            let yields = holder
+                .apply_as(
+                    CoHostPolicy::Eager,
+                    &params,
+                    beacon::WhoAnswer::Rival(lower),
+                )
+                .await;
+            assert_eq!(
+                yields,
+                CoHostPolicy::EagerProbed,
+                "a creator that yielded to a rival with a lower id is a probed claimant from then on"
+            );
+            if let Some(held) = holder.rendezvous.take() {
+                held.shed_and_wait().await;
+            }
+            holder.endpoint.close().await;
+        });
+    }
+
     #[test]
     fn rival_recheck_gates_on_probed_claims_and_public() {
         // The shed exists for claimants that took the identity on the word of
@@ -2373,184 +2541,15 @@ mod tests {
             !rival_recheck_applies(CoHostPolicy::Deferred, false),
             "the rival recheck is off for a deferred policy that is not public"
         );
-        // The origin owns the identity from t=0 and a consumer claims nothing.
+        // The creator is the oldest holder, so it is the one that can read a joiner that claimed
+        // after it (`a_creator_arms_the_ask_of_the_holder`). A consumer claims nothing.
         assert!(
-            !rival_recheck_applies(CoHostPolicy::Eager, true),
-            "the rival recheck is off for an eager policy"
+            rival_recheck_applies(CoHostPolicy::Eager, true),
+            "the rival recheck applies to the creator of a public mesh"
         );
         assert!(
             !rival_recheck_applies(CoHostPolicy::Never, true),
             "the rival recheck is off for a never policy"
-        );
-    }
-
-    #[test]
-    fn first_recheck_delay_is_deterministic_and_bounded() {
-        use crate::util::tuning::{RIVAL_RECHECK_FIRST, RIVAL_RECHECK_OFFSET_SPAN};
-
-        let _guard = ::habilis_network_test_tracing::init();
-        let id = |byte: u8| iroh::SecretKey::from_bytes(&[byte; 32]).public();
-
-        // Round 0 must be a *deterministic* function of the endpoint id — it
-        // is the tie-break ordering simultaneous claimants, so per-call
-        // randomness would defeat it.
-        assert_eq!(
-            next_recheck_delay(0, 0, id(1)),
-            next_recheck_delay(0, 0, id(1)),
-            "the first recheck delay is the same for the same inputs"
-        );
-
-        // Base + phase offset, offset strictly inside the span.
-        let base = RIVAL_RECHECK_FIRST;
-        let span = RIVAL_RECHECK_OFFSET_SPAN;
-        for byte in 0..8u8 {
-            let delay = next_recheck_delay(0, 0, id(byte));
-            assert!(
-                delay >= base && delay < base + span,
-                "out of bounds: {delay:?}"
-            );
-        }
-
-        // Distinct ids must (in practice) spread across the span — all-equal
-        // offsets would mean the tie-break never orders anyone.
-        let all_equal = (1..8u8)
-            .all(|byte| next_recheck_delay(0, 0, id(byte)) == next_recheck_delay(0, 0, id(0)));
-        assert!(!all_equal, "phase offsets did not spread across ids");
-    }
-
-    #[test]
-    fn steady_recheck_delay_is_jittered_within_bounds() {
-        use crate::util::tuning::{
-            RIVAL_RECHECK, RIVAL_RECHECK_MESHED, RIVAL_RECHECK_SMALL_ROSTER,
-        };
-
-        let _guard = ::habilis_network_test_tracing::init();
-        let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
-
-        // Steady rounds: base by tier plus jitter in [0, base].
-        let lone_base = RIVAL_RECHECK;
-        let meshed_base = RIVAL_RECHECK_MESHED;
-        for _ in 0..8 {
-            let lone = next_recheck_delay(1, 0, id);
-            assert!(
-                lone >= lone_base && lone <= lone_base * 2,
-                "the lone steady recheck delay is within its jitter bounds"
-            );
-            let meshed = next_recheck_delay(1, RIVAL_RECHECK_SMALL_ROSTER + 1, id);
-            assert!(
-                meshed >= meshed_base && meshed <= meshed_base * 2,
-                "the meshed steady recheck delay is within its jitter bounds"
-            );
-        }
-    }
-
-    #[test]
-    fn a_small_roster_rechecks_at_the_brisk_cadence() {
-        use crate::util::tuning::{RIVAL_RECHECK, RIVAL_RECHECK_SMALL_ROSTER};
-
-        let _guard = ::habilis_network_test_tracing::init();
-        let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
-        let lone_base = RIVAL_RECHECK;
-
-        // The workload this exists for: an origin dies and two survivors are
-        // left holding same-id beacons. Waiting out a cadence priced for two
-        // multi-member islands is how that split lasted minutes.
-        for roster in 0..=RIVAL_RECHECK_SMALL_ROSTER {
-            let delay = next_recheck_delay(1, roster, id);
-            assert!(
-                delay <= lone_base * 2,
-                "a {roster}-member roster must not pay the island backstop cadence: {delay:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn rival_free_rounds_back_off_geometrically_to_the_backstop() {
-        use crate::util::tuning::{
-            RIVAL_RECHECK, RIVAL_RECHECK_MESHED, RIVAL_RECHECK_SMALL_ROSTER,
-        };
-
-        let _guard = ::habilis_network_test_tracing::init();
-        let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
-
-        // Each rival-free round doubles the brisk base, capped at the island
-        // backstop: a stable small mesh must stop blipping its beacon every
-        // half-minute forever. Every small roster with at least one peer pays
-        // that cap — two survivors of a departed origin each count the other,
-        // and their same-id split is what the cap is priced for.
-        for roster in 1..=RIVAL_RECHECK_SMALL_ROSTER {
-            for round in 1..=10u32 {
-                let doublings = round.saturating_sub(1).min(7);
-                let base = RIVAL_RECHECK
-                    .saturating_mul(1u32 << doublings)
-                    .min(RIVAL_RECHECK_MESHED);
-                for _ in 0..4 {
-                    let delay = next_recheck_delay(round, roster, id);
-                    assert!(
-                        delay >= base && delay <= base * 2,
-                        "roster {roster}, round {round}: expected base {base:?}, got {delay:?}"
-                    );
-                }
-            }
-        }
-
-        // A large roster pays the backstop from round one, backoff or not.
-        let backstop = RIVAL_RECHECK_MESHED;
-        let delay = next_recheck_delay(1, 20, id);
-        assert!(
-            delay >= backstop && delay <= backstop * 2,
-            "a rival-free round's delay stays between the backstop bounds"
-        );
-    }
-
-    /// Regression for a permanently-alone public topic peer that rebound its
-    /// endpoint every few minutes forever: an empty roster has no split to
-    /// repair once its brisk rounds have found nobody, so its ramp continues
-    /// past the island backstop to the alone ceiling.
-    #[test]
-    fn an_empty_roster_ramps_past_the_island_backstop_to_the_alone_ceiling() {
-        use crate::util::tuning::{RIVAL_RECHECK, RIVAL_RECHECK_ALONE, RIVAL_RECHECK_MESHED};
-
-        let _guard = ::habilis_network_test_tracing::init();
-        let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
-
-        for round in 1..=12u32 {
-            let doublings = round.saturating_sub(1).min(7);
-            let base = RIVAL_RECHECK
-                .saturating_mul(1u32 << doublings)
-                .min(RIVAL_RECHECK_ALONE);
-            for _ in 0..4 {
-                let delay = next_recheck_delay(round, 0, id);
-                assert!(
-                    delay >= base && delay <= base * 2,
-                    "round {round}: expected base {base:?}, got {delay:?}"
-                );
-            }
-        }
-
-        // The brisk rounds are untouched: an empty roster's early sheds are
-        // the double-claim repair, so they must match a two-member mesh's.
-        for round in 1..=4u32 {
-            let alone = next_recheck_delay(round, 0, id);
-            let pair = next_recheck_delay(round, 1, id);
-            let base = RIVAL_RECHECK.saturating_mul(1u32 << round.saturating_sub(1));
-            assert!(
-                alone >= base && alone <= base * 2,
-                "round {round}: {alone:?}"
-            );
-            assert!(pair >= base && pair <= base * 2, "round {round}: {pair:?}");
-        }
-
-        // The settled cadence is well past the island backstop.
-        let settled = next_recheck_delay(12, 0, id);
-        let island_cap = RIVAL_RECHECK_MESHED * 2;
-        assert!(
-            settled > island_cap,
-            "a settled lone holder must idle past the island cap: {settled:?}"
-        );
-        assert!(
-            settled >= RIVAL_RECHECK_ALONE,
-            "the settled delay reaches the alone ceiling"
         );
     }
 
@@ -2570,7 +2569,7 @@ mod tests {
             let mut params = public_params();
             params.bootstrap_relay = Some(rung_of("second"));
             let mut state = testing::fresh_state();
-            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
+            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await);
             let retired = lookup::Generation::next();
             let decision = lookup::RungDecision {
                 from: Some(retired),
@@ -2612,7 +2611,7 @@ mod tests {
                 params.bootstrap_relay = Some(rung_of("second"));
                 let mut state = testing::fresh_state();
                 let endpoint = loopback_endpoint().await;
-                let beacon = beacon::Rendezvous::for_test(endpoint.clone(), None);
+                let beacon = beacon::Rendezvous::for_test(endpoint.clone());
                 let from = from_monitor.then_some(beacon.generation);
                 let decision = lookup::RungDecision {
                     from,
@@ -2661,7 +2660,7 @@ mod tests {
             let mut params = public_params();
             params.bootstrap_relay = Some(rung_of("second"));
             let mut state = testing::fresh_state();
-            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
+            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await);
             let generation = beacon.generation;
             let (tx, mut rx): (
                 mpsc::UnboundedSender<lookup::RungDecision>,
@@ -2725,7 +2724,7 @@ mod tests {
             let mut params = public_params();
             params.bootstrap_relay = Some(rung_of("first"));
             let mut state = testing::fresh_state();
-            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
+            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await);
             let (tx, mut rx): (
                 mpsc::UnboundedSender<lookup::RungDecision>,
                 mpsc::UnboundedReceiver<lookup::RungDecision>,
@@ -2768,8 +2767,8 @@ mod tests {
 
     /// **A beacon that moved its own relay in place is followed by the loop, not shed.**
     ///
-    /// The beacon serves on, so nothing of a new claim applies: the beacon stays held, the epoch of
-    /// the rival re-check goes on, and the reading of the rendezvous stays. The loop only follows
+    /// The beacon serves on, so nothing of a new claim applies: the beacon stays held, the contest of
+    /// the holder goes on, and the reading of the rendezvous stays. The loop only follows
     /// the rung: the parameters of the next claim, and the address that joiners are given.
     #[test]
     fn a_beacon_that_moved_in_place_is_followed_not_shed() {
@@ -2782,11 +2781,10 @@ mod tests {
             let mut params = public_params();
             params.bootstrap_relay = Some(rung_of("second"));
             let mut state = testing::fresh_state();
-            state.rival_recheck_rounds = 5;
             state
                 .rendezvous_flags
                 .insert(state::RendezvousFlag::ProbeReadFree);
-            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await, None);
+            let beacon = beacon::Rendezvous::for_test(loopback_endpoint().await);
             let decision = lookup::RungDecision {
                 from: Some(beacon.generation),
                 rung: Some(rung_of("first")),
@@ -2815,10 +2813,6 @@ mod tests {
                     .any(|url| *url == first_rung)),
                 "joiners are not given the rung that the beacon moved to"
             );
-            assert_eq!(
-                state.rival_recheck_rounds, 5,
-                "a move in place starts no new arbitration epoch"
-            );
             assert!(
                 state
                     .rendezvous_flags
@@ -2830,36 +2824,5 @@ mod tests {
                 .expect("the loop shed a beacon that moved in place");
             held.shed_and_wait().await;
         });
-    }
-
-    /// A rehome is a fresh arbitration epoch, so the backoff restarts with it.
-    ///
-    /// Without the reset the next claim inherits whatever round the previous
-    /// epoch reached, and `next_recheck_delay`'s round-0 branch — the
-    /// deterministic tie-break two simultaneous claimants rely on to shed in a
-    /// decidable order — never runs again for the life of the process.
-    #[test]
-    fn a_rehome_restarts_the_rival_recheck_backoff() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let id = iroh::SecretKey::from_bytes(&[7; 32]).public();
-
-        // Round 0 is the tie-break branch: bounded by the phase-offset span
-        // rather than by the geometric backoff.
-        let fresh = next_recheck_delay(0, 0, id);
-        let settled = next_recheck_delay(5, 0, id);
-        assert!(
-            fresh < settled,
-            "a fresh epoch must re-check sooner than a settled one: {fresh:?} vs {settled:?}"
-        );
-
-        // What `apply_rung_change` now does on a rehome.
-        let mut state = testing::fresh_state();
-        state.rival_recheck_rounds = 5;
-        state.rival_recheck_rounds = 0;
-        assert_eq!(
-            next_recheck_delay(state.rival_recheck_rounds, 0, id),
-            fresh,
-            "after a rehome the next claim is scheduled off round 0"
-        );
     }
 }

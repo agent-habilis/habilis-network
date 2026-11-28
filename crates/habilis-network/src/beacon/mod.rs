@@ -16,9 +16,9 @@
 //!   the record always resolves to a recently-live member. Two
 //!   `EagerProbed` members can still claim inside each other's probe
 //!   window and bind duplicate same-id copies (each capturing its own
-//!   bootstrap dial); the event loop's periodic rival re-check shed
-//!   (`daemon::event_loop::shed_rival_beacon_if_due`) re-arbitrates, so
-//!   the single-co-host invariant holds *eventually*, not at claim time.
+//!   bootstrap dial); each holder then asks who serves the id
+//!   (`beacon_who`, `holder_contest`) and the pair re-arbitrates, so the
+//!   single-co-host invariant holds *eventually*, not at claim time.
 //! - **Private:** a deterministic loopback port *ladder* (no
 //!   pkarr/DNS). One member per mesh is the beacon, the holder of the
 //!   lowest live rung. A member binds the first free rung; on
@@ -41,11 +41,12 @@
 //! The rendezvous endpoint never authors app messages; its node id is
 //! filtered out of peer-side neighbor handling.
 
+mod beacon_who;
 mod bind;
 pub(crate) mod claim;
 mod contest;
-mod dependents;
 mod held;
+mod holder_contest;
 mod lookups;
 mod rendezvous;
 mod rendezvous_params;
@@ -53,16 +54,21 @@ mod rival_probe;
 mod rung_ladder;
 mod rung_probe;
 mod rung_watch;
+pub(crate) use beacon_who::{BEACON_WHO_ALPN, BeaconWho, Cause, WhoAnswer, ask_who};
 pub(crate) use contest::{Contest, claim_after_probe, releasable};
-pub(crate) use dependents::Dependents;
 pub(crate) use held::{Held, Walk, read_busy_rungs, read_ladder, walk_ladder};
+pub(crate) use holder_contest::{
+    ContestAction, HolderContest, Miss, log_claim_missed, log_claim_on_free, log_holder_probe,
+};
 pub(crate) use lookups::beacon_lookups;
 pub(crate) use rendezvous::{Rendezvous, RendezvousLane};
 pub(crate) use rendezvous_params::RendezvousParams;
-pub(crate) use rival_probe::{RivalProbe, probe_verdict, spawn_rival_probe};
+pub(crate) use rival_probe::{
+    ProbePurpose, RivalProbe, holder_is_there, probe_outcome, spawn_holder_probe, spawn_rival_probe,
+};
 pub(crate) use rung_ladder::{
     forget_rungs, forget_rungs_in_book, refresh_holder_rung, rendezvous_addr,
-    rendezvous_addr_offering, rung_of,
+    rendezvous_addr_offering,
 };
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub(crate) use rung_probe::set_blind_rung_probes;

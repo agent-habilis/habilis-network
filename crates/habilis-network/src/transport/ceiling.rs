@@ -88,8 +88,12 @@ enum Quic {
     Absent,
     /// A direct unit of the ceiling.
     Unit,
-    /// No direct unit: the peer is pinned to multihop, or it connected to us above the ceiling.
+    /// No direct unit: the peer connected to us above the ceiling, or no unit was free and no peer
+    /// could go.
     Extra,
+    /// No direct unit: the connection was dialed through multihop alone, and the peer is pinned to
+    /// it. It ends with the connection, or when the peer becomes a gossip neighbor.
+    Pinned,
 }
 
 /// The `WebRTC` session of a peer.
@@ -126,6 +130,7 @@ impl Entry {
     fn extra(&self) -> bool {
         (self.rendezvous && self.held())
             || self.quic == Quic::Extra
+            || self.quic == Quic::Pinned
             || self.session == Session::Extra
     }
 
@@ -196,16 +201,15 @@ pub(crate) struct Ceiling {
     evicts: bool,
     entries: HashMap<EndpointId, Entry>,
     neighbors: HashSet<EndpointId>,
-    /// The peers that a dial reaches through multihop, from the plan of the dial to the close of
-    /// the connection.
-    pinned: HashSet<EndpointId>,
     /// The peers whose direct dial holds a unit that no connection holds yet.
     reserved: HashSet<EndpointId>,
     /// The rendezvous of the mesh. A member at its ceiling may still return to it and hold it: the
     /// link takes no unit, and no admission evicts it.
     rendezvous: Option<EndpointId>,
-    /// The pinned peers whose dial has not opened its connection yet. An inbound connection of such
-    /// a peer that closes does not take the pin, because the dial still needs it.
+    /// The peers that a dial reaches through multihop, from the plan of the dial to the opening of
+    /// its connection: the pin before it has a connection. When the connection opens, the entry of
+    /// the peer is [`Quic::Pinned`] and the peer leaves this set. An inbound connection of such a
+    /// peer that closes does not take the pin, because the dial still needs it.
     awaiting: HashSet<EndpointId>,
     last_batch: Option<Instant>,
 }
@@ -217,7 +221,6 @@ impl Ceiling {
             evicts: true,
             entries: HashMap::new(),
             neighbors: HashSet::new(),
-            pinned: HashSet::new(),
             reserved: HashSet::new(),
             rendezvous: None,
             awaiting: HashSet::new(),
@@ -322,9 +325,15 @@ impl Ceiling {
     /// A unicast QUIC connection to `peer` is open. Returns the admission of a peer that
     /// was not a unit before.
     pub(crate) fn register_quic(&mut self, peer: EndpointId, now: Instant) -> Admission {
-        self.awaiting.remove(&peer);
-        let extra = self.pinned.contains(&peer);
-        self.register_quic_as(peer, now, extra)
+        if !self.awaiting.remove(&peer) {
+            return self.register_quic_as(peer, now, Quic::Unit);
+        }
+        // The connection of our dial rides multihop alone and the sends of the node use it, so it
+        // decides the entry, whatever the peer opened before: the unit of an inbound connection
+        // goes back, and an extra can take it.
+        let admission = self.register_with(peer, now, |entry| entry.quic = Quic::Pinned);
+        self.promote_extras();
+        admission
     }
 
     /// A session to `peer` is open.
@@ -341,8 +350,18 @@ impl Ceiling {
     /// [`Self::register_quic`] or [`Self::release_dial`] gives the reservation back. At the ceiling,
     /// a dial that has a multihop route (`route`) pins the peer and takes no unit. At the ceiling,
     /// with no route, the dial is direct and evicts when its connection registers.
+    ///
+    /// A peer whose pinned connection is open is not planned again: the open connection is the
+    /// dial, and the plan leaves the pin and the units as they are, whatever `route` says. The
+    /// watcher closes a pinned connection that has no route, and it reads the pin.
     pub(crate) fn plan_dial(&mut self, peer: EndpointId, route: bool) -> DialPlan {
-        self.pinned.remove(&peer);
+        if self
+            .entries
+            .get(&peer)
+            .is_some_and(|entry| entry.quic == Quic::Pinned)
+        {
+            return DialPlan::Multihop;
+        }
         self.awaiting.remove(&peer);
         self.reserved.remove(&peer);
         if self.holds(peer) || !self.evicts || self.rendezvous == Some(peer) {
@@ -353,7 +372,6 @@ impl Ceiling {
             return DialPlan::Direct;
         }
         if route {
-            self.pinned.insert(peer);
             self.awaiting.insert(peer);
             return DialPlan::Multihop;
         }
@@ -388,29 +406,36 @@ impl Ceiling {
     pub(crate) fn release_dial(&mut self, peer: EndpointId) {
         self.reserved.remove(&peer);
         self.awaiting.remove(&peer);
-        if !self
-            .entries
-            .get(&peer)
-            .is_some_and(|entry| entry.quic == Quic::Extra)
-        {
-            self.pinned.remove(&peer);
-        }
     }
 
     /// Every pinned peer, planned or connected, in no order.
     pub(crate) fn pins(&self) -> Vec<EndpointId> {
-        self.pinned.iter().copied().collect()
+        let open = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.quic == Quic::Pinned)
+            .map(|(peer, _)| *peer);
+        self.awaiting.iter().copied().chain(open).collect()
     }
 
     /// Forget every pin: the table closed.
     pub(crate) fn clear_pins(&mut self) {
-        self.pinned.clear();
         self.awaiting.clear();
+        for entry in self.entries.values_mut() {
+            if entry.quic == Quic::Pinned {
+                entry.quic = Quic::Extra;
+            }
+        }
     }
 
-    /// Whether `peer` is pinned to multihop.
+    /// Whether `peer` is pinned to multihop: its dial is in flight, or the connection of that dial
+    /// is open.
     pub(crate) fn pinned(&self, peer: EndpointId) -> bool {
-        self.pinned.contains(&peer)
+        self.awaiting.contains(&peer)
+            || self
+                .entries
+                .get(&peer)
+                .is_some_and(|entry| entry.quic == Quic::Pinned)
     }
 
     /// A unicast connection that `peer` opened to us. Below the ceiling it is a unit. At the
@@ -420,20 +445,21 @@ impl Ceiling {
         let reserved_by_others: usize =
             self.reserved.iter().filter(|other| **other != peer).count();
         let full = self.units() + reserved_by_others >= self.cap;
-        let extra = !already && full && self.evicts;
-        self.register_quic_as(peer, now, extra)
+        let quic = if !already && full && self.evicts {
+            Quic::Extra
+        } else {
+            Quic::Unit
+        };
+        self.register_quic_as(peer, now, quic)
     }
 
     /// The pinned peers that hold their connection now, in no order.
     pub(crate) fn pinned_connected(&self) -> Vec<EndpointId> {
-        let extra = self
+        let pinned = self
             .entries
             .iter()
-            .filter(|(_, entry)| entry.quic == Quic::Extra);
-        extra
-            .filter(|(peer, _)| self.pinned.contains(*peer))
-            .map(|(peer, _)| *peer)
-            .collect()
+            .filter(|(_, entry)| entry.quic == Quic::Pinned);
+        pinned.map(|(peer, _)| *peer).collect()
     }
 
     /// The limit `2C` on all the connections of the node: direct, pinned, and inbound above `C`.
@@ -469,9 +495,8 @@ impl Ceiling {
             .collect()
     }
 
-    /// A unicast connection of `peer`: a direct unit, or with `extra` no unit.
-    fn register_quic_as(&mut self, peer: EndpointId, now: Instant, extra: bool) -> Admission {
-        let quic = if extra { Quic::Extra } else { Quic::Unit };
+    /// A unicast connection of `peer`, as a unit or as an extra.
+    fn register_quic_as(&mut self, peer: EndpointId, now: Instant, quic: Quic) -> Admission {
         self.register_with(peer, now, |entry| {
             if entry.quic == Quic::Absent {
                 entry.quic = quic;
@@ -518,9 +543,6 @@ impl Ceiling {
     }
 
     pub(crate) fn unregister_quic(&mut self, peer: EndpointId) {
-        if !self.awaiting.contains(&peer) {
-            self.pinned.remove(&peer);
-        }
         self.unregister(peer, |entry| entry.quic = Quic::Absent);
     }
 
@@ -547,10 +569,13 @@ impl Ceiling {
             return;
         }
         while self.units() + self.reserved.len() < self.cap {
-            let pinned = &self.pinned;
+            let awaiting = &self.awaiting;
             let entries = self.entries.iter();
             let extras = entries.filter(|(peer, entry)| {
-                entry.extra() && !entry.rendezvous && !pinned.contains(*peer)
+                entry.extra()
+                    && !entry.rendezvous
+                    && entry.quic != Quic::Pinned
+                    && !awaiting.contains(*peer)
             });
             let hottest: Option<(&EndpointId, &Entry)> =
                 extras.max_by_key(|(_, entry)| entry.last_use);
@@ -609,8 +634,12 @@ impl Ceiling {
         });
         self.promote_extras();
         for peer in neighbors {
-            self.pinned.remove(peer);
             self.awaiting.remove(peer);
+            if let Some(entry) = self.entries.get_mut(peer)
+                && entry.quic == Quic::Pinned
+            {
+                entry.quic = Quic::Extra;
+            }
         }
         // One admission for all the new neighbors: the neighbors are no candidates, and one pass names
         // each victim once.
@@ -1251,6 +1280,242 @@ mod tests {
         assert!(
             !ceiling.pinned(peer),
             "a gossip neighbor is a direct peer, and no pin holds it on multihop"
+        );
+    }
+
+    /// A node at its ceiling holds a connection that it dialed through multihop. A unit frees up, and
+    /// a send finds the connection unusable for a moment, so the dial of the peer is planned again
+    /// with a route. The connection is open and it is the pin: the plan changes nothing. Before the
+    /// fix the plan dropped the pin, reserved the free unit and went direct, and the open
+    /// connection stayed with a pool that said pinned and a ledger that said not.
+    #[test]
+    fn a_replan_with_a_route_keeps_the_pin_of_a_peer_whose_pinned_connection_is_open() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        let first = testing::endpoint_id(1);
+        ceiling.register_quic(first, start);
+        ceiling.register_quic(testing::endpoint_id(2), at(start, 1));
+        let peer = testing::endpoint_id(3);
+        assert_eq!(
+            ceiling.plan_dial(peer, true),
+            DialPlan::Multihop,
+            "the node is at its ceiling, so the dial rides multihop"
+        );
+        ceiling.register_quic(peer, at(start, 2));
+        ceiling.unregister_quic(first);
+        assert_eq!(ceiling.units(), 1, "a unit is free");
+
+        let plan = ceiling.plan_dial(peer, true);
+
+        assert_eq!(
+            plan,
+            DialPlan::Multihop,
+            "the pinned connection is open: the peer stays on multihop"
+        );
+        assert!(ceiling.pinned(peer), "the pin stays");
+        assert!(ceiling.is_extra(peer), "the connection takes no unit");
+        assert!(
+            !ceiling.reserved.contains(&peer),
+            "no unit is reserved for the peer"
+        );
+    }
+
+    /// The same replan with no route. The connection is still the pin: the watcher closes a pinned
+    /// connection that has no route (`close_pinned_without_route`, which reads
+    /// `pinned_connected`), and it cannot if the plan has dropped the pin.
+    #[test]
+    fn a_replan_with_no_route_leaves_the_pinned_connection_for_the_watcher_to_close() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        let first = testing::endpoint_id(1);
+        ceiling.register_quic(first, start);
+        ceiling.register_quic(testing::endpoint_id(2), at(start, 1));
+        let peer = testing::endpoint_id(3);
+        assert_eq!(
+            ceiling.plan_dial(peer, true),
+            DialPlan::Multihop,
+            "the node is at its ceiling, so the dial rides multihop"
+        );
+        ceiling.register_quic(peer, at(start, 2));
+        ceiling.unregister_quic(first);
+
+        let plan = ceiling.plan_dial(peer, false);
+
+        assert_eq!(
+            plan,
+            DialPlan::Multihop,
+            "the open connection is reused: the plan does not go direct"
+        );
+        assert_eq!(
+            ceiling.pinned_connected(),
+            vec![peer],
+            "the watcher still finds the pinned connection, and closes it if no route comes back"
+        );
+        assert!(
+            !ceiling.reserved.contains(&peer),
+            "no unit is reserved for the peer"
+        );
+    }
+
+    /// The loss of the pin does not depend on how many units are free at the replan.
+    #[test]
+    fn a_replan_keeps_the_pin_of_an_open_pinned_connection_whatever_the_free_units() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let holders = [testing::endpoint_id(1), testing::endpoint_id(2)];
+        let peer = testing::endpoint_id(3);
+        for free in 0..=holders.len() {
+            let mut ceiling = Ceiling::new(2);
+            for holder in holders {
+                ceiling.register_quic(holder, start);
+            }
+            assert_eq!(
+                ceiling.plan_dial(peer, true),
+                DialPlan::Multihop,
+                "the node is at its ceiling, so the dial rides multihop"
+            );
+            ceiling.register_quic(peer, at(start, 5));
+            let freed = holders.iter().take(free);
+            for holder in freed {
+                ceiling.unregister_quic(*holder);
+            }
+            assert_eq!(
+                ceiling.units(),
+                holders.len() - free,
+                "{free} units are free"
+            );
+
+            let plan = ceiling.plan_dial(peer, true);
+
+            assert_eq!(
+                plan,
+                DialPlan::Multihop,
+                "{free} free units: the open pinned connection stays on multihop"
+            );
+            assert!(
+                ceiling.pinned(peer) && ceiling.is_extra(peer),
+                "{free} free units: the pin and the extra stay"
+            );
+        }
+    }
+
+    /// A peer opens a connection to a node at its ceiling while the pinned dial of the node to that
+    /// peer is in flight. The connection of the peer is an extra, and the pin waits for the dial.
+    /// When the dial opens its own connection, the one entry of the peer is the pinned one. The
+    /// ledger keeps one entry for all the unicast connections of a peer, and the table calls
+    /// `unregister_quic` only when none is open (`Inner::drop_quic_without_connection`), so the
+    /// pin ends with the last connection of the peer.
+    #[test]
+    fn an_inbound_extra_of_a_peer_becomes_the_pinned_connection_when_the_dial_opens() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(1);
+        ceiling.register_quic(testing::endpoint_id(1), start);
+        let peer = testing::endpoint_id(2);
+        assert_eq!(
+            ceiling.plan_dial(peer, true),
+            DialPlan::Multihop,
+            "the node is at its ceiling, so the dial rides multihop"
+        );
+
+        ceiling.register_inbound(peer, at(start, 1));
+        assert!(
+            ceiling.is_extra(peer) && ceiling.pinned(peer),
+            "the inbound connection is an extra, and the dial in flight holds the pin"
+        );
+        assert!(
+            ceiling.pinned_connected().is_empty(),
+            "no pinned connection is open yet"
+        );
+
+        ceiling.register_quic(peer, at(start, 2));
+        assert_eq!(
+            ceiling.pinned_connected(),
+            vec![peer],
+            "the dial opened: the entry of the peer is the pinned connection"
+        );
+
+        ceiling.unregister_quic(peer);
+        assert!(
+            !ceiling.pinned(peer) && !ceiling.is_extra(peer),
+            "the last connection of the peer closed: the pin and the entry end"
+        );
+    }
+
+    /// The peer opens a connection to the node while the pinned dial of the node is in flight, and
+    /// a unit is free, so the connection of the peer takes it. Then the dial opens its own
+    /// connection. The sends of the node use that one, and it rides multihop alone: it decides the
+    /// entry. The peer is pinned, and the unit of the inbound connection goes back. Before, the
+    /// entry stayed a unit and the pin ended, so a connection dialed on a route alone had no pin.
+    #[test]
+    fn the_connection_of_a_pinned_dial_decides_the_entry_when_an_inbound_unit_was_open() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(2);
+        let first = testing::endpoint_id(1);
+        ceiling.register_quic(first, start);
+        ceiling.register_quic(testing::endpoint_id(2), at(start, 1));
+        let peer = testing::endpoint_id(3);
+        assert_eq!(
+            ceiling.plan_dial(peer, true),
+            DialPlan::Multihop,
+            "the node is at its ceiling, so the dial rides multihop"
+        );
+        ceiling.unregister_quic(first);
+        ceiling.register_inbound(peer, at(start, 2));
+        assert_eq!(
+            ceiling.units(),
+            2,
+            "the inbound connection took the free unit"
+        );
+
+        ceiling.register_quic(peer, at(start, 3));
+
+        assert!(
+            ceiling.pinned(peer),
+            "the dial opened its connection: the peer is pinned"
+        );
+        assert_eq!(
+            ceiling.pinned_connected(),
+            vec![peer],
+            "the entry of the peer is the pinned connection"
+        );
+        assert_eq!(
+            ceiling.units(),
+            1,
+            "the unit of the inbound connection is back"
+        );
+    }
+
+    /// The dial of a pinned peer ends with no connection, while an extra that the peer opened
+    /// is open. The pin was for the dial: it ends with the dial, and the inbound extra stays what
+    /// it was, an extra that a unit can promote. Before, the pin outlived the dial because an
+    /// unrelated extra was open.
+    #[test]
+    fn a_pinned_dial_that_ends_takes_its_pin_with_it_when_an_inbound_extra_is_open() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let mut ceiling = Ceiling::new(1);
+        ceiling.register_quic(testing::endpoint_id(1), start);
+        let peer = testing::endpoint_id(2);
+        assert_eq!(
+            ceiling.plan_dial(peer, true),
+            DialPlan::Multihop,
+            "the node is at its ceiling, so the dial rides multihop"
+        );
+        ceiling.register_inbound(peer, at(start, 1));
+
+        ceiling.release_dial(peer);
+
+        assert!(
+            !ceiling.pinned(peer),
+            "the dial ended: no pin holds the peer"
+        );
+        assert!(
+            ceiling.is_extra(peer),
+            "the inbound extra of the peer is what it was"
         );
     }
 

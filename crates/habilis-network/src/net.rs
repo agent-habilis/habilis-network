@@ -8,6 +8,8 @@ use crate::gossip::PathSummary;
 use iroh::endpoint::TransportAddrUsage;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 
+#[cfg(feature = "iroh-test-utils")]
+pub use crate::lookup::Bind;
 #[cfg(feature = "multihop")]
 pub use crate::lookup::multihop_handle_config;
 #[cfg(all(
@@ -19,8 +21,8 @@ pub use crate::lookup::set_underlay_leg_off;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use crate::lookup::test_relay;
 pub use crate::lookup::{
-    EndpointError, TransportHandles, TransportOpts, add_peer_addr, address_book, build_endpoint,
-    build_peer_endpoint, probe_connect, probe_ladder, relay_ladder,
+    EndpointError, EndpointRole, TransportHandles, TransportOpts, add_peer_addr, address_book,
+    build_endpoint, build_peer_endpoint, probe_connect, probe_ladder, relay_ladder,
 };
 #[cfg(feature = "host")]
 pub use crate::lookup::{NetworkCapability, capability_probe};

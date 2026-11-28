@@ -1339,9 +1339,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -1617,6 +1617,7 @@ dependencies = [
  "iroh-relay",
  "memchr",
  "n0-future",
+ "n0-mainline",
  "netdev",
  "parking_lot",
  "proptest",
@@ -2459,7 +2460,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.103.0"
-source = "git+https://github.com/agent-habilis/iroh-gossip?rev=ad79518f2dfd6cca7c55ad2683487e8577ddca66#ad79518f2dfd6cca7c55ad2683487e8577ddca66"
+source = "git+https://github.com/agent-habilis/iroh-gossip?rev=6f1eee4854d06a5fb64706dbf2895a712bb4a154#6f1eee4854d06a5fb64706dbf2895a712bb4a154"
 dependencies = [
  "blake3",
  "bytes",
@@ -2485,7 +2486,7 @@ dependencies = [
 [[package]]
 name = "iroh-mainline-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=a0c481fe1e5cde6bd305351e1450b6e0673ccb9a#a0c481fe1e5cde6bd305351e1450b6e0673ccb9a"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=2f6c0d2c6d292dd4790f097b4af416b6c2025907#2f6c0d2c6d292dd4790f097b4af416b6c2025907"
 dependencies = [
  "derive_more",
  "iroh",
@@ -2502,7 +2503,7 @@ dependencies = [
 [[package]]
 name = "iroh-mdns-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=a0c481fe1e5cde6bd305351e1450b6e0673ccb9a#a0c481fe1e5cde6bd305351e1450b6e0673ccb9a"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=2f6c0d2c6d292dd4790f097b4af416b6c2025907#2f6c0d2c6d292dd4790f097b4af416b6c2025907"
 dependencies = [
  "data-encoding",
  "derive_more",
@@ -5191,9 +5192,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

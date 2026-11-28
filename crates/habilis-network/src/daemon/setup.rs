@@ -13,8 +13,6 @@ use std::{mem, sync};
 use std::{time::Duration, time::Instant};
 #[cfg(feature = "host")]
 use tokio::task;
-#[cfg(all(unix, feature = "host"))]
-use tokio::time;
 mod injected_endpoint;
 mod setup_kind;
 mod setup_params;
@@ -70,6 +68,7 @@ fn rendezvous_params(
     mesh: &Mesh,
     topic_id: proto::TopicId,
     lookups: &LookupOpts,
+    options: lookup::TransportOpts,
     rung_tx: mpsc::UnboundedSender<lookup::RungDecision>,
 ) -> RendezvousParams {
     let bind_ports = if mesh.is_loopback() {
@@ -91,6 +90,7 @@ fn rendezvous_params(
         bind_ports,
         id: mesh.rendezvous_id(),
         lookups: lookups.clone(),
+        bind_options: lookup::bind_only(options),
         relay_transport: transport::PayloadPath::from(relay_transport),
         bootstrap_relay,
         rung_tx,
@@ -229,6 +229,7 @@ pub(crate) async fn reregister_rendezvous(
 /// back-pressure the loop (a dropped frame is not repaired until the loss repair lands).
 fn unicast_inbox(
     relay_transport: transport::PayloadPath,
+    admission: transport::SignalAdmission,
 ) -> (
     mpsc::Receiver<transport::UnicastFrame>,
     transport::UnicastAcceptor,
@@ -237,7 +238,10 @@ fn unicast_inbox(
         mpsc::Sender<transport::UnicastFrame>,
         mpsc::Receiver<transport::UnicastFrame>,
     ) = mpsc::channel(consts::UNICAST_INBOX_CAP);
-    (rx, transport::UnicastAcceptor::new(tx, relay_transport))
+    (
+        rx,
+        transport::UnicastAcceptor::new(tx, relay_transport, admission),
+    )
 }
 
 /// The chunk request channel and its Router acceptor. The acceptor hands each request of `CHUNKS_ALPN` to the
@@ -245,6 +249,7 @@ fn unicast_inbox(
 /// back-pressure the loop: a request over the cap gets the absent answer.
 fn chunk_inbox(
     relay_transport: transport::PayloadPath,
+    admission: transport::SignalAdmission,
 ) -> (
     mpsc::Receiver<transport::ChunkAsk>,
     transport::ChunkAcceptor,
@@ -253,7 +258,10 @@ fn chunk_inbox(
         mpsc::Sender<transport::ChunkAsk>,
         mpsc::Receiver<transport::ChunkAsk>,
     ) = mpsc::channel(tuning::CHUNK_INBOX_CAP);
-    (rx, transport::ChunkAcceptor::new(tx, relay_transport))
+    (
+        rx,
+        transport::ChunkAcceptor::new(tx, relay_transport, admission),
+    )
 }
 
 /// The multihop handle that `build_member_endpoint` returns: the real one when the `multihop`
@@ -319,7 +327,7 @@ async fn build_member_endpoint(
     }
     // Made before the endpoint, because the endpoint reports its connections
     // to this table from the first handshake on.
-    let admission = transport::SignalAdmission::new(build.max_connections);
+    let admission = build.admission.clone();
     if build.multihop {
         // The cap also bounds the sessions of the underlay: it holds one to each known member that needs one.
         let (endpoint, handle, webrtc, underlay_webrtc, mdns) = lookup::build_peer_multihop_with(
@@ -380,7 +388,7 @@ async fn build_member_endpoint(
             injected.mdns,
         ));
     }
-    let admission = transport::SignalAdmission::new(build.max_connections);
+    let admission = build.admission.clone();
     #[cfg(feature = "multihop")]
     if build.multihop {
         let (endpoint, handle, webrtc, underlay_webrtc, mdns) = lookup::build_peer_multihop_with(
@@ -531,6 +539,8 @@ struct SetupBuild<'build> {
     lookups: &'build LookupOpts,
     unicast_acceptor: &'build transport::UnicastAcceptor,
     chunk_acceptor: &'build transport::ChunkAcceptor,
+    /// The admission table of the node: the acceptors and the endpoint share it.
+    admission: &'build transport::SignalAdmission,
     /// The mesh policy's `multihop`: register the multi-hop transport on the
     /// peer endpoint.
     #[cfg_attr(
@@ -624,15 +634,19 @@ struct Assembled {
     prober_closes: Vec<oneshot::Receiver<()>>,
 }
 
-/// `max_connections` with `0` taken as the default. Every option set (`Opts`, the C
-/// struct, the browser object, a caller's own `SetupParams`) ends in
-/// [`setup_mesh`], so this is the one place where that has to hold.
-fn resolve_max_connections(max_connections: usize) -> usize {
-    if max_connections == 0 {
-        tuning::MAX_CONNECTIONS
-    } else {
-        max_connections
+/// Accepts a cap on connections that holds at least [`tuning::MIN_MAX_CONNECTIONS`]. A lower
+/// number, `0` too, is an error that names the minimum and the value: nothing raises it. Every option
+/// set (`Opts`, the C struct, the browser object, a caller's own `SetupParams`) ends in
+/// [`setup_mesh`], and an injected endpoint ends in [`InjectedEndpoint::bind`], so these two entries
+/// call this one function.
+fn check_max_connections(max_connections: usize) -> Result<(), SetupError> {
+    if max_connections < tuning::MIN_MAX_CONNECTIONS {
+        return Err(SetupError::MaxConnectionsBelowMinimum {
+            value: max_connections,
+            minimum: tuning::MIN_MAX_CONNECTIONS,
+        });
     }
+    Ok(())
 }
 
 /// # Errors
@@ -660,6 +674,7 @@ pub async fn setup_mesh(
     kind: SetupKind,
     params: SetupParams,
 ) -> Result<EventLoopConfig, SetupError> {
+    check_max_connections(params.max_connections)?;
     // `Box::pin` keeps the assembly future off the frame of every caller that awaits it, so those
     // callers stay under clippy's `large_futures` threshold. The size depends on the target, so
     // boxing the one await is more robust than shaving fields.
@@ -887,45 +902,83 @@ fn last_recorded_run_in(key_path: &Path) -> Option<u64> {
 
 /// Take the exclusive lock on `<state>.key.lock` and keep it as long as the returned file lives, so two
 /// live starts of one state path cannot be one member: the second would read the same member key and take
-/// the next run, and a peer would drop the first as an older run of that member. Each try is non-blocking, and
-/// a held lock is tried again for `KEY_LOCK_RETRY`, in steps of `KEY_LOCK_STEP`, because a restart that comes
-/// right after a leave meets the old daemon while it still stops; the wait is a timer of the runtime, so the
-/// old daemon, which may run on the same thread, still gets to stop. After that the start fails and names the
-/// way out. It is an OS lock on the descriptor, so it goes with the process, and a crash frees the key. The
-/// file is opened close-on-exec (the default of Rust), so a child of the daemon does not keep the lock after
-/// the daemon is gone. No state path means no key to keep. A file system that has no file locks cannot start
-/// a daemon with a member key: the error names the lock file.
+/// the next run, and a peer would drop the first as an older run of that member. The try is one and does not
+/// wait: a start that meets a held lock fails at once, names the pid of the holder (from the line that the
+/// holder wrote into the lock file), and names the way out. A start that cannot write that line fails, as the
+/// record of the daemon lock does. A restart after a leave meets no
+/// holder, because the leave waits for the daemon to end (the daemon lock). It is an OS lock on the descriptor, so
+/// it goes with the process, and a crash frees the key. The file is opened close-on-exec (the default of Rust), so
+/// a child of the daemon does not keep the lock after the daemon is gone. No state path means no key to keep. A
+/// file system that has no file locks cannot start a daemon with a member key: the error names the lock file.
 #[cfg(all(unix, feature = "host"))]
 // the lock is shared with every clone of the keys, and the last one to drop frees it
-async fn hold_member_key(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
+fn hold_member_key(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
     let Some(state) = state else {
         return Ok(None);
     };
-    let lock = open_key_lock(state)?;
-    let give_up = Instant::now() + KEY_LOCK_RETRY;
-    while !try_key_lock(&lock, state)? {
-        if Instant::now() >= give_up {
-            return Err(key_held_error(state));
-        }
-        time::sleep(KEY_LOCK_STEP).await;
+    // Nothing makes the folder of a state file: a missing one is the caller's to make, and the error says so.
+    let folder: Option<&Path> = state
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty());
+    if let Some(folder) = folder.filter(|folder| !folder.is_dir()) {
+        anyhow::bail!(
+            "the folder of the state file does not exist: {}",
+            folder.display()
+        );
     }
-    // shared with every clone of the keys: the lock goes when the last one drops
-    Ok(Some(sync::Arc::new(lock)))
-}
-
-/// [`hold_member_key`] with one try and no wait, for a caller that is not async.
-#[cfg(all(unix, feature = "host"))]
-// the lock is shared with every clone of the keys, and the last one to drop frees it
-fn hold_member_key_once(state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
-    let Some(state) = state else {
-        return Ok(None);
-    };
-    let lock = open_key_lock(state)?;
-    if try_key_lock(&lock, state)? {
+    let lock_path = key_lock_path(state);
+    let mut lock = open_lock(&lock_path)?;
+    if try_lock(&lock, &lock_path)? {
+        record_key_holder(&mut lock)?;
         // shared with every clone of the keys: the lock goes when the last one drops
         Ok(Some(sync::Arc::new(lock)))
     } else {
-        Err(key_held_error(state))
+        Err(key_held_error(state, &lock))
+    }
+}
+
+/// Write the pid and the start of this process into the key lock file, which this process holds, so a start
+/// that meets the lock can name the holder. One truncate and one write under the lock: the file is never
+/// replaced, as a new file would not carry the lock. A start that the system cannot read leaves the file
+/// empty, and the refusal then says `unknown`.
+#[cfg(all(unix, feature = "host"))]
+fn record_key_holder(lock: &mut File) -> Result<()> {
+    use crate::util::process;
+    use crate::util::process_start::ProcessStart;
+    use std::io::Write as _;
+    use std::process as std_process;
+    lock.set_len(0)?;
+    let pid = std_process::id();
+    if let ProcessStart::Live(start) = process::start_of(pid) {
+        lock.write_all(format!("{pid} {start}\n").as_bytes())?;
+    }
+    Ok(())
+}
+
+/// The pid of the process that holds the key lock `lock`, or `unknown`. It is read from the checked handle of
+/// the lock file, so no second open goes round the checks of [`open_lock`]. The file keeps the line of an
+/// earlier holder until the next holder writes its own, so the pid counts only when a process with that pid
+/// runs with the recorded start.
+#[cfg(all(unix, feature = "host"))]
+fn key_holder_pid(lock: &File) -> String {
+    use crate::util::process;
+    use crate::util::process_start::ProcessStart;
+    use std::os::unix::fs::FileExt as _;
+    let mut line = [0u8; 64];
+    let count = lock.read_at(&mut line, 0).unwrap_or(0);
+    let bytes: &[u8] = line.get(..count).unwrap_or_default();
+    let text: &str = str::from_utf8(bytes).unwrap_or_default();
+    let mut fields = text.split_whitespace();
+    let recorded_pid: Option<u32> = fields.next().and_then(|field| field.parse().ok());
+    let recorded_start: Option<u64> = fields.next().and_then(|field| field.parse().ok());
+    let (Some(holder), Some(start)) = (recorded_pid, recorded_start) else {
+        return "unknown".to_owned();
+    };
+    match process::start_of(holder) {
+        ProcessStart::Live(running) if running == start => holder.to_string(),
+        ProcessStart::Live(_) | ProcessStart::Gone | ProcessStart::Unknown(_) => {
+            "unknown".to_owned()
+        }
     }
 }
 
@@ -1012,43 +1065,119 @@ fn refuse_foreign_lock_file(lock: &File, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Open the lock file of the member key of `state`, mode 0600.
+/// The lock file of the member key of `state`.
 #[cfg(all(unix, feature = "host"))]
-fn open_key_lock(state: &Path) -> Result<File> {
+fn key_lock_path(state: &Path) -> PathBuf {
+    state.with_extension("key.lock")
+}
+
+/// Open the lock file at `lock_path`, mode 0600.
+#[cfg(all(unix, feature = "host"))]
+fn open_lock(lock_path: &Path) -> Result<File> {
     use anyhow::Context as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-    refuse_shared_state_folder(state)?;
-    let lock_path = state.with_extension("key.lock");
+    refuse_shared_state_folder(lock_path)?;
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(false).mode(0o600);
+    // Read access: the key lock reads the line of its holder from this handle.
+    options.read(true).write(true);
+    options.create(true).truncate(false).mode(0o600);
     let lock: File = options
         .custom_flags(no_link_flags())
-        .open(&lock_path)
+        .open(lock_path)
         .with_context(|| format!("the lock file {} cannot be opened", lock_path.display()))?;
-    refuse_foreign_lock_file(&lock, &lock_path)?;
+    refuse_foreign_lock_file(&lock, lock_path)?;
     Ok(lock)
 }
 
 /// One try at the lock: true when it is taken, false when another holder has it.
 #[cfg(all(unix, feature = "host"))]
-fn try_key_lock(lock: &File, state: &Path) -> Result<bool> {
+fn try_lock(lock: &File, lock_path: &Path) -> Result<bool> {
     use std::fs::TryLockError;
     match lock.try_lock() {
         Ok(()) => Ok(true),
         Err(TryLockError::WouldBlock) => Ok(false),
         Err(TryLockError::Error(error)) => Err(anyhow::Error::from(error).context(format!(
             "the lock file {} cannot be locked: the file system may not support file locks, and a daemon with a member key cannot start there",
-            state.with_extension("key.lock").display()
+            lock_path.display()
         ))),
     }
 }
 
+/// Take the lock of the one live daemon of a nickname on a mesh in a runtime base, and write the record of the
+/// daemon into the lock file (see [`registry`](super::registry)). The run takes it before it creates its state
+/// file or binds its socket, and holds it to its end. The chunk folder, the control socket and the tracing log are
+/// named by the mesh and the nickname alone, so two daemons of one pair, with two state files, would clear the files
+/// of each other; a lock on the state file does not keep them apart, as each has its own. The lock file stays in the
+/// locks folder when the run ends, and nothing removes it: a lock file that is removed leaves a race between a start
+/// that holds the old file and a start that makes a new one. An OS lock on the descriptor goes with the process. The
+/// try is one and does not wait: a start that meets a held lock fails at once and names the holder. A restart after a
+/// leave meets no holder, because the leave waits for the daemon to end ([`wait_daemon_lock`](super::registry)).
+/// `state_file` is the state file of the run, or `None`
+/// for a run with no state file of its own: the record then names the default state path of the pair. No runtime
+/// base means no files to protect.
+/// # Errors
+/// The folder or the lock file cannot be used, the start of this process cannot be read, or another daemon holds
+/// the lock.
+#[cfg(all(unix, feature = "host"))]
+pub(crate) fn hold_daemon_lock(
+    base: Option<&Path>,
+    mesh: &MeshId,
+    author: &Nickname,
+    state_file: Option<&Path>,
+) -> Result<Option<File>> {
+    use super::registry::{self, DaemonRecord};
+    use crate::util;
+    use crate::util::process;
+    use crate::util::process_start::ProcessStart;
+    use std::io::Write as _;
+    use std::{path, process as std_process};
+    let Some(base) = base else {
+        return Ok(None);
+    };
+    let lock_path = registry::daemon_lock_path(base, mesh, author);
+    util::ensure_parent_private(Some(base), &lock_path)?;
+    let mut lock = open_lock(&lock_path)?;
+    if !try_lock(&lock, &lock_path)? {
+        let holder = registry::read_record(&lock_path).ok().flatten();
+        let pid = holder.map_or_else(|| "unknown".to_owned(), |record| record.pid.to_string());
+        anyhow::bail!(
+            "another daemon already runs as {author} on mesh {mesh} in this runtime folder (pid {pid}): use another nickname"
+        );
+    }
+    let pid = std_process::id();
+    let ProcessStart::Live(start) = process::start_of(pid) else {
+        anyhow::bail!("the start of this process (pid {pid}) could not be read");
+    };
+    let state_path =
+        state_file.map_or_else(|| default_state_path(base, mesh, author), Path::to_path_buf);
+    let record = DaemonRecord::new(
+        pid,
+        start,
+        mesh.clone(),
+        author.clone(),
+        path::absolute(state_path)?,
+    );
+    // One truncate and one write under the lock. The file is never replaced: a new file would not carry the lock.
+    lock.set_len(0)?;
+    lock.write_all(record.to_line()?.as_bytes())?;
+    Ok(Some(lock))
+}
+
+/// The lock is an OS lock of a file, and the host feature builds on a unix system only (the process
+/// helpers of the util crate call `kill` and read `proc_pidinfo` or `/proc`). A host build on another system is
+/// refused here, so that a daemon with files never starts with no lock.
+#[cfg(all(feature = "host", not(unix)))]
+compile_error!(
+    "the host feature needs a unix system: the lock of the one live daemon is an OS lock of a file"
+);
+
 /// The error of a start that finds the member key held.
 #[cfg(all(unix, feature = "host"))]
-fn key_held_error(state: &Path) -> anyhow::Error {
+fn key_held_error(state: &Path, lock: &File) -> anyhow::Error {
     anyhow::anyhow!(
-        "another daemon still runs on this state file and holds the member key {}: wait for it to exit and retry, or use another nickname or --state-file",
-        state.with_extension("key").display()
+        "another daemon still runs on this state file and holds the member key {} (pid {}): wait for it to exit and retry, or use another nickname or --state-file",
+        state.with_extension("key").display(),
+        key_holder_pid(lock)
     )
 }
 
@@ -1056,32 +1185,21 @@ fn key_held_error(state: &Path) -> anyhow::Error {
 /// writing the counter file must not hold a worker of the runtime for ever.
 #[cfg(all(unix, feature = "host"))]
 const RUN_LOCK_CAP: Duration = Duration::from_secs(30);
-/// How long a start tries again for the lock of the member key, while the daemon that holds it stops.
+/// How long a start tries again for the lock of the run counter, while the holder lets go.
 #[cfg(all(unix, feature = "host"))]
 const KEY_LOCK_RETRY: Duration = Duration::from_secs(2);
-/// The wait between two tries for the lock of the member key.
+/// The wait between two tries for the lock of the run counter.
 #[cfg(all(unix, feature = "host"))]
 const KEY_LOCK_STEP: Duration = Duration::from_millis(50);
 
 /// A target with no files keeps no member key, so it takes no lock.
 #[cfg(not(all(unix, feature = "host")))]
 #[expect(
-    clippy::unused_async,
-    reason = "the same signature as the version for a target with files"
-)]
-// the same type as the version for a target with files
-async fn hold_member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
-    Ok(None)
-}
-
-/// [`hold_member_key`] with one try, for a caller that is not async: no lock on a target with no files.
-#[cfg(not(all(unix, feature = "host")))]
-#[expect(
     clippy::unnecessary_wraps,
     reason = "the same signature as the version for a target with files"
 )]
 // the same type as the version for a target with files
-fn hold_member_key_once(_state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
+fn hold_member_key(_state: Option<&Path>) -> Result<Option<sync::Arc<File>>> {
     Ok(None)
 }
 
@@ -1465,7 +1583,7 @@ fn early_keys_state_path(
 /// signs frames and is the seal key, so it must be new each run: a restart that reused it would sign
 /// as the old run.
 fn run_keys(state: Option<&Path>, cancel: &AtomicBool) -> Result<RunKeys> {
-    run_keys_holding(state, hold_member_key_once(state)?, cancel)
+    run_keys_holding(state, hold_member_key(state)?, cancel)
 }
 
 /// [`run_keys`] for a start that holds the lock of the member key of `state` already: the setup takes it
@@ -1525,9 +1643,8 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         keys_in_default_state,
         &author,
     )?;
-    let key_lock = hold_member_key(early_state.as_deref()).await?;
+    let key_lock = hold_member_key(early_state.as_deref())?;
     let endpoint_owner = owner_of(injected.as_ref());
-    let max_connections = resolve_max_connections(max_connections);
     // The localhost binding is owned + bound by the caller; the engine only needs
     // the resolved port for the `ready` event. `Some(0)` (ephemeral) is resolved
     // caller-side and passed back in here as the real port.
@@ -1544,8 +1661,15 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // only when its verdict is another rung.
     let ladder: Vec<_> = relay_ladder(&lookups.relay_lookup).collect();
     let (rung_tx, rung_rx) = mpsc::unbounded_channel();
-    let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport);
-    let (chunk_rx, chunk_acceptor) = chunk_inbox(relay_transport);
+    // The table of the node, made before the acceptors that read it and before the endpoint that
+    // reports its connections to it from the first handshake on. An endpoint that the caller
+    // injected brought its own table, and the node uses that one.
+    let admission = injected.as_ref().map_or_else(
+        || transport::SignalAdmission::new(max_connections),
+        |injected| injected.admission.clone(),
+    );
+    let (unicast_rx, unicast_acceptor) = unicast_inbox(relay_transport, admission.clone());
+    let (chunk_rx, chunk_acceptor) = chunk_inbox(relay_transport, admission.clone());
 
     let build = SetupBuild {
         author: &author,
@@ -1554,6 +1678,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         lookups: &lookups,
         unicast_acceptor: &unicast_acceptor,
         chunk_acceptor: &chunk_acceptor,
+        admission: &admission,
         // The mesh policy's `multihop`, on a node that has a direct path for its underlay to
         // forward over: UDP, or a WebRTC data channel when IP is cleared. With neither there is
         // no direct path, and no handle.
@@ -1716,9 +1841,9 @@ fn build_overlay(
     transport::IceProfile,
 ) {
     let ice = transport::IceProfile {
-        host_only: mesh.is_loopback(),
+        host_only: lookup::stays_on_this_host(mesh.is_loopback(), build.transports),
     };
-    let unicast = build.unicast_acceptor.clone().admission(admission.clone());
+    let unicast = build.unicast_acceptor.clone();
     let webrtc_lane = build
         .transports
         .webrtc
@@ -1732,9 +1857,14 @@ fn build_overlay(
         build.max_connections,
         Some(unicast),
         webrtc_lane,
+        transport::PathGate::Table(admission.clone()),
         protocols,
-        build.relay_transport.relay_allowed(),
-        webrtc::lane_needs::local_needs_webrtc_lane(UdpTransport::from(build.transports.udp)),
+        lookup::GatePolicy {
+            relay_transport: build.relay_transport.relay_allowed(),
+            needs_session: webrtc::lane_needs::local_needs_webrtc_lane(UdpTransport::from(
+                build.transports.udp,
+            )),
+        },
     );
     (gossip, router, admission, address_book, ice)
 }
@@ -1852,7 +1982,13 @@ async fn setup_create(
 
     let (gossip, router, webrtc_admission, address_book, webrtc_ice) =
         build_overlay(build, &mesh, &endpoint, &webrtc, admission);
-    let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
+    let rdv = rendezvous_params(
+        &mesh,
+        topic_id,
+        build.lookups,
+        build.transports,
+        build.rung_tx.clone(),
+    );
     // Creator has no peers yet — bootstrap is empty.
     let topic = split::subscribe_mesh(&gossip, topic_id, rdv.id, []).await?;
 
@@ -1928,7 +2064,13 @@ async fn setup_join(
         build_member_endpoint(build, injected).await?;
 
     let lan_contacts = lookup::lan_contacts(&endpoint, mdns, &topic_id).await?;
-    let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
+    let rdv = rendezvous_params(
+        &mesh,
+        topic_id,
+        build.lookups,
+        build.transports,
+        build.rung_tx.clone(),
+    );
     let (gossip, router, webrtc_admission, address_book, webrtc_ice) =
         build_overlay(build, &mesh, &endpoint, &webrtc, admission);
     // Must precede the join (the subscribe below): the peer resolves the rendezvous id via
@@ -2057,7 +2199,7 @@ mod tests {
         };
 
         folder(0o777);
-        let open = super::hold_member_key_once(Some(&state));
+        let open = super::hold_member_key(Some(&state));
         let refusal: Option<String> = open.err().map(|error| format!("{error:#}"));
         let text: String = refusal.unwrap_or_default();
         let named: String = dir.path().display().to_string();
@@ -2068,13 +2210,13 @@ mod tests {
 
         folder(0o1777);
         assert!(
-            super::hold_member_key_once(Some(&state)).is_ok(),
+            super::hold_member_key(Some(&state)).is_ok(),
             "a folder with the sticky bit (mode 1777) was refused"
         );
         let private = dir.path().join("private.json");
         folder(0o700);
         assert!(
-            super::hold_member_key_once(Some(&private)).is_ok(),
+            super::hold_member_key(Some(&private)).is_ok(),
             "a private folder (mode 0700) was refused"
         );
     }
@@ -2099,7 +2241,7 @@ mod tests {
         symlink(&lock_target, lock_state.with_extension("key.lock"))
             .expect("a link at the key lock");
         assert!(
-            super::hold_member_key_once(Some(&lock_state)).is_err(),
+            super::hold_member_key(Some(&lock_state)).is_err(),
             "the key lock was opened through a link"
         );
 
@@ -2384,7 +2526,7 @@ mod tests {
             "a target with no files keeps no member key"
         );
         assert!(
-            super::hold_member_key_once(Some(&state))
+            super::hold_member_key(Some(&state))
                 .expect("no lock")
                 .is_none(),
             "a target with no files takes no lock"
@@ -2661,12 +2803,21 @@ mod tests {
         }
     }
 
-    /// A restart of `state`, the way the setup takes it: [`super::hold_member_key`] tries the lock again for
-    /// `KEY_LOCK_RETRY`. A start that tries it once fails while a child that another test spawns still holds a
-    /// copy of the lock file, between its fork and its exec.
+    /// A restart of `state`, the way the setup takes it. The engine tries the lock once. A test process runs other
+    /// tests that spawn children, and between its fork and its exec a child holds a copy of the lock file, so a
+    /// try at that moment fails with no holder: the helper tries again for a short time, and only the test does.
     #[cfg(all(unix, feature = "host"))]
     async fn start_again(state: &Path) -> anyhow::Result<RunKeys> {
-        let key_lock = super::hold_member_key(Some(state)).await?;
+        use std::time::Instant;
+        use tokio::time;
+        let give_up = Instant::now() + super::KEY_LOCK_RETRY;
+        let key_lock = loop {
+            match super::hold_member_key(Some(state)) {
+                Ok(lock) => break lock,
+                Err(error) if Instant::now() >= give_up => return Err(error),
+                Err(_) => time::sleep(super::KEY_LOCK_STEP).await,
+            }
+        };
         super::run_keys_holding(Some(state), key_lock, &super::NEVER_CANCELLED)
     }
 
@@ -3172,39 +3323,108 @@ mod tests {
         drop(first);
     }
 
-    /// A restart that comes right after a leave meets the old daemon while it still stops: the start
-    /// tries again for a short time instead of failing at once. The runtime has ONE thread, the one that
-    /// the old daemon stops on: a wait that blocks the thread would keep it from stopping, and the start
-    /// would wait the whole time and fail. The holder here ends after 300 ms, on that thread.
+    /// A state file whose folder does not exist is refused with the folder named: nothing makes the folder, and the
+    /// error of the lock file that cannot be opened does not say what is wrong.
     #[cfg(all(unix, feature = "host"))]
     #[test]
-    fn a_start_that_meets_a_holder_that_is_stopping_waits_for_it_on_one_thread() {
+    fn a_state_file_in_a_folder_that_does_not_exist_names_the_folder() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let dir = env::temp_dir().join(format!("habilis-key-lock-no-folder-{}", process::id()));
+        drop(fs::remove_dir_all(&dir));
+        let missing = dir.join("not-made");
+        let state = missing.join("session.json");
+
+        let refused = super::hold_member_key(Some(&state));
+
+        let error = refused.expect_err("a state file in a missing folder is refused");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("the folder of the state file does not exist")
+                && text.contains(&missing.display().to_string()),
+            "the error names the missing folder: {text}"
+        );
+        assert!(!missing.exists(), "nothing makes the folder");
+    }
+
+    /// A start that meets a live holder is refused at once, with no wait. A restart after a leave meets no
+    /// holder, because the leave waits for the daemon to end. (A spec change: the start used to try again for
+    /// 2 s, user decision.)
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_start_that_meets_a_live_holder_is_refused_at_once() {
         use std::time::Instant;
-        let guard = ::habilis_network_test_tracing::init();
-        ::habilis_network_test_tracing::run(guard, async {
-            let dir = env::temp_dir().join(format!("habilis-key-lock-wait-{}", process::id()));
-            fs::create_dir_all(&dir).expect("a temp dir");
-            let state = dir.join("wait.json");
-            let holder =
-                super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start");
-            let stopping = tokio::spawn(async move {
-                time::sleep(Duration::from_millis(300)).await;
-                drop(holder);
-            });
-            let started = Instant::now();
-            let second = super::hold_member_key(Some(&state)).await;
-            let waited = started.elapsed();
-            stopping.await.expect("the holder task ends");
+        let _guard = ::habilis_network_test_tracing::init();
+        let dir = env::temp_dir().join(format!("habilis-key-lock-once-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("once.json");
+        let holder = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start");
+
+        let started = Instant::now();
+        let second = super::hold_member_key(Some(&state));
+        let waited = started.elapsed();
+        drop(holder);
+
+        let error = second.expect_err("a live holder refuses the second start");
+        assert!(
+            format!("{error:#}").contains("another daemon still runs"),
+            "the refusal names the holder: {error:#}"
+        );
+        assert!(
+            waited < Duration::from_millis(250),
+            "the refusal comes at once: {waited:?}"
+        );
+    }
+
+    /// A start that meets a live holder learns who holds the key: the refusal names the pid of the holder, as
+    /// the refusal of the daemon lock does. The holder writes its pid into the lock file once it has the lock.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_start_that_meets_a_live_holder_names_its_pid() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let dir = env::temp_dir().join(format!("habilis-key-lock-pid-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("pid.json");
+        let holder = super::run_keys(Some(&state), &super::NEVER_CANCELLED).expect("first start");
+
+        let second = super::hold_member_key(Some(&state));
+        drop(holder);
+
+        let error = second.expect_err("a live holder refuses the second start");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains(&format!("(pid {})", process::id())),
+            "the refusal names the pid of the holder: {text}"
+        );
+        drop(fs::remove_dir_all(&dir));
+    }
+
+    /// A lock file that holds the line of an earlier holder, or no line yet (the holder has the lock and has not
+    /// written), is never read as the pid of a live process: the refusal says `unknown`.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_start_that_meets_a_holder_with_no_current_record_says_unknown() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let dir = env::temp_dir().join(format!("habilis-key-lock-stale-{}", process::id()));
+        fs::create_dir_all(&dir).expect("a temp dir");
+        let state = dir.join("stale.json");
+        let lock_path = super::key_lock_path(&state);
+        let held = super::open_lock(&lock_path).expect("the lock file");
+        assert!(
+            super::try_lock(&held, &lock_path).expect("a try"),
+            "the lock is free"
+        );
+        for line in ["", "garbage", &format!("{} 1", process::id())] {
+            fs::write(&lock_path, line).expect("a line in the lock file");
+
+            let error = super::hold_member_key(Some(&state)).expect_err("the held lock refuses");
+
             assert!(
-                second.is_ok(),
-                "a start that meets a holder that is stopping works: {:?}",
-                second.err()
+                format!("{error:#}").contains("(pid unknown)"),
+                "a record that is no live holder says unknown for {line:?}: {error:#}"
             );
-            assert!(
-                waited >= Duration::from_millis(250) && waited < Duration::from_secs(2),
-                "the start waited for the holder, and not for the whole retry: {waited:?}"
-            );
-        });
+        }
+        drop(held);
+        drop(fs::remove_dir_all(&dir));
     }
 
     /// The lock goes with the daemon: when the holder is dropped (or dies, since the lock is an OS
@@ -3246,10 +3466,16 @@ mod tests {
         });
     }
 
+    /// The test binary runs the fork-gap test again, in a process of its own, with this variable set.
+    #[cfg(all(unix, feature = "host"))]
+    const FORK_GAP_CHILD: &str = "HABILIS_TEST_FORK_GAP_CHILD";
+
     /// A restart waits out a child that another thread spawns. Between its fork and its exec the child holds a
     /// copy of every descriptor of this process, the lock file too, so the lock stays held for a moment after its
     /// holder drops. Each test of this binary that spawns a child opens that gap, and a restart that tried the
-    /// lock once failed in it. Here the child stays in the gap for 1 s.
+    /// lock once failed in it. Here the child stays in the gap for 1 s. The body runs in a process of its own: the
+    /// child of a gap holds a copy of every descriptor of its parent, so in the process of the other tests it
+    /// would hold the key locks that they take at the same time.
     #[cfg(all(unix, feature = "host"))]
     #[expect(
         unsafe_code,
@@ -3260,6 +3486,25 @@ mod tests {
         use std::io::{self, Read as _, Write as _};
         use std::os::unix::process::CommandExt as _;
         use std::time::Duration;
+        if env::var_os(FORK_GAP_CHILD).is_none() {
+            let mut again = process::Command::new(env::current_exe().expect("the test binary"));
+            again
+                .args([
+                    "--exact",
+                    "daemon::setup::tests::a_restart_waits_out_a_child_that_holds_a_copy_of_the_lock_until_its_exec",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(FORK_GAP_CHILD, "1");
+            let output = again.output().expect("run the test binary");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "the restart failed in its own process, or the filter matched no test: {stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let dir = TempDir::new("habilis-key-lock-fork-gap");
             let state = dir.path().join("session.json");
@@ -3384,9 +3629,10 @@ mod tests {
     // over UDP.
     use crate::daemon::node;
     use crate::lookup::test_relay;
+    use crate::protocol::Nickname;
     use crate::protocol::meshes::Lookup;
     use crate::util::tuning;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
     #[test]
     fn a_browser_refuses_a_mesh_with_no_relay_lookup() {
         let _guard = ::habilis_network_test_tracing::init();
@@ -3573,6 +3819,201 @@ mod tests {
         });
     }
 
+    /// A clean leave keeps the member key and the run counter of a state file that the caller named, so
+    /// the same node that joins the same mesh again on that path is the same member, one run later. The
+    /// state file goes.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_clean_leave_keeps_the_member_of_an_explicit_state_file() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = TempDir::new("habilis-leave-keeps-member");
+            let state = dir.path().join("session.json");
+            let stay = |mesh: Option<String>| {
+                let state = state.clone();
+                async move {
+                    let options = membership::JoinOptions::default().mesh(mesh);
+                    let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+                    let params = super::SetupParams::new(author, embed::SilentSink)
+                        .max_connections(8)
+                        .state_file(state.clone());
+                    let config = super::setup_mesh(kind, params)
+                        .await
+                        .expect("a loopback mesh sets up");
+                    let shown = (config.member_key(), config.mesh.keys.run);
+                    let joined = config.mesh_id().to_string();
+                    let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+                    let node = node::Node::spawn(
+                        config,
+                        membership::MembershipApp::new(inbound_tx),
+                        None,
+                        SignalHandling::Leave,
+                    );
+                    let deadline = time::Instant::now() + Duration::from_secs(10);
+                    while !state.exists() && time::Instant::now() < deadline {
+                        time::sleep(Duration::from_millis(20)).await;
+                    }
+                    assert!(state.exists(), "the run writes its state file");
+                    node.leave().await.expect("the node leaves");
+                    (shown, joined)
+                }
+            };
+
+            let ((first_key, first_run), mesh) = stay(None).await;
+            let left_state_file = state.exists();
+            let key_stays = state.with_extension("key").exists();
+            let run_stays = state.with_extension("run").exists();
+            let ((second_key, second_run), _) = stay(Some(mesh)).await;
+
+            assert!(!left_state_file, "the state file goes at a clean leave");
+            assert!(key_stays, "a clean leave keeps the member key");
+            assert!(run_stays, "and the run counter");
+            assert!(first_key.is_some(), "a member key is shown");
+            assert_eq!(first_key, second_key, "the same node is the same member");
+            assert_eq!(
+                (first_run, second_run),
+                (1, 2),
+                "one run later, as a restart goes on"
+            );
+        });
+    }
+
+    /// The member key is one value in 3 places: what the config names before the loop, what the node
+    /// shows as its own in its snapshot, and what another node shows for it in its roster. The loop signs
+    /// its proofs with the key of the mesh and the config derives the same key from the seed again, so a
+    /// second derive, or none, would show here as 3 different keys.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn the_member_key_is_the_same_before_the_loop_in_our_snapshot_and_in_another_roster() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            4,
+            async {
+                let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
+                let options = |nick: &str, mesh: Option<String>| -> membership::JoinOptions {
+                    let base = membership::JoinOptions::default()
+                        .lookup(vec![Lookup::Relay])
+                        .relay_urls(vec![relay.to_string()]);
+                    base.mesh(mesh).nick(Some(nick.to_owned()))
+                };
+                let first_options = options("member-a", None);
+                let nickname = Nickname::try_new("member-a").ok();
+                let (kind, author) =
+                    membership::resolve_kind(&first_options, nickname).expect("a kind");
+                let params = super::SetupParams::new(author, embed::SilentSink).max_connections(8);
+                let config = super::setup_mesh(kind, params)
+                    .await
+                    .expect("a relay mesh sets up");
+                let before: Option<String> = config.member_key().map(|key| key.to_string());
+                let mesh = config.mesh_id().to_string();
+                let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+                let first = node::Node::spawn(
+                    config,
+                    membership::MembershipApp::new(inbound_tx),
+                    None,
+                    SignalHandling::Leave,
+                );
+                let second_options = options("member-b", Some(mesh));
+                let (sink, _events) = membership::json_sink();
+                let second = membership::join(&second_options, sink)
+                    .await
+                    .expect("the second member joins");
+
+                let deadline = time::Instant::now() + Duration::from_secs(60);
+                let mut seen_by_second: Option<String> = None;
+                while seen_by_second.is_none() && time::Instant::now() < deadline {
+                    let json = second
+                        .request(|reply| {
+                            membership::Request::Inspect(membership::Inspect::Peers { reply })
+                        })
+                        .await
+                        .unwrap_or_default();
+                    let roster: serde_json::Value =
+                        serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+                    let rows = roster["peers"].as_array().cloned().unwrap_or_default();
+                    let row = rows.iter().find(|row| row["nickname"] == "member-a");
+                    seen_by_second = row
+                        .and_then(|row| row["member"].as_str())
+                        .map(str::to_owned);
+                    time::sleep(Duration::from_millis(250)).await;
+                }
+                let (reply, answer) = oneshot::channel();
+                first
+                    .sender()
+                    .send(membership::Request::Inspect(membership::Inspect::Peers {
+                        reply,
+                    }))
+                    .await
+                    .expect("the loop of the first node runs");
+                let own_json = answer.await.expect("the first node answers");
+                let own: serde_json::Value =
+                    serde_json::from_str(&own_json).unwrap_or(serde_json::Value::Null);
+                let own_member: Option<String> = own["own_member"].as_str().map(str::to_owned);
+                first.leave().await.expect("the first node leaves");
+                second.node.leave().await.expect("the second node leaves");
+
+                assert!(before.is_some(), "the config names a member key");
+                assert_eq!(
+                    before, own_member,
+                    "the key before the loop is the own member of the snapshot"
+                );
+                assert_eq!(
+                    before, seen_by_second,
+                    "another node shows the same key for the member"
+                );
+            },
+        );
+    }
+
+    /// One state path keeps one seed, and the node shows another member key on each mesh: two meshes
+    /// on one state path are not linked by the key.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn one_state_path_shows_another_member_key_on_another_mesh() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let dir = TempDir::new("habilis-member-per-mesh");
+            let state = dir.path().join("session.json");
+            let start = || {
+                let state = state.clone();
+                async move {
+                    let options = membership::JoinOptions::default();
+                    let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+                    let params = super::SetupParams::new(author, embed::SilentSink)
+                        .max_connections(8)
+                        .state_file(state);
+                    let config = super::setup_mesh(kind, params)
+                        .await
+                        .expect("a loopback mesh sets up");
+                    let shown = config.member_key();
+                    let mesh = config.mesh_id().clone();
+                    config
+                        .endpoints
+                        .router
+                        .shutdown()
+                        .await
+                        .expect("the router stops");
+                    if let Some(handle) = config.transports.multihop.as_ref() {
+                        handle.close().await;
+                    }
+                    drop(ended(config.mesh.keys.clone()));
+                    (shown, mesh)
+                }
+            };
+
+            let (first, first_mesh) = start().await;
+            let (second, second_mesh) = start().await;
+
+            assert_ne!(
+                first_mesh, second_mesh,
+                "the premise: 2 creates are 2 meshes"
+            );
+            assert!(first.is_some(), "a member key is shown");
+            assert_ne!(
+                first, second,
+                "one state path, one seed, and the same member key on 2 meshes"
+            );
+        });
+    }
+
     // A node without UDP takes part in multihop when the policy has it: the rule is that
     // a direct path exists, `udp` or `webrtc`, and not `udp` alone. With neither, the
     // underlay has no direct path to forward over, and there is no handle. A node may run with
@@ -3668,15 +4109,13 @@ mod tests {
         });
     }
 
-    // `max_connections` comes from the caller, and `0` takes the default. Every option set
-    // (`Opts`, the C struct, the browser object) ends in `setup_mesh`, so this is
-    // the one place that has to hold.
+    // `max_connections` comes from the caller and is the cap as it is, with no clamp. Every option
+    // set (`Opts`, the C struct, the browser object) ends in `setup_mesh`, so this is the one place
+    // that has to hold.
     #[test]
-    fn the_cap_follows_the_params_and_zero_takes_the_default() {
+    fn the_cap_follows_the_params() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            use crate::util::tuning::MAX_CONNECTIONS;
-
-            for (max_connections, want) in [(0, MAX_CONNECTIONS), (5, 5)] {
+            for (max_connections, want) in [(8, 8), (16, 16)] {
                 let options = membership::JoinOptions::default();
                 let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
                 let config = super::setup_mesh(
@@ -3706,6 +4145,77 @@ mod tests {
                 }
             }
         });
+    }
+
+    // The cap has a minimum of 8, and every number below it, `0` too, is an error that names the
+    // minimum and the value. No value is raised to the minimum.
+    #[test]
+    fn a_cap_under_the_minimum_is_a_setup_error_that_names_the_minimum_and_the_value() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            for max_connections in 0..8_usize {
+                let options = membership::JoinOptions::default();
+                let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+                let error = super::setup_mesh(
+                    kind,
+                    super::SetupParams::new(author, embed::SilentSink)
+                        .max_connections(max_connections),
+                )
+                .await
+                .expect_err("a cap under 8 is refused at setup");
+                assert!(
+                    matches!(
+                        error,
+                        super::SetupError::MaxConnectionsBelowMinimum { value, minimum }
+                            if value == max_connections && minimum == tuning::MIN_MAX_CONNECTIONS
+                    ),
+                    "the error holds the value {max_connections} and the minimum: {error:?}"
+                );
+            }
+        });
+    }
+
+    // The second entry: an injected endpoint makes its own admission table from the cap, so it
+    // refuses a cap under the minimum with the same error as `setup_mesh`, before it binds.
+    #[test]
+    fn an_injected_endpoint_with_a_cap_under_the_minimum_is_refused_at_bind() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let secret = iroh::SecretKey::from_bytes(&[93; 32]);
+            for max_connections in [0, 7] {
+                let error = super::InjectedEndpoint::bind(
+                    &LookupOpts::loopback(),
+                    secret.clone(),
+                    Vec::new(),
+                    lookup::TransportHandles {
+                        webrtc: Some(lookup::build_webrtc_handle(secret.public())),
+                        ..lookup::TransportHandles::default()
+                    },
+                    max_connections,
+                )
+                .await
+                .expect_err("a cap under 8 is refused at bind");
+                assert!(
+                    matches!(
+                        error,
+                        super::SetupError::MaxConnectionsBelowMinimum { value, minimum }
+                            if value == max_connections && minimum == tuning::MIN_MAX_CONNECTIONS
+                    ),
+                    "the error holds the value {max_connections} and the minimum: {error:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn the_text_of_a_cap_under_the_minimum_is_pinned() {
+        let error = super::SetupError::MaxConnectionsBelowMinimum {
+            value: 7,
+            minimum: tuning::MIN_MAX_CONNECTIONS,
+        };
+        assert_eq!(
+            error.to_string(),
+            "max connections is 7: the lowest value is 8 (the default is 16)",
+            "the text names the value, the minimum and the default"
+        );
     }
 
     // The default of the one bound: 16 direct connections, gossip neighbors, `WebRTC` sessions
@@ -3757,7 +4267,7 @@ mod tests {
                 webrtc: Some(webrtc),
                 gossip: None,
                 admission: None,
-                underlay: false,
+                role: lookup::EndpointRole::Peer,
                 options: lookup::TransportOpts::default(),
             },
             tuning::MAX_CONNECTIONS,
@@ -3784,7 +4294,7 @@ mod tests {
                         webrtc,
                         gossip: None,
                         admission: None,
-                        underlay: false,
+                        role: lookup::EndpointRole::Peer,
                         options: lookup::TransportOpts::default(),
                     },
                     tuning::MAX_CONNECTIONS,
@@ -4054,6 +4564,135 @@ mod tests {
             assert!(!underlay.is_closed(), "the caller's underlay stays open");
             underlay.close().await;
             endpoint.close().await;
+        });
+    }
+
+    // A node never starts again under its nickname, so the chunk folder that the run opened under
+    // the runtime base is of no use after a clean leave.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_clean_leave_removes_the_chunk_folder_of_the_node() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use std::os::unix::fs::PermissionsExt as _;
+            let base = TempDir::new("leave-removes-chunks");
+            fs::set_permissions(base.path(), fs::Permissions::from_mode(0o700))
+                .expect("a private runtime base");
+            let options = membership::JoinOptions::default();
+            let (kind, author) = membership::resolve_kind(&options, None).expect("a kind");
+            let runtime_base = base.path().to_path_buf();
+            let params = super::SetupParams::new(author, embed::SilentSink)
+                .max_connections(8)
+                .runtime_base(runtime_base);
+            let config = super::setup_mesh(kind, params)
+                .await
+                .expect("a loopback mesh sets up");
+            let folder =
+                super::default_chunks_path(base.path(), &config.mesh.mesh, &config.mesh.author);
+            let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+            let node = node::Node::spawn(
+                config,
+                membership::MembershipApp::new(inbound_tx),
+                None,
+                SignalHandling::Leave,
+            );
+            let deadline = time::Instant::now() + Duration::from_secs(10);
+            while !folder.exists() && time::Instant::now() < deadline {
+                time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(folder.exists(), "the run opens its chunk folder");
+
+            node.leave().await.expect("the node leaves");
+
+            assert!(
+                !folder.exists(),
+                "a clean leave left the chunk folder {} behind",
+                folder.display()
+            );
+        });
+    }
+
+    // The runtime folder keys the chunk folder, the control socket and the tracing log by mesh and
+    // nickname, so one runtime base holds one live daemon for each pair. A second start with
+    // another state file passes the lock of its state file, and it must not clear the chunk folder
+    // of the first.
+    #[cfg(all(unix, feature = "host"))]
+    #[test]
+    fn a_second_start_of_the_same_nickname_on_the_mesh_leaves_the_chunk_folder_of_the_first() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use crate::util;
+            use std::os::unix::fs::PermissionsExt as _;
+            let base = TempDir::new("second-start-chunks");
+            fs::set_permissions(base.path(), fs::Permissions::from_mode(0o700))
+                .expect("a private runtime base");
+            let runtime_base = base.path().to_path_buf();
+            let start = |mesh: Option<String>, state: &str| {
+                let runtime_base = runtime_base.clone();
+                let state = runtime_base.join(state);
+                async move {
+                    let options = membership::JoinOptions::default().mesh(mesh);
+                    let twin = Nickname::try_new("twin").expect("a valid nickname");
+                    let (kind, author) =
+                        membership::resolve_kind(&options, Some(twin)).expect("a kind");
+                    let params: super::SetupParams =
+                        super::SetupParams::new(author, embed::SilentSink)
+                            .max_connections(8)
+                            .runtime_base(runtime_base.clone())
+                            .state_file(state);
+                    let config = super::setup_mesh(kind, params)
+                        .await
+                        .expect("a loopback mesh sets up");
+                    let folder = super::default_chunks_path(
+                        &runtime_base,
+                        &config.mesh.mesh,
+                        &config.mesh.author,
+                    );
+                    let joined = config.mesh_id().to_string();
+                    let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+                    let node = node::Node::spawn(
+                        config,
+                        membership::MembershipApp::new(inbound_tx),
+                        None,
+                        SignalHandling::Leave,
+                    );
+                    (node, folder, joined)
+                }
+            };
+
+            let (first, folder, mesh) = start(None, "first.json").await;
+            let deadline = time::Instant::now() + Duration::from_secs(10);
+            while !folder.exists() && time::Instant::now() < deadline {
+                time::sleep(Duration::from_millis(20)).await;
+            }
+            let marker = folder.join("marker");
+            fs::write(&marker, b"the first run uses this folder").expect("a file in the folder");
+
+            let (second, second_folder, _) = start(Some(mesh.clone()), "second.json").await;
+            assert_eq!(folder, second_folder, "both starts name one chunk folder");
+            let cleared_by = time::Instant::now() + Duration::from_secs(2);
+            while marker.exists() && time::Instant::now() < cleared_by {
+                time::sleep(Duration::from_millis(20)).await;
+            }
+            let kept = marker.exists();
+            let refused = second.leave().await;
+            first.leave().await.expect("the first node leaves");
+            let lock = base
+                .path()
+                .join("locks")
+                .join(format!("{}-twin.lock", util::mesh_prefix(&mesh)));
+
+            assert!(lock.exists(), "the lock file stays in the locks folder");
+            assert!(
+                !base.path().join("second.json").exists(),
+                "a start that the lock refuses creates no state file"
+            );
+            assert!(
+                kept,
+                "the second start cleared the chunk folder of the first run"
+            );
+            assert!(
+                refused.is_err(),
+                "a second daemon of the same nickname on the mesh is refused"
+            );
         });
     }
 }

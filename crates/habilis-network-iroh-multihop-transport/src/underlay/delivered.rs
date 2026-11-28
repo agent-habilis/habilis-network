@@ -4,8 +4,8 @@ use iroh_base::CustomAddr;
 /// transport's `poll_recv` to surface to iroh.
 #[derive(Debug, Clone)]
 pub(crate) struct Delivered {
-    /// The sender's return address (a reversed route), reported to iroh as the
-    /// remote of this packet so replies route back.
+    /// The sender's address (the application id of the node that made the cell), reported to iroh as the
+    /// remote of this packet so replies go back to it.
     pub(crate) remote: CustomAddr,
     pub(crate) packet: Vec<u8>,
 }

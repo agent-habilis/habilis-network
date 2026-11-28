@@ -1,4 +1,4 @@
-use crate::daemon::config::EndpointOwner;
+use crate::daemon::config::{EndpointOwner, TransportSet};
 
 use iroh::protocol;
 /// What the loop closes as it ends: the router with its endpoint, and the multi-hop
@@ -13,6 +13,22 @@ pub(in crate::daemon) struct OwnedEndpoints {
 }
 
 impl OwnedEndpoints {
+    /// The endpoints of a run. A handle that the caller injected is the caller's: `close` skips it with the endpoint.
+    pub(in crate::daemon) fn new(
+        router: protocol::Router,
+        owner: EndpointOwner,
+        transports: &TransportSet,
+    ) -> Self {
+        #[cfg(not(feature = "multihop"))]
+        let _ = transports;
+        Self {
+            router,
+            owner,
+            #[cfg(feature = "multihop")]
+            multihop: transports.multihop.clone(),
+        }
+    }
+
     /// Dropping an endpoint that was never closed makes iroh log an ERROR and abort its
     /// connections. `Router::shutdown` closes the router and its endpoint; the two
     /// closes run together, as each can wait on peers that are already gone.

@@ -17,8 +17,9 @@ use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Inspect, Membership, Request};
+use habilis_network::net::Bind;
 use habilis_network::protocol::{Lookup, Transport};
-use habilis_network::util::tuning::STARVED;
+use habilis_network::util::tuning::{MIN_MAX_CONNECTIONS, STARVED};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
@@ -31,8 +32,15 @@ const FILL_DEADLINE: Duration = Duration::from_mins(3);
 /// How long the views must stay full in the stability test.
 const STABLE_FOR: Duration = Duration::from_mins(5);
 
-/// The active view cap of the stability test, smaller than the mesh.
-const VIEW_CAP: usize = 4;
+/// The active view cap of the tests: the minimum a node accepts, so a mesh needs more than 9
+/// members to be bigger than G + 1.
+const VIEW_CAP: usize = MIN_MAX_CONNECTIONS;
+
+/// The members of the churn test: 15, so each view holds 8 of the 14 others.
+const CHURN_MEMBERS: usize = 15;
+
+/// The members of the stability test: 12, so each view holds 8 of the 11 others.
+const STABLE_MEMBERS: usize = 12;
 
 /// How long the churn test counts link changes, after the formation.
 const CHURN_WINDOW: Duration = Duration::from_mins(5);
@@ -63,7 +71,8 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl, max_connections: usize) -> Self {
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .lookup(vec![Lookup::Relay]);
         let relay_urls = vec![relay.to_string()];
@@ -81,7 +90,8 @@ impl Member {
 
     async fn join(nick: &str, creator: &Self, max_connections: usize) -> Self {
         let mesh = creator.membership.node.mesh_id().to_string();
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .mesh(Some(mesh));
         let options = options.max_connections(max_connections);
@@ -167,17 +177,24 @@ async fn until_every_view_holds(
     }
 }
 
+/// The relay can report that another endpoint connected with the same endpoint id. Measured
+/// cause: 2 or more members re-claim the rendezvous within a few ms after its holder left, the
+/// rival check sheds all but the lowest id in 0.36 to 0.39 s (4 of 5 double claims, 16 members),
+/// and this WARN is the trace of that overlap. A claim race at formation (a holder that is bound
+/// and not serving yet answers the probe with a refusal) is by the code, and not seen in the
+/// 20 runs of the ten-member test.
+fn allow_double_claim_warn() {
+    habilis_network_test_tracing::allow_warn(
+        "iroh::socket::transports::relay::actor",
+        "Another endpoint connected with the same endpoint id",
+    );
+}
+
 #[test]
 fn a_mesh_of_ten_links_every_member_to_every_other() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        // Two members can claim the rendezvous a few milliseconds apart: a holder that is bound and
-        // not serving yet answers the probe with a refusal, which the probe reads as silence. The
-        // rival check resolves that overlap by design, and the relay logs the connection that it replaced.
-        habilis_network_test_tracing::allow_warn(
-            "iroh::socket::transports::relay::actor",
-            "Another endpoint connected with the same endpoint id",
-        );
+        allow_double_claim_warn();
         let (members, keep) = mesh(10, 32).await;
 
         let result = until_every_view_holds(&members, 9, FILL_DEADLINE).await;
@@ -218,7 +235,7 @@ fn a_mesh_of_g_plus_one_links_every_member_to_every_other_the_beacon_holder_too(
     });
 }
 
-/// Twelve members with G = 4. A graft is a join, and a full view cannot refuse a
+/// Fifteen members with G = 8. A graft is a join, and a full view cannot refuse a
 /// join, so every graft evicts a neighbor and the views must not be pushed around by
 /// grafts nobody needs. After the views settle, the links may change at most twice per
 /// member per minute. The links are sampled every five seconds, so a flap shorter than
@@ -234,10 +251,11 @@ fn a_mesh_of_g_plus_one_links_every_member_to_every_other_the_beacon_holder_too(
 /// Takes eighteen minutes, so it only runs when asked for: `-- --ignored`.
 #[test]
 #[ignore = "eighteen minutes: the views are sampled"]
-fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
+fn a_mesh_of_fifteen_with_g_eight_has_a_bounded_churn_after_formation() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (members, keep) = mesh(12, VIEW_CAP).await;
+        allow_double_claim_warn();
+        let (members, keep) = mesh(CHURN_MEMBERS, VIEW_CAP).await;
 
         let started = Instant::now();
         let settle = FILL_DEADLINE + STARVED.saturating_mul(2);
@@ -303,17 +321,18 @@ fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
     });
 }
 
-/// Eight members with G = 4. The overlay is a hot potato: a graft at a full peer
+/// Twelve members with G = 8. The overlay is a hot potato: a graft at a full peer
 /// evicts one of its links, so the views move. What is claimed is what can hold:
 /// every member reaches G at least once, and the fraction of samples at G and the
 /// rate of link changes are printed as numbers, with a floor on the first only.
-/// Takes five minutes, so it only runs when asked for: `-- --ignored`.
+/// Takes eighteen minutes, so it only runs when asked for: `-- --ignored`.
 #[test]
-#[ignore = "five minutes: the views are sampled"]
+#[ignore = "eighteen minutes: the views are sampled"]
 fn a_mesh_larger_than_g_plus_one_reaches_g_everywhere_and_the_churn_is_reported() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (members, keep) = mesh(8, VIEW_CAP).await;
+        allow_double_claim_warn();
+        let (members, keep) = mesh(STABLE_MEMBERS, VIEW_CAP).await;
 
         let mut reached = vec![false; members.len()];
         let mut at_cap = 0_u32;
@@ -321,15 +340,18 @@ fn a_mesh_larger_than_g_plus_one_reaches_g_everywhere_and_the_churn_is_reported(
         let mut changes = 0_u32;
         let mut previous: Vec<BTreeSet<String>> = Vec::new();
         let started = Instant::now();
-        let window = FILL_DEADLINE + STABLE_FOR;
+        // The wait of a late member for its `Join` is `STARVED` (5 minutes), so the samples count
+        // after the time that the churn test settles for: the fill deadline and 2 waits.
+        let settle = FILL_DEADLINE + STARVED.saturating_mul(2);
+        let window = settle + STABLE_FOR;
         while started.elapsed() < window {
             let mut now = Vec::with_capacity(members.len());
             let indexed: Vec<(usize, &Member)> = members.iter().enumerate().collect();
             for (index, member) in indexed {
                 let links = member.linked_set().await;
                 reached[index] |= links.len() == VIEW_CAP;
-                // Only after the fill deadline do samples count toward the fraction.
-                if started.elapsed() >= FILL_DEADLINE {
+                // Only after the settle time do samples count toward the fraction.
+                if started.elapsed() >= settle {
                     samples += 1;
                     at_cap += u32::from(links.len() == VIEW_CAP);
                     if let Some(before) = previous.get(index) {
@@ -339,7 +361,7 @@ fn a_mesh_larger_than_g_plus_one_reaches_g_everywhere_and_the_churn_is_reported(
                 }
                 now.push(links);
             }
-            if started.elapsed() >= FILL_DEADLINE {
+            if started.elapsed() >= settle {
                 previous = now;
             }
             time::sleep(Duration::from_secs(5)).await;

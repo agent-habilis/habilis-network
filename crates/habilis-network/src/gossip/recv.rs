@@ -2189,9 +2189,11 @@ mod arms_reclaim_tests {
 #[cfg(test)]
 mod first_contact_tests {
     use crate::daemon::state::{RendezvousFlag, Standing};
+    use crate::gossip::merge_ctx;
     use crate::lifecycle;
     use crate::protocol::{Shard, ShardGroup, UnixSecs};
     use crate::transport::UdpTransport;
+    use iroh::EndpointId;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
@@ -2221,6 +2223,24 @@ mod first_contact_tests {
     };
 
     use crate::daemon::state::DirectState;
+    /// Gives the state a channel for the messages of the directed sends, as the loop does.
+    fn tell_the_loop_of(state: &mut EventLoopState) -> mpsc::UnboundedReceiver<EndpointId> {
+        let (started, told) = mpsc::unbounded_channel();
+        state.send_started = started;
+        told
+    }
+
+    /// The next turn of the loop: runs the function of its arm for each message that the sends told.
+    fn run_the_started_arm(
+        state: &mut EventLoopState,
+        context: &HandlerCtx<'_>,
+        told: &mut mpsc::UnboundedReceiver<EndpointId>,
+    ) {
+        while let Ok(peer) = told.try_recv() {
+            merge_ctx::directed_send_started(state, context, peer);
+        }
+    }
+
     #[cfg(feature = "multihop")]
     use crate::gossip;
     use crate::gossip::{ingest_from, split};
@@ -2693,7 +2713,7 @@ mod first_contact_tests {
     /// A meshed send to a relay-only peer whose direct path is not probed is refused at once. The
     /// refusal asks for the lane session, so that the caller's retry can find it.
     #[test]
-    fn a_meshed_directed_send_to_a_held_peer_is_refused_and_asks_for_the_lane_session() {
+    fn a_meshed_directed_send_to_a_relay_only_peer_is_started_and_asks_for_the_lane_session() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let node = Node::spawn().await;
             let context = node.context();
@@ -2714,22 +2734,16 @@ mod first_contact_tests {
             )
             .sign(&Identity::generate());
 
-            let refused = ops::send_app(&mut state, &context, frame).await;
-            let Err(error) = &refused else {
-                panic!("the send to a held peer was not refused: {refused:?}");
-            };
+            let mut told = tell_the_loop_of(&mut state);
+            let sent = ops::send_app(&mut state, &context, frame).await;
+            run_the_started_arm(&mut state, &context, &mut told);
             assert!(
-                matches!(error, transport::SendError::Held { .. }),
-                "the refusal is not Held: {error}"
-            );
-            assert!(
-                error.to_string().contains("a probe found only the relay")
-                    && error.to_string().contains("retry"),
-                "the refusal does not tell the caller to retry: {error}"
+                matches!(sent, Ok(transport::Delivered::Pending(_))),
+                "the send to a relay-only peer did not start: {sent:?}"
             );
             assert!(
                 state.lane_session_wanted(eid, clock::Instant::now()),
-                "the refused send did not ask for the lane session"
+                "the send did not ask for the lane session"
             );
             assert!(
                 state.pending_outbound.is_empty(),
@@ -2771,7 +2785,9 @@ mod first_contact_tests {
                 .sign(&Identity::generate())
             };
 
+            let mut told = tell_the_loop_of(&mut state);
             let sent = ops::send_app(&mut state, &context, frame()).await;
+            run_the_started_arm(&mut state, &context, &mut told);
             assert!(
                 matches!(sent, Ok(transport::Delivered::Pending(_))),
                 "the send to an unprobed peer on an unmeshed node did not start: {sent:?}"
@@ -2782,10 +2798,10 @@ mod first_contact_tests {
             );
 
             state.direct.insert(eid, DirectState::RelayOnly);
-            let held = ops::send_app(&mut state, &context, frame()).await;
+            let again = ops::send_app(&mut state, &context, frame()).await;
             assert!(
-                matches!(held, Err(transport::SendError::Held { .. })),
-                "a pair that a probe proved relay-only was not held: {held:?}"
+                matches!(again, Ok(transport::Delivered::Pending(_))),
+                "a pair that a probe proved relay-only was not started: {again:?}"
             );
 
             let broadcast = Message::new_app(
@@ -2817,7 +2833,7 @@ mod first_contact_tests {
     /// held: the send proves the peer by its route, and does not wait for the sweep tick. Only the
     /// lower id of a pair has a watcher, so the higher id had no other source of the proof.
     #[test]
-    fn a_meshed_directed_send_to_an_unwatched_peer_on_a_multihop_route_is_not_held() {
+    fn a_meshed_directed_send_to_an_unwatched_peer_on_a_multihop_route_is_not_refused() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,
@@ -2841,11 +2857,13 @@ mod first_contact_tests {
                 )
                 .sign(&Identity::generate());
 
+                let mut told = tell_the_loop_of(&mut state);
                 let sent = ops::send_app(&mut state, &context, frame).await;
+                run_the_started_arm(&mut state, &context, &mut told);
 
                 assert!(
-                    !matches!(sent, Err(transport::SendError::Held { .. })),
-                    "the send to a pair on a multihop route was held: {sent:?}"
+                    sent.is_ok(),
+                    "the send to a pair on a multihop route was refused: {sent:?}"
                 );
                 assert_eq!(
                     state.direct.get(&eid),
@@ -2889,7 +2907,7 @@ mod first_contact_tests {
                 let router = Router::builder(bob.clone())
                     .accept(
                         UNICAST_ALPN,
-                        UnicastAcceptor::with_idle(
+                        UnicastAcceptor::with_idle_for_test(
                             inbox,
                             PayloadPath::DirectOnly,
                             Duration::from_mins(1),
@@ -8690,6 +8708,66 @@ mod repeat_tests {
             assert_eq!(
                 count, 1,
                 "a repeated chat frame must reach the app once, got {count}"
+            );
+            endpoint.close().await;
+        });
+    }
+
+    #[test]
+    fn a_directed_frame_that_arrives_twice_by_unicast_reaches_the_app_once() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let mesh = MeshId::from("test");
+            let endpoint = iroh::Endpoint::builder(presets::Minimal)
+                .bind()
+                .await
+                .expect("bind a local endpoint");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let topic = gossip
+                .subscribe(proto::TopicId::from_bytes([5u8; 32]), vec![])
+                .await
+                .expect("subscribe to a peerless topic");
+            let (gossip_sender, _receiver) = topic.split();
+            let sender = MeshSender::new(gossip_sender);
+            let identity = Identity::generate();
+            let peer = Identity::generate();
+            let reader_nick = nick("reader");
+            let sink = SilentSink;
+            let context = HandlerCtx {
+                sender: &sender,
+                endpoint: &endpoint,
+                mesh: &mesh,
+                author: &reader_nick,
+                identity: &identity,
+                our_pubkey: identity.author_key(),
+                max_connections: 16,
+                rendezvous_id: endpoint_id(9),
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let chat = Message::new_app(
+                &mesh,
+                &nick("peer"),
+                AppFrameParams::new(
+                    AppTag::try_new("app_msg").expect("a valid app tag"),
+                    Some(identity.author_key()),
+                    None,
+                    MessageBody::from("\"hello\""),
+                ),
+            )
+            .sign(&peer);
+            let bytes = chat.serialize().expect("serialize").into_bytes();
+            let mut state = fresh_state();
+            // The copy of a frame whose acknowledgement was lost comes on the unicast plane.
+            state.unicast_arrival = Some(endpoint_id(3));
+            // Shared with the app, which counts the frames it is handed.
+            let surfaced = Arc::new(Mutex::new(0));
+            let mut app = Counting(Arc::clone(&surfaced));
+            super::ingest(bytes.clone(), &mut state, &mut app, &context).await;
+            super::ingest(bytes, &mut state, &mut app, &context).await;
+            let count = *surfaced.lock().expect("the counter lock");
+            assert_eq!(
+                count, 1,
+                "a directed frame that comes twice must reach the app once, got {count}"
             );
             endpoint.close().await;
         });

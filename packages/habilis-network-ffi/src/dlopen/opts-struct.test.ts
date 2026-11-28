@@ -10,7 +10,7 @@ const BASE: WireOpts = {
   lookup: null,
   transport: null,
   relayUrls: null,
-  maxConnections: 0,
+  maxConnections: 16,
 }
 
 /** Hands out a distinct fake address per buffer and remembers which was which. */

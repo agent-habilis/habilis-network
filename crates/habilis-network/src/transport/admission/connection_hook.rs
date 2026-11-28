@@ -1,7 +1,7 @@
 //! The hook that admits or refuses a connection at the endpoint.
 use std::future::{self, Future};
 
-use crate::transport::{direct_only_gossip, payload_path};
+use crate::transport::{PathGate, direct_only_gossip, payload_path};
 
 use std::sync::atomic::Ordering;
 
@@ -40,7 +40,12 @@ impl EndpointHooks for ConnectionHook {
             && self.admission.watch_dialed_gossip.load(Ordering::Relaxed)
             && connection.alpn() == net::GOSSIP_ALPN
         {
-            direct_only_gossip::watch_relay_policy(connection, self.admission.path_sink());
+            direct_only_gossip::watch_relay_policy_and_refusal(
+                connection,
+                self.admission.path_sink(),
+                self.admission.relay_refused_sink(),
+                direct_only_gossip::gate_of(PathGate::Table(self.admission.clone())),
+            );
         }
         future::ready(AfterHandshakeOutcome::accept())
     }

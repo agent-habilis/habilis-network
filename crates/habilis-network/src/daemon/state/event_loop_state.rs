@@ -10,7 +10,6 @@ use super::{
     MeshSecrets, PingRound, Reach, RendezvousFlag, RivalFlag, RosterEntry, RosterSnapshot,
     Standing, StateInit, Syncing,
 };
-use crate::daemon::cohost_arm;
 use crate::daemon::probe_backoff::ProbeBackoff;
 use crate::daemon::reassembly::{ReassemblyStore, ShardCache, ShardIngest};
 use crate::daemon::setup::LiveCount;
@@ -594,6 +593,15 @@ pub struct EventLoopState {
     /// Where a path watcher reports a change of the selected path to a peer
     /// the race covers (`transport::probe::on_path_change`).
     pub(crate) path_changes: mpsc::UnboundedSender<probe::PathChange>,
+    /// Where a directed send says that it starts, by the endpoint of its addressee. The send
+    /// paths hold only a shared reference to the state, so this is how they reach the loop: the
+    /// loop proves the pair or asks for its lane session (`gossip::directed_send_started`). A
+    /// detached sender until the real loop installs its channel. A send on a closed channel is
+    /// ignored: only a stopping loop closes it, and then nobody is left to ask.
+    pub(crate) send_started: mpsc::UnboundedSender<EndpointId>,
+    /// How many messages of directed sends the loop has handled. A test reads it to show that the
+    /// channel is wired in a real node and that the select arm calls the function.
+    pub(crate) sends_started_handled: u64,
     /// The pooled connection each watched peer's watcher follows, by stable
     /// id (`None` while its dial runs), so a replaced connection gets a fresh
     /// watcher and a stale one's reports are dropped.
@@ -646,6 +654,10 @@ pub struct EventLoopState {
     link_cap: Option<usize>,
     /// When a graft last fell back to a `Join` for a starved node.
     pub(crate) join_fallback_at: Option<Instant>,
+    /// The peer that the last starved `Join` went to, kept beside the stamp above: the stamp is
+    /// cleared when that peer closes the dial as relay-only, because a `Join` that reached nobody
+    /// causes no churn and must not cost the node its next one.
+    pub(crate) join_target: Option<EndpointId>,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
     pub(crate) graft_backoff: graft_backoff::GraftBackoff,
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
@@ -872,29 +884,16 @@ pub struct EventLoopState {
     /// died — so a survivor claims the freed rendezvous port in ~1s rather
     /// than waiting for the next 15s heal tick.
     pub(crate) reclaim_until: Option<Instant>,
-    /// When `Some(deadline)`, the next rival re-check *shed* of an
-    /// `EagerProbed` public beacon: at the deadline the holder drops its
-    /// co-host and lets probe-before-claim re-arbitrate, so a same-id
-    /// rival that claimed inside our probe window is finally found and
-    /// yielded to (see `event_loop::shed_rival_beacon_if_due`). `None`
-    /// while not holding a shed-eligible beacon.
-    pub(crate) next_rival_recheck: Option<Instant>,
-    /// How many rival re-check sheds have run. Round 0 (the claim made at
-    /// startup, before any shed) schedules the *fast first* re-check with
-    /// the deterministic endpoint-id tie-break offset — the likeliest
-    /// rival started within seconds of us; later rounds run the steady
-    /// jittered cadence.
-    pub(crate) rival_recheck_rounds: u32,
-    /// When a sign of a second group last brought the re-check forward
-    /// ([`Self::note_second_group_sign`]).
-    pub(crate) second_group_sign_at: Option<Instant>,
+    /// When the holder of the beacon next asks who serves the rendezvous on its own rung (`None`
+    /// while it holds nothing, or when the probe does not apply to it).
+    pub(crate) next_holder_probe: Option<Instant>,
+    /// What the holder remembers between two answers of that probe.
+    pub(crate) holder_contest: beacon::HolderContest,
+    /// When a flag or a sign last brought the next ask forward ([`Self::bring_ask_to_now`]).
+    pub(crate) ask_hurried_at: Option<Instant>,
     /// When the member last said that every rung of its ladder is held by another process.
     pub(crate) no_rung_noted_at: Option<Instant>,
-    /// Consecutive due sheds held back because a data-channel peer depends
-    /// on this beacon; see `cohost_arm::defer_shed`. Cleared by a shed and by a
-    /// fresh claim (`cohost_arm::schedule_rival_recheck`).
-    pub(crate) rival_recheck_deferrals: u32,
-    /// The close of the beacon that a rival re-check just shed: when it resolves the loop
+    /// The close of the beacon that a yield or a rehome just shed: when it resolves the loop
     /// re-probes the id at once, instead of at the next reclaim tick. `None` when no shed runs.
     pub(crate) beacon_closing: Option<oneshot::Receiver<()>>,
     /// Recently-seen message ids, for duplicate suppression. Gossip
@@ -1113,6 +1112,8 @@ impl EventLoopState {
             direct_proven: mpsc::unbounded_channel().0,
             gossip_handle: None,
             path_changes: mpsc::unbounded_channel().0,
+            send_started: mpsc::unbounded_channel().0,
+            sends_started_handled: 0,
             path_watchers: HashMap::new(),
             path_kinds: HashMap::new(),
             route_dialed: HashMap::new(),
@@ -1129,6 +1130,7 @@ impl EventLoopState {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             redials: redial::Redials::default(),
             join_fallback_at: None,
+            join_target: None,
             graft_backoff: graft_backoff::GraftBackoff::default(),
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
@@ -1183,11 +1185,10 @@ impl EventLoopState {
             address_book: init.address_book,
             webrtc_ice: init.webrtc_ice,
             reclaim_until: None,
-            next_rival_recheck: None,
-            rival_recheck_rounds: 0,
-            second_group_sign_at: None,
+            next_holder_probe: None,
+            holder_contest: beacon::HolderContest::default(),
+            ask_hurried_at: None,
             no_rung_noted_at: None,
-            rival_recheck_deferrals: 0,
             beacon_closing: None,
             seen: BoundedFifoSet::new(SEEN_IDS_CAP),
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
@@ -1317,6 +1318,7 @@ impl EventLoopState {
             heard.or_else(|| self.last_seen.get(key))
         };
         let lane = |key: &AuthorKey| transport::lane_for(key, self);
+        let member_of = |key: &AuthorKey, nick: &Nickname| self.proofs.member_of(key, nick);
         let shown = self.peers.iter().filter(|key| self.surfaced.contains(*key));
         // One row per key: two live keys under one nickname are two rows.
         let mut peers: Vec<RosterEntry> = shown
@@ -1325,6 +1327,7 @@ impl EventLoopState {
                 Some(RosterEntry {
                     key: *key,
                     nickname: nick.clone(),
+                    member: member_of(key, nick),
                     // Active peers: when they were really heard. A stall forgiveness moves
                     // `last_seen`, not `heard`.
                     last_seen_secs_ago: heard_at(key).map(secs_since),
@@ -1338,6 +1341,7 @@ impl EventLoopState {
                 Some(RosterEntry {
                     key: *key,
                     nickname: nick.clone(),
+                    member: member_of(key, nick),
                     // Quiet peers: their last-heard instant, retained in
                     // `quiet_since` (the eviction drops `last_seen`). A quiet
                     // peer has no live link, so it is always `Gossip`.
@@ -1352,9 +1356,12 @@ impl EventLoopState {
             .collect();
         // Most-recently-seen first; unknown recency (no heartbeat yet) sorts last.
         peers.sort_by_key(|entry| entry.last_seen_secs_ago.unwrap_or(u64::MAX));
+        let own: Option<&Identity> = self.member_identity.as_deref();
+        let own_member: Option<AuthorKey> = own.map(Identity::author_key);
         RosterSnapshot {
             peers,
             count: self.member_count(),
+            own_member,
             live: self.live_nicknames().cloned().collect(),
         }
     }
@@ -1537,20 +1544,71 @@ impl EventLoopState {
         let due = self.starved_join_ready(now);
         if due {
             self.join_fallback_at = Some(now);
+            // The target of the Join before this one does not belong to this stamp.
+            self.join_target = None;
         }
         due
     }
 
+    /// The `Join` that [`Self::starved_join_due`] stamped goes to `peer`. The stamp and the target
+    /// are written only here and there, in that order, so a target never outlives its stamp: the
+    /// stamp clears the target of the previous `Join` when it is written.
+    pub(crate) fn note_join_target(&mut self, peer: EndpointId) {
+        self.join_target = Some(peer);
+    }
+
+    /// `peer` closed a gossip link that we dialed with the relay-refused code: the pair has no
+    /// direct path now. A peer that reads `Direct` becomes `RelayOnly`, so that the next retry
+    /// probes it and sends it no graft. A peer that is linked now is newer proof than an old close,
+    /// and a peer that is `Pending` or `RelayOnly` already reads as unproven. When `peer` is the
+    /// target of the pending `Join`, that `Join` reached nobody, so its stamp is cleared.
+    pub(crate) fn note_relay_refused(&mut self, peer: EndpointId) -> probe::RefusalEffect {
+        if self.linked_endpoints.contains(&peer) {
+            return probe::RefusalEffect {
+                outcome: "ignored: linked",
+                stamp_cleared: false,
+            };
+        }
+        let outcome = match self.direct.get_mut(&peer) {
+            Some(verdict @ DirectState::Direct) => {
+                *verdict = DirectState::RelayOnly;
+                "demoted"
+            }
+            Some(DirectState::Pending) => "ignored: pending",
+            Some(DirectState::RelayOnly) => "ignored: relay-only",
+            None => "ignored: unknown",
+        };
+        let stamp_cleared = self.join_target == Some(peer);
+        if stamp_cleared {
+            self.join_target = None;
+            self.join_fallback_at = None;
+        }
+        probe::RefusalEffect {
+            outcome,
+            stamp_cleared,
+        }
+    }
+
     /// [`Self::starved_join_due`] without the stamp: whether a fallback would be due at `now`.
+    ///
+    /// A node is starved when it held fewer than G peers for `STARVED`, or when it has no member
+    /// neighbor and a `Neighbor` request of it was read as refused (`GraftBackoff::has_refusal`):
+    /// a node with no neighbor has nobody to wait for once a peer has refused it. A refusal counts
+    /// for `STARVED` after it was read, so a node that was refused and then got a neighbor and
+    /// lost its last one asks with a `Join` at once, and that `Join` can make up to
+    /// 1 + 2(G - 1) peers drop a link. The ask is paced by `STARVED` as for any starved node.
     pub(crate) fn starved_join_ready(&self, now: Instant) -> bool {
         let window = STARVED;
-        let starved = self
-            .below_target_since
-            .is_some_and(|since| now.duration_since(since) >= window);
+        let refused = self.graft_backoff.has_refusal(now);
+        let alone_and_refused = self.linked_endpoints.is_empty() && refused;
+        let starved = alone_and_refused
+            || self
+                .below_target_since
+                .is_some_and(|since| now.duration_since(since) >= window);
         let waited = self
             .join_fallback_at
             .is_none_or(|at| now.duration_since(at) >= window);
-        let stuck = self.links_short >= 2 || self.graft_backoff.has_refusal(now);
+        let stuck = self.links_short >= 2 || refused;
         starved && waited && stuck
     }
 
@@ -2092,6 +2150,16 @@ impl EventLoopState {
             && self.reclaim_until.is_some_and(|until| now < until)
     }
 
+    /// Whether a reclaim tick asks with the starved `Join` of a node that lost every link: the
+    /// fallback is ready (see [`Self::starved_join_ready`]). The fast reclaim window of
+    /// [`Self::isolated_refill_due`] is 6 s long, and the fallback comes 20 s after the first ask,
+    /// so the window does not hold it.
+    pub(crate) fn isolated_join_due(&self, now: Instant) -> bool {
+        self.linked_endpoints.is_empty()
+            && self.zero_links_since.is_some()
+            && self.starved_join_ready(now)
+    }
+
     /// A gossip link to `peer` is up.
     pub(crate) fn link(&mut self, peer: EndpointId) {
         self.linked_endpoints.insert(peer);
@@ -2103,8 +2171,10 @@ impl EventLoopState {
     }
 
     /// A member's `PeerInfo` read: `flag.held` says it holds the rendezvous. A flag from a
-    /// proven sender is remembered whether we hold the rendezvous or not; it moves our re-check
-    /// only while we hold it too.
+    /// proven sender is remembered whether we hold the rendezvous or not. When we hold it too and
+    /// the sender has a lower id, our next ask of who serves the rendezvous comes now
+    /// ([`Self::bring_ask_to_now`]): the answer decides, as for every ask. A flag is a report, and it
+    /// can be old, so it never makes a holder yield by itself.
     pub(crate) fn note_rival_beacon_flag(
         &mut self,
         own: EndpointId,
@@ -2120,7 +2190,7 @@ impl EventLoopState {
         if !flag.proven || sender == own {
             return;
         }
-        let newly = self.rival_holders.insert(signer, sender) != Some(sender);
+        self.rival_holders.insert(signer, sender);
         if !self
             .rendezvous_flags
             .contains(&RendezvousFlag::HostsRendezvous)
@@ -2128,54 +2198,39 @@ impl EventLoopState {
             return;
         }
         if (beacon::Contest { own, rival: sender }).own_yields() {
-            self.beacon_notes.insert(BeaconNote::YieldToLower);
-            self.next_rival_recheck = Some(now);
-        } else if newly {
-            // Once per holder, so that a holder that sends its flag again and again cannot keep
-            // our re-check away. Pushed, not dropped: a holder that never re-checks never finds
-            // a co-host it does not know of.
-            let pushed = now
-                + cohost_arm::next_recheck_delay(
-                    self.rival_recheck_rounds.max(1),
-                    self.peers.len(),
-                    own,
-                );
-            self.next_rival_recheck = Some(
-                self.next_rival_recheck
-                    .map_or(pushed, |due| due.max(pushed)),
-            );
+            self.bring_ask_to_now(now);
         }
     }
 
     /// A sign that another group of this mesh may exist: a member that we do not know linked to
-    /// our beacon, or the LAN named a member that we are not linked to.
-    ///
-    /// A holder that has found no member re-checks its rendezvous only every hour or two, and two
-    /// such holders of one room can stay apart that long. The sign brings the next re-check to
-    /// the fast base and starts the rounds from it again, so a node that nobody approaches keeps
-    /// its long wait. A sign counts once per steady interval: a burst of arrivals must not shed
-    /// the beacon again and again.
-    pub(crate) fn note_second_group_sign(&mut self, own: EndpointId, now: Instant) {
-        let Some(due) = self.next_rival_recheck.filter(|_| {
-            self.rendezvous_flags
-                .contains(&RendezvousFlag::HostsRendezvous)
-        }) else {
+    /// our beacon, or the LAN named a member that we are not linked to. The next ask of who serves
+    /// the rendezvous comes now ([`Self::bring_ask_to_now`]), so a split is read within one ask.
+    pub(crate) fn note_second_group_sign(&mut self, now: Instant) {
+        if self
+            .rendezvous_flags
+            .contains(&RendezvousFlag::HostsRendezvous)
+        {
+            self.bring_ask_to_now(now);
+        }
+    }
+
+    /// Bring the next ask of who serves the rendezvous to `now`, at most once per ask period: a
+    /// flag arrives with every `PeerInfo` of a holder (each change, and each refresh, 5 minutes or
+    /// more apart) and a burst of arrivals is a burst of signs, and none of them may ask again and
+    /// again. Nothing moves where no ask is armed, or where it is due already.
+    fn bring_ask_to_now(&mut self, now: Instant) {
+        let Some(due) = self.next_holder_probe else {
             return;
         };
-        let spacing = tuning::rival_recheck_meshed();
-        if self
-            .second_group_sign_at
-            .is_some_and(|at| now.saturating_duration_since(at) < spacing)
+        if due <= now
+            || self
+                .ask_hurried_at
+                .is_some_and(|at| now.saturating_duration_since(at) < tuning::heal_interval())
         {
             return;
         }
-        let brisk = now + cohost_arm::next_recheck_delay(0, self.peers.len(), own);
-        if due <= brisk {
-            return;
-        }
-        self.second_group_sign_at = Some(now);
-        self.rival_recheck_rounds = 0;
-        self.next_rival_recheck = Some(brisk);
+        self.ask_hurried_at = Some(now);
+        self.next_holder_probe = Some(now);
     }
 
     /// Whether some member is known to hold the rendezvous.

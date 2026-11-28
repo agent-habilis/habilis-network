@@ -61,9 +61,13 @@ impl PathSelector for WebRtcPreferred {
         let paths: Vec<PathSelectionData<'_>> = context.paths().collect();
         // The first rung with a usable path wins; within a rung, lowest RTT. A pinned peer has the
         // multihop rung only.
-        let chosen = climb_pinned(self.local, &paths, custom_rung, |rung, path| {
-            !blocked(self.local, rung, path)
-        });
+        let chosen = climb_pinned(
+            self.local,
+            context.current(),
+            &paths,
+            custom_rung,
+            |rung, path| !blocked(self.local, rung, path),
+        );
         // Trace level, off by default: every call, with what it saw and chose, so
         // that a path that stays unselected can be told from a selector that never
         // ran.

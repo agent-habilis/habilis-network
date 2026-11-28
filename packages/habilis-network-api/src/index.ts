@@ -34,3 +34,4 @@ export type {
 export { openMesh } from './mesh.ts'
 export { parseRoster, rosterPresence } from './roster.ts'
 export { DEFAULT_CAPACITY, Fanout } from './fanout.ts'
+export { checkMaxConnections, DEFAULT_MAX_CONNECTIONS, maxConnectionsWire } from './connections.ts'

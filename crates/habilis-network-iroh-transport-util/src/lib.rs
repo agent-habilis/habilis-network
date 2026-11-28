@@ -1,4 +1,4 @@
-//! The two pieces both custom iroh transports need and neither can host.
+//! The three pieces that the habilis-network iroh crates need and no one of them can host.
 //!
 //! `habilis-network-iroh-webrtc-transport` and `habilis-network-iroh-multihop-transport` are
 //! deliberately standalone: neither depends on the other, and neither depends
@@ -7,8 +7,13 @@
 //! That is the whole justification for a crate this small. Unlike the two
 //! crates recently folded back into `habilis-network-protocol`, this one is not
 //! isolating a dependency it could have inherited; it exists because there is
-//! no other sharing point between two otherwise-independent crates. It adds no
-//! external dependency — `iroh` is already in both manifests.
+//! no other sharing point between otherwise-independent crates. It adds no
+//! external dependency — `iroh` is already in the manifest of each of them.
+//!
+//! The third piece is [`loopback()`], which binds the endpoint of a builder to this host only. The
+//! engine uses it for a mesh that looks up nothing outside the host, and the tests of every crate use
+//! it so that no test endpoint listens on the network. It lives here for the same reason as the other
+//! two: the crates that build endpoints share no other crate.
 //!
 //! # Example
 //!
@@ -21,10 +26,15 @@
 
 #![cfg_attr(target_family = "wasm", deny(clippy::disallowed_methods))]
 
+// A browser has no IP stack to bind a socket on.
+#[cfg(not(target_family = "wasm"))]
+mod loopback;
 mod pin_set;
 mod protocol_set;
 mod rung;
 
+#[cfg(not(target_family = "wasm"))]
+pub use loopback::loopback;
 pub use pin_set::{climb_pinned, is_pinned, multihop_remote_of, pin, pin_allows, pinned_in, unpin};
 pub use protocol_set::ProtocolSet;
 

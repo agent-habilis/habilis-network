@@ -2,6 +2,8 @@
 use std::error;
 #[cfg(feature = "host")]
 use std::fmt;
+#[cfg(feature = "host")]
+use std::io::ErrorKind;
 /// Why a pid cannot be the owner of a detached daemon.
 ///
 /// # Examples
@@ -24,6 +26,8 @@ pub enum OwnerPidError {
     OwnSelf(u32),
     /// No live process has the pid.
     NotRunning(u32),
+    /// The system could not say whether a process has the pid: the read of its start failed.
+    Unreadable(u32, ErrorKind),
 }
 
 #[cfg(feature = "host")]
@@ -36,6 +40,10 @@ impl fmt::Display for OwnerPidError {
             ),
             Self::OwnSelf(pid) => write!(formatter, "owner pid {pid} is this process itself"),
             Self::NotRunning(pid) => write!(formatter, "owner pid {pid} is not running"),
+            Self::Unreadable(pid, kind) => write!(
+                formatter,
+                "the start of owner pid {pid} could not be read ({kind})"
+            ),
         }
     }
 }

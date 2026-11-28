@@ -103,12 +103,10 @@ pub(super) async fn run_heal(
         // A free reading taken before the freeze is stale for the same
         // reason, across the widest gap any of these deadlines can span.
         state.forget_rendezvous_verdict();
-        // A rival re-check deadline that "matured" while the process was
-        // frozen would shed the beacon into a mesh that is still
-        // re-forming; push it out a steady interval so the re-bootstrap
-        // settles first.
-        if state.next_rival_recheck.is_some() {
-            state.next_rival_recheck = Some(Instant::now() + tuning::rival_recheck());
+        // An ask of who serves the rendezvous that came due while the process was frozen would read
+        // a mesh that is still re-forming; push it out a period so the re-bootstrap settles first.
+        if state.next_holder_probe.is_some() {
+            state.next_holder_probe = Some(Instant::now() + tuning::heal_interval());
         }
         // Re-assert the rendezvous hint (the network changed). The rung
         // is re-validated off-loop by the beacon's liveness self-monitor,
@@ -347,7 +345,7 @@ pub(crate) fn apply_rung_change(
         // still contending, which defeats `next_recheck_delay`'s round-0
         // branch — the deterministic tie-break that exists precisely so two
         // simultaneous claimants shed in a decidable order.
-        state.rival_recheck_rounds = 0;
+        state.holder_contest = beacon::HolderContest::default();
         // The rendezvous now answers at a different rung, so a free reading
         // taken against the old one is not about this identity at all.
         state.forget_rendezvous_verdict();
@@ -369,6 +367,8 @@ mod tests {
     use crate::beacon;
     #[cfg(feature = "host")]
     use crate::gossip::split;
+    #[cfg(feature = "host")]
+    use crate::lookup::TransportOpts;
     #[cfg(feature = "host")]
     #[cfg(feature = "host")]
     use crate::membership;
@@ -432,6 +432,7 @@ mod tests {
                     relay_transport: PayloadPath::DirectOnly,
                     bootstrap_relay: None,
                     rung_tx: mpsc::unbounded_channel().0,
+                    bind_options: TransportOpts::default(),
                 };
                 let parts = CtxParts {
                     endpoint: &node.endpoint,

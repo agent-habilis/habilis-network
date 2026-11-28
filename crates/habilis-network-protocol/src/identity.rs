@@ -71,6 +71,28 @@ impl Identity {
         }
     }
 
+    /// The member identity of this node on `mesh`: the identity that the seed names, derived with the mesh id.
+    /// A node keeps one seed in its state file, and it shows another member key on each mesh, so no two
+    /// meshes are linked by the key. The key of the seed itself is never shown. The mesh id is hashed as
+    /// input and not given as the label of `SymmetricKey::derive`, whose label is 255 bytes at most.
+    ///
+    /// # Panics
+    /// If `mesh` is longer than `u32::MAX` bytes: a mesh id is far below it.
+    #[must_use]
+    pub fn for_mesh(&self, mesh: &str) -> Self {
+        use sha2::Digest as _;
+        let seed = self.seed();
+        let length = u32::try_from(mesh.len()).expect("a mesh id is short");
+        let mut hasher = Sha256::new();
+        hasher.update(MEMBER_KEY_LABEL);
+        hasher.update(length.to_be_bytes());
+        hasher.update(mesh.as_bytes());
+        hasher.update(seed.as_slice());
+        let mut derived = zeroize::Zeroizing::new([0u8; 32]);
+        derived.copy_from_slice(&hasher.finalize());
+        Self::from_seed(&derived)
+    }
+
     /// A fixed identity for the golden tests of the wire form.
     #[cfg(test)]
     #[must_use]
@@ -230,6 +252,10 @@ pub fn verify_proof(
         &proof.signature,
     )
 }
+
+/// Domain label of the member key of a mesh (see [`Identity::for_mesh`]), distinct from every other label of
+/// the identity.
+const MEMBER_KEY_LABEL: &[u8] = b"habilis-mesh/member-key/v1";
 
 /// KDF label deriving the X25519 encryption key from the Ed25519 identity seed —
 /// distinct from every other `derive_secret` label so the keys stay independent.
@@ -700,6 +726,43 @@ mod tests {
             decode_sig("00").is_err(),
             "a short signature hex is refused"
         ); // wrong length
+    }
+
+    /// A node keeps one seed in its state file. The member key that it shows is derived from the seed and the
+    /// mesh id, so the same seed shows another key on another mesh and no two meshes are linked by it, and the
+    /// key of the seed itself is never shown.
+    #[test]
+    fn the_member_key_of_a_mesh_is_derived_from_the_seed_and_the_mesh_id() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let node = Identity::from_seed(&[7; 32]);
+        let other = Identity::from_seed(&[8; 32]);
+
+        let first = node.for_mesh("mesh-a").author_key();
+        let second = node.for_mesh("mesh-b").author_key();
+
+        assert_ne!(first, second, "one seed shows another key on another mesh");
+        assert_eq!(
+            first,
+            node.for_mesh("mesh-a").author_key(),
+            "the key of a mesh is the same at each start"
+        );
+        assert_ne!(
+            first,
+            node.author_key(),
+            "the key of the seed itself is never shown"
+        );
+        assert_ne!(
+            first,
+            other.for_mesh("mesh-a").author_key(),
+            "another seed shows another key on the same mesh"
+        );
+        let derived = node.for_mesh("mesh-a");
+        let proof = derived.prove(&node.for_mesh("session").author_key(), "n", "mesh-a", 1);
+        assert_eq!(
+            proof.identity.as_bytes(),
+            first.as_bytes(),
+            "the proof of a mesh is signed by the key of that mesh"
+        );
     }
 
     #[test]

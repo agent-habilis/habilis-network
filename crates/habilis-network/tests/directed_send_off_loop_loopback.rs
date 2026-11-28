@@ -17,6 +17,7 @@ use habilis_network::membership::{
     self, Blocking, DialHold, Inspect, InspectTest, Linking, Membership, Messaging, MessagingTest,
     Request,
 };
+use habilis_network::net::Bind;
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -47,8 +48,6 @@ const WAIT_PREMISE: Duration = Duration::from_millis(500);
 const PATH_BUDGET: Duration = Duration::from_secs(8);
 /// A send that must fail on the relay refusal ends within this: the path budget (5 s) and a margin.
 const SAFETY_BUDGET: Duration = Duration::from_secs(6);
-/// The end of the refusal of a held send, which the caller can retry.
-const HELD_TEXT: &str = "retry the send later";
 /// The cooldown text of the pool (`COOLDOWN_REFUSED`), which is not public.
 const COOLDOWN_TEXT: &str = "unicast dial on cooldown after a recent failure";
 /// The relay refusal of the pool (`RELAY_REFUSED`), which is not public.
@@ -72,7 +71,8 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .lookup(vec![Lookup::Relay]);
         let options = options
@@ -83,7 +83,8 @@ impl Member {
 
     async fn join(nick: &str, creator: &Self) -> Self {
         let mesh = creator.membership.node.mesh_id().to_string();
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .mesh(Some(mesh));
         Self::open(&options).await
@@ -396,9 +397,9 @@ fn a_cold_send_after_a_send_in_flight_dials_on_its_own() {
 /// when IP is back before the budget ends, the frame goes out once. The test cuts IP after a
 /// first message pooled the connection, sends while the path reads relay, and gives IP back.
 ///
-/// The send is never `Held` here, because this mesh has no `WebRTC`: the admission demote does
-/// nothing, so the pair stays `Direct` after the cut. On a mesh with `WebRTC`, the same cut makes
-/// the pair `RelayOnly`, and the send is `Held` by design.
+/// The pair stays `Direct` after the cut here, because this mesh has no `WebRTC`: the admission
+/// demote does nothing. On a mesh with `WebRTC`, the same cut stores the pair as `RelayOnly`, and
+/// the send then waits for the path like any other.
 #[test]
 fn a_directed_send_on_a_warm_connection_that_reads_relay_waits_and_arrives_once_ip_is_back() {
     let guard = habilis_network_test_tracing::init();
@@ -588,13 +589,9 @@ fn a_directed_send_to_an_unprobed_pair_on_the_relay_is_refused_and_bob_reads_not
             refusal.contains(RELAY_TEXT),
             "the reply names the relay refusal, and it reads: {refusal}"
         );
-        // The path watcher of the lower id can read the pair as relay-only between the erase and the
-        // send, and then the send is held at once. Both refusals are safe, so only the one that is
-        // not held must have waited.
-        let held = refusal.contains(HELD_TEXT);
         assert!(
-            held || waited >= WAIT_PREMISE,
-            "the send was refused after {waited:?} with no wait and no hold: {refusal}"
+            waited >= WAIT_PREMISE,
+            "the send was refused after {waited:?} with no wait: {refusal}"
         );
         assert!(
             read.is_empty(),

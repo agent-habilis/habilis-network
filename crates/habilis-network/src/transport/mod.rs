@@ -20,6 +20,7 @@
 //! cross-transport dedup are identical on both planes.
 
 use tokio::sync::oneshot;
+mod acknowledgement;
 mod admission;
 pub(crate) mod ceiling;
 mod chunk_acceptor;
@@ -65,27 +66,28 @@ pub use mesh_sender::MeshSender;
 pub(crate) use outbox::Resend;
 #[cfg(feature = "blob")]
 pub(crate) use payload_path::{PROBE_DEADLINE, refuse_relayed};
-pub(crate) use payload_path::{PayloadPath, RELAY_REFUSED, payload_allowed_on};
+pub(crate) use payload_path::{PathGate, PayloadPath, RELAY_REFUSED, payload_allowed_on};
+pub use pool::LONGEST_SEND_CALL;
 pub(crate) use pool::UnicastPool;
 #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
 pub(crate) use send::resolve;
 pub use send::{
-    Delivered, Lane, PendingSend, SendError, deliver, deliver_in_background, deliver_to,
-    deliver_to_in_background,
+    Delivered, Lane, PendingSend, SendError, SendVerdict, deliver, deliver_in_background,
+    deliver_to, deliver_to_in_background,
 };
-pub(crate) use send::{
-    can_unicast, directed_endpoint, lane_for, note_held, note_unproven, send_best_effort,
-    send_dialing_back,
-};
+pub(crate) use send::{ask_lane, can_unicast, lane_for, send_best_effort, send_dialing_back};
 pub(crate) use unicast_acceptor::{UnicastAcceptor, UnicastFrame};
 pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, UdpTransport, WebRtcSignalAcceptor};
 
-/// ALPN for the unicast channel — a raw bidirectional QUIC stream with its own
-/// protocol identity, distinct from `GOSSIP_ALPN` and the application's own bridge ALPN.
-/// Wire-load-bearing: changing it is a protocol break, so it moves only with
-/// `message::VERSION` (it last changed when the byte-domains dropped the
-/// product's name for the engine's).
-pub(crate) const UNICAST_ALPN: &[u8] = b"habilis-mesh/unicast/1";
+/// ALPN for the unicast channel, with its own protocol identity, distinct from `GOSSIP_ALPN` and
+/// the application's own bridge ALPN. Version 2 sends each frame on one bidirectional QUIC stream,
+/// in two steps: the length and the frame, `HELD` from the receiver, the commit (the finish of the
+/// stream of the sender), and the end of the stream of the receiver when its loop took the frame.
+/// That end is the acknowledgement. Version 1 used one unidirectional stream and no
+/// acknowledgement. Version 2 is not released, so its format changed in place.
+/// Wire-load-bearing: a node of another version cannot exchange unicast frames with this one, so
+/// it moves only with a deliberate protocol break.
+pub(crate) const UNICAST_ALPN: &[u8] = b"habilis-mesh/unicast/2";
 
 /// `tracing` target for the unicast plane (matches the module path so
 /// `EnvFilter` prefix-matching works, e.g. `RUST_LOG=habilis_network::transport=debug`).

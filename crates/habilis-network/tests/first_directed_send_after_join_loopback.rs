@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Inspect, Membership, Messaging, Request};
+use habilis_network::net::Bind;
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -39,7 +40,8 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .lookup(vec![Lookup::Relay]);
         let options = options
@@ -51,7 +53,8 @@ impl Member {
     async fn join(nick: &str, creator: &Self) -> Self {
         let mesh_id = creator.membership.node.mesh_id();
         let mesh = mesh_id.to_string();
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .mesh(Some(mesh));
         Self::open(&options).await

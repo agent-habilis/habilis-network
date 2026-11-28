@@ -6,7 +6,9 @@ use crate::lookup::{add_peer_addr, build_mesh, replace_peer_addr};
 use crate::util::tuning;
 
 use super::rung_ladder::{holder_entry, rung_of, settle_on_rung};
-use super::{Held, Rendezvous, RendezvousParams, RungWatch, Walk, bind};
+use super::{
+    BEACON_WHO_ALPN, BeaconWho, Held, Rendezvous, RendezvousParams, RungWatch, Walk, bind,
+};
 #[cfg(test)]
 use super::{RivalProbe, walk_ladder};
 
@@ -87,6 +89,31 @@ pub(crate) async fn claim(
         == Held::Claimed
 }
 
+/// Claim the rendezvous again, make before break: the new beacon binds first, and the old one is
+/// closed in the same step, so that the node never has 2 live endpoints of the id for longer than
+/// the claim takes. When the new claim fails, the old beacon stays.
+///
+/// The new beacon binds with no probe before it, as the first claim of a beacon does after its
+/// probe. A probe here would reach the old beacon, or the rival, and read the id as held, and
+/// nothing would ever bind. The probe of the holder has already read who serves the id.
+pub(crate) async fn claim_again(
+    params: &RendezvousParams,
+    peer: &Endpoint,
+    peer_book: &memory::MemoryLookup,
+    current: &mut Option<Rendezvous>,
+    rungs: &mut RungWatch,
+) -> Held {
+    let old = current.take();
+    let held = claim_holder(params, peer, peer_book, current, rungs).await;
+    let claimed = held == Held::Claimed;
+    match old {
+        Some(old) if claimed => old.shed(),
+        Some(old) => *current = Some(old),
+        None => {}
+    }
+    held
+}
+
 /// `claim`, with what the walk read when it did not bind.
 pub(crate) async fn claim_holder(
     params: &RendezvousParams,
@@ -126,16 +153,27 @@ pub(crate) async fn claim_holder(
             (
                 handle,
                 admission,
-                transport::IceProfile { host_only: false },
+                transport::IceProfile {
+                    host_only: lookup::stays_on_this_host(
+                        params.lookups.is_loopback(),
+                        params.bind_options,
+                    ),
+                },
             )
         }),
-        // The rendezvous serves no caller protocol either — it is a meeting
-        // point, not somewhere an application is reachable.
-        habilis_network_iroh_transport_util::ProtocolSet::default(),
-        params.relay_transport.relay_allowed(),
-        // The rendezvous keeps the hold: a joiner grafts it only once their
-        // session is attached, so a held dial here is not a second one.
-        false,
+        // The rendezvous serves no caller protocol — it is a meeting point, not somewhere an
+        // application is reachable. It answers one question: which member serves it.
+        // The rendezvous is not a peer: no connection of a remote is reported to a table for its
+        // endpoint, so its gate asks the old question of the connection alone.
+        transport::PathGate::SelectedOnly,
+        habilis_network_iroh_transport_util::ProtocolSet::default()
+            .protocol(BEACON_WHO_ALPN.to_vec(), BeaconWho::new(peer.id())),
+        lookup::GatePolicy {
+            relay_transport: params.relay_transport.relay_allowed(),
+            // The rendezvous keeps the hold: a joiner grafts it only once their
+            // session is attached, so a held dial here is not a second one.
+            needs_session: false,
+        },
     );
 
     // Register the peer's address so the rendezvous can dial it
@@ -220,7 +258,6 @@ pub(crate) async fn claim_holder(
         task,
         monitor,
         endpoint: rendezvous_endpoint,
-        lane,
         arrivals,
         released: false,
         generation,

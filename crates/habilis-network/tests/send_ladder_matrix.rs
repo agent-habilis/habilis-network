@@ -29,6 +29,7 @@
 
 mod common;
 use habilis_network::net;
+use habilis_network::net::Bind;
 use tokio::time;
 mod until_known;
 
@@ -292,7 +293,8 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .lookup(vec![Lookup::Relay]);
         let options = options
@@ -303,7 +305,8 @@ impl Member {
 
     async fn join(nick: &str, creator: &Self) -> Self {
         let mesh = creator.membership.node.mesh_id().to_string();
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .mesh(Some(mesh));
         Self::open(&options).await

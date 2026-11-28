@@ -360,6 +360,21 @@ jobs:
       - name: Build the staticlib and check it against the header
         run: cargo task ffi
 
+  # The process helpers read the start of a process through `proc_pidinfo` on macOS and through `/proc` on
+  # Linux, and a daemon binds its identity to that value. The test job runs on Linux, so this job runs the
+  # tests of the crate on macOS, where the unsafe call is.
+  util-macos:
+    name: Util (macOS)
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test -p habilis-network-util
+
   # `crates/habilis-network-netplay/examples/light-cycles/native/` is its own cargo
   # workspace (`visage-rust-tui` uses native generators, a nightly-only feature,
   # which the root nightly toolchain allows). Not covered by anything

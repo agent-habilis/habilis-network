@@ -111,14 +111,13 @@ impl EventLoopState {
         None
     }
 
-    /// The first hop of the multihop route that the topology gives for `peer` now, in hex. It is
-    /// the route a send would take, not a reading of the path in use. Without multihop there is
-    /// none.
+    /// The next hop that this node picks now for a cell to `peer`, in hex. It is where a send would
+    /// go first, not a reading of the path in use. Without multihop there is none.
     fn first_hop(&self, peer: EndpointId) -> Option<String> {
         #[cfg(feature = "multihop")]
         {
-            let mut hops = self.multihop()?.route_hops(AppId::new(peer))?;
-            hops.next().map(|hop| hop.get().to_string())
+            let next = self.multihop()?.next_hop_of(AppId::new(peer))?;
+            Some(next.get().to_string())
         }
         #[cfg(not(feature = "multihop"))]
         {
@@ -131,7 +130,9 @@ impl EventLoopState {
     fn graph(&self) -> Option<TopologyGraph> {
         #[cfg(feature = "multihop")]
         {
-            let view: TopologyView = self.multihop()?.topology_view();
+            let handle = self.multihop()?;
+            let view: TopologyView = handle.topology_view();
+            let counters = handle.counters();
             let edges: Vec<TopologyLink> = view
                 .edges
                 .iter()
@@ -144,6 +145,9 @@ impl EventLoopState {
             Some(TopologyGraph {
                 self_id: view.self_id,
                 edges,
+                turned_back: counters.turned_back,
+                no_next_hop: counters.no_next_hop,
+                hop_limit: counters.hop_limit,
             })
         }
         #[cfg(not(feature = "multihop"))]
@@ -162,6 +166,61 @@ mod tests {
     use crate::topology::{PathLabel, PeerLink};
     use crate::transport::probe::PathKind;
     use crate::util::tuning::MAX_CONNECTIONS;
+    #[cfg(feature = "multihop")]
+    use habilis_network_iroh_multihop_transport::{
+        AppId, HandleConfig, MultihopHandle, underlay_secret,
+    };
+    #[cfg(feature = "multihop")]
+    use iroh::endpoint::presets;
+    #[cfg(feature = "multihop")]
+    use iroh::{Endpoint, SecretKey};
+
+    /// The graph of the snapshot carries the three counters of the cells that the node dropped because its table
+    /// and the tables around it do not agree, so that an operator reads them where the graph is read.
+    #[cfg(feature = "multihop")]
+    #[test]
+    fn the_graph_of_the_snapshot_carries_the_counters_of_the_drops_of_a_next_hop() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let secret = SecretKey::generate();
+            let underlay: Endpoint = Endpoint::builder(presets::Minimal)
+                .secret_key(underlay_secret(&secret))
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind an underlay");
+            let handle =
+                MultihopHandle::new(&secret, underlay, HandleConfig::default()).expect("a handle");
+            let mut state = fresh_state();
+            state.multihop = Some(handle.clone());
+
+            let graph = state.topology_snapshot().graph.expect("multihop is on");
+            let json: serde_json::Value = serde_json::to_value(&graph).expect("serializes");
+
+            assert_eq!(
+                (graph.turned_back, graph.no_next_hop, graph.hop_limit),
+                (0, 0, 0),
+                "a node that dropped nothing"
+            );
+            let stranger = AppId::new(SecretKey::generate().public());
+            assert!(
+                !handle.originate_for_test(stranger, vec![1]),
+                "no neighbor reaches a node that no vector names"
+            );
+            let moved = state.topology_snapshot().graph.expect("multihop is on");
+            assert_eq!(
+                (moved.turned_back, moved.no_next_hop, moved.hop_limit),
+                (0, 1, 0),
+                "the one cell with no next hop is counted as no_next_hop in the snapshot"
+            );
+            for name in ["turned_back", "no_next_hop", "hop_limit"] {
+                assert!(
+                    json.get(name).is_some_and(serde_json::Value::is_u64),
+                    "the field {name} is in the JSON of the graph"
+                );
+            }
+            handle.close().await;
+        });
+    }
 
     /// A peer with a session and a peer with a gossip link are two peers and two units, each with
     /// the path, the nickname and the neighbor flag that the engine holds for it.

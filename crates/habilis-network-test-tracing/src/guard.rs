@@ -243,7 +243,10 @@ pub fn warn_count(target: &str, text: &str) -> usize {
 
 /// Registers what the test must close, for example `at_end(async move { endpoint.close().await })`.
 /// [`run`] and [`run_multi_thread`] await every registration, at the same time, after the body and
-/// before the runtime drops, so that a value the test closes does not log as dropped open.
+/// before the runtime drops, so that a value the test closes does not log as dropped open. They
+/// do it when the body panics too: the registration holds a handle of the value, and a handle that
+/// outlives the guard would log from a thread that no test owns. A registration that never ends
+/// holds the test, whether the body panicked or not.
 /// Call it from the body of the test, not from a spawned task.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn at_end(cleanup: impl Future<Output = ()> + 'static) {
@@ -251,7 +254,7 @@ pub fn at_end(cleanup: impl Future<Output = ()> + 'static) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn finish<Reply>(output: Reply) -> Reply {
+async fn finish() {
     let mut pending: Vec<Cleanup> =
         CLEANUPS.with(|cleanups| cleanups.borrow_mut().drain(..).collect());
     future::poll_fn(|context| {
@@ -263,6 +266,29 @@ async fn finish<Reply>(output: Reply) -> Reply {
         }
     })
     .await;
+}
+
+/// Awaits what the body registered with [`at_end`] when it drops, on the runtime of the body. It
+/// drops when the body ends and when the body panics, so the panic goes on unwinding and no
+/// code of ours catches it: the guard of the test drops in the unwind and stays silent.
+#[cfg(not(target_arch = "wasm32"))]
+struct Closing<'runtime>(&'runtime runtime::Runtime);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Closing<'_> {
+    fn drop(&mut self) {
+        self.0.block_on(finish());
+    }
+}
+
+/// Runs `future` to its end on `runtime`, awaits what the body registered with [`at_end`], and
+/// drops the runtime.
+#[cfg(not(target_arch = "wasm32"))]
+fn block_on_and_close<F: Future>(runtime: runtime::Runtime, future: F) -> F::Output {
+    let closing = Closing(&runtime);
+    let output = runtime.block_on(future);
+    drop(closing);
+    drop(runtime);
     output
 }
 
@@ -271,14 +297,14 @@ async fn finish<Reply>(output: Reply) -> Reply {
 ///
 /// # Panics
 ///
-/// Panics if the runtime cannot be built.
+/// Panics if the runtime cannot be built, and with the panic of `future`, after the
+/// registrations of [`at_end`] ran.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run<F: Future>(guard: Guard, future: F) -> F::Output {
     let mut builder = runtime::Builder::new_current_thread();
     builder.thread_name(worker_name()).enable_all();
     let runtime = builder.build().expect("runtime");
-    let output = runtime.block_on(async { finish(future.await).await });
-    drop(runtime);
+    let output = block_on_and_close(runtime, future);
     drop(guard);
     output
 }
@@ -288,7 +314,8 @@ pub fn run<F: Future>(guard: Guard, future: F) -> F::Output {
 ///
 /// # Panics
 ///
-/// Panics if the runtime cannot be built.
+/// Panics if the runtime cannot be built, and with the panic of `future`, after the
+/// registrations of [`at_end`] ran.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_multi_thread<F: Future>(guard: Guard, worker_threads: usize, future: F) -> F::Output {
     let mut builder = runtime::Builder::new_multi_thread();
@@ -297,8 +324,7 @@ pub fn run_multi_thread<F: Future>(guard: Guard, worker_threads: usize, future: 
         .thread_name(worker_name())
         .enable_all();
     let runtime: runtime::Runtime = builder.build().expect("runtime");
-    let output = runtime.block_on(async { finish(future.await).await });
-    drop(runtime);
+    let output = block_on_and_close(runtime, future);
     drop(guard);
     output
 }

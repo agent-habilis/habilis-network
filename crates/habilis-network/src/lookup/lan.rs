@@ -1,16 +1,11 @@
 use tokio::sync::mpsc;
 
-// Only the `host` loopback bind names a socket address; a browser has no IP
-// stack to bind one on.
-#[cfg(feature = "host")]
-use std::net::{Ipv4Addr, SocketAddrV4};
-
 use anyhow::{Context, Result};
-#[cfg(feature = "host")]
-use iroh::endpoint::PortmapperConfig;
 use iroh::endpoint::presets;
 use iroh::{Endpoint, RelayMode, SecretKey};
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::transport_opts;
 use crate::protocol::meshes::{LookupOpts, RelayChoice};
 
 use iroh_gossip::proto;
@@ -92,10 +87,7 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     alpns: Vec<Vec<u8>>,
     transports: super::TransportHandles,
 ) -> Result<(Endpoint, Option<super::MdnsHandle>)> {
-    // A peer endpoint carrying a custom transport also pins a key, so it is
-    // *not* a beacon; the presence of a handle disambiguates.
-    let is_beacon = secret_key.is_some() && transports.is_empty() && !transports.underlay;
-    let underlay = transports.underlay;
+    let role = transports.role;
     let network = lookups.network_label();
     let mut homing = None;
     let mut builder = if lookups.is_loopback() {
@@ -118,13 +110,9 @@ pub(crate) async fn build_endpoint_keeping_mdns(
         {
             let builder = Endpoint::builder(presets::Minimal);
             #[cfg(feature = "host")]
-            let builder = {
-                let bind_socket = SocketAddrV4::new(Ipv4Addr::LOCALHOST, bind_port.unwrap_or(0));
-                builder
-                    .bind_addr(bind_socket)
-                    .context("failed to set bind address")?
-                    .portmapper_config(PortmapperConfig::Disabled)
-            };
+            let builder =
+                habilis_network_iroh_transport_util::loopback(builder, bind_port.unwrap_or(0))
+                    .context("failed to set bind address")?;
             builder.relay_mode(RelayMode::Disabled)
         }
     } else {
@@ -154,6 +142,13 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     }
 
     let options = transports.options;
+    // Where this node listens is its own choice and not the mesh's: a loopback mesh binds the host
+    // above, and a test asks for the same for a mesh that names a relay.
+    #[cfg(feature = "host")]
+    if transport_opts::binds_loopback_only(options) && !lookups.is_loopback() {
+        builder = habilis_network_iroh_transport_util::loopback(builder, bind_port.unwrap_or(0))
+            .context("failed to set bind address")?;
+    }
     #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
     let has_webrtc = transports.webrtc.is_some();
     builder = super::install_transports(builder, transports);
@@ -164,7 +159,7 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     // which reads them. This one is for an underlay without a handle, which would
     // otherwise run iroh's default selector: it gets `MultihopLadder`.
     #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
-    if let Some(id) = underlay_id.filter(|_| underlay && !has_webrtc) {
+    if let Some(id) = underlay_id.filter(|_| role == super::EndpointRole::Underlay && !has_webrtc) {
         builder = builder.path_selector(
             habilis_network_iroh_multihop_transport::underlay_path_selector(
                 habilis_network_iroh_multihop_transport::UnderlayId::new(id),
@@ -211,7 +206,7 @@ pub(crate) async fn build_endpoint_keeping_mdns(
 
     // Two interfaces in one subnet give a peer two addresses that reach this host over one wire.
     #[cfg(not(target_arch = "wasm32"))]
-    if options.udp && !lookups.is_loopback() {
+    if options.udp && !lookups.is_loopback() && !transport_opts::binds_loopback_only(options) {
         builder = super::subnet_binds::bind_one_address_per_subnet(builder)?;
     }
 
@@ -240,20 +235,14 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     let mdns_handle: Option<super::MdnsHandle> = None;
     if lookups.dht && options.udp {
         #[cfg(all(feature = "host", feature = "dht"))]
-        super::dht::wire(&endpoint)?;
+        super::dht::wire(&endpoint, super::dht::Publish::of(role))?;
     }
     tracing::info!(target: "habilis_network::lookup",
         network,
         mdns = lookups.mdns,
         dht = lookups.dht,
         relay = ?lookups.relay_lookup,
-        role = if underlay {
-            "underlay"
-        } else if is_beacon {
-            "beacon"
-        } else {
-            "peer"
-        },
+        role = role.as_str(),
         endpoint_id = %endpoint.id(),
         "endpoint bound"
     );

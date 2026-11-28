@@ -9,12 +9,14 @@ use std::mem;
 use tokio::signal;
 
 mod owned_endpoints;
+mod owned_files;
 #[cfg(feature = "host")]
 mod owner;
 #[cfg(feature = "host")]
 mod owner_pid_error;
 mod quit_params;
 
+#[cfg(all(unix, feature = "host"))]
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -27,11 +29,12 @@ use super::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
 use crate::gossip::{MergeCtx, send_tombstones};
 use crate::protocol::Message;
-#[cfg(all(unix, feature = "host"))]
 use crate::util::tuning;
 
 #[cfg(feature = "host")]
 use crate::util::process;
+#[cfg(feature = "host")]
+use crate::util::process_start::ProcessStart;
 use n0_future::time as n0future_time;
 #[cfg(feature = "host")]
 use std::process as std_process;
@@ -40,6 +43,7 @@ use std::process as std_process;
 use tokio::signal::unix;
 
 pub(super) use owned_endpoints::OwnedEndpoints;
+pub(super) use owned_files::OwnedFiles;
 #[cfg(feature = "host")]
 pub(crate) use owner::Owner;
 #[cfg(feature = "host")]
@@ -87,7 +91,7 @@ pub(super) async fn shutdown<Driver: NodeDriver>(
     .await;
     // After the broadcast, so peers get the `Left` even when logging fails.
     lifecycle::log_leaving(quit.name.as_str());
-    n0future_time::sleep(Duration::from_millis(500)).await;
+    n0future_time::sleep(tuning::LEFT_PROPAGATION).await;
 }
 /// Announce departure, and say whether the loop must hard-exit the process once it has ended.
 ///
@@ -188,7 +192,11 @@ fn owner_start(pid: u32) -> Result<u64, OwnerPidError> {
     if pid == std_process::id() {
         return Err(OwnerPidError::OwnSelf(pid));
     }
-    process::live_start_time(pid).ok_or(OwnerPidError::NotRunning(pid))
+    match process::start_of(pid) {
+        ProcessStart::Live(start) => Ok(start),
+        ProcessStart::Gone => Err(OwnerPidError::NotRunning(pid)),
+        ProcessStart::Unknown(error) => Err(OwnerPidError::Unreadable(pid, error.kind())),
+    }
 }
 /// Detect orphaning by the spawning agent and route it through the same quit
 /// channel as a signal. A hard-killed parent (`kill -9`, a reinstall, an IDE

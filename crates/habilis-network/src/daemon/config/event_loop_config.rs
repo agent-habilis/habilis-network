@@ -8,8 +8,6 @@ use crate::daemon::setup::LiveCount;
 use crate::daemon::shutdown::{Owner, OwnerPidError};
 
 use crate::transport::{ChunkAsk, UdpTransport, UnicastFrame};
-#[cfg(feature = "host")]
-use crate::util::process;
 use std::path::PathBuf;
 
 use iroh::Endpoint;
@@ -19,7 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::gossip::event::NodeSink;
 use crate::protocol::meshes::{Mesh, MeshName};
-use crate::protocol::{MeshId, Nickname};
+use crate::protocol::{AuthorKey, MeshId, Nickname};
 
 use crate::beacon;
 
@@ -249,13 +247,21 @@ impl EventLoopConfig {
     /// message is one line.
     #[cfg(feature = "host")]
     pub fn set_owner_pid(mut self, pid: u32) -> Result<Self, OwnerPidError> {
-        self.runtime.owner = Some(Owner::try_new(pid)?);
+        let owner = Owner::try_new(pid)?;
+        self.runtime.owner = Some(owner);
         // The pair of files that holds the identity of this member belongs to this owner, and to no
         // later process that gets the same pid.
-        let start = process::live_start_time(pid);
         let keys = self.mesh.keys.clone();
-        self.mesh.keys = super::super::setup::bind_keys_to_owner(keys, start);
+        self.mesh.keys = super::super::setup::bind_keys_to_owner(keys, Some(owner.start()));
         Ok(self)
+    }
+
+    /// The member key that this node shows on this mesh, before the loop starts: the key that its
+    /// proofs are signed with. `None` where there is no file to keep a key in.
+    #[must_use]
+    pub fn member_key(&self) -> Option<AuthorKey> {
+        let member = self.mesh.keys.member.as_ref()?;
+        Some(member.for_mesh(self.mesh.mesh.as_str()).author_key())
     }
 
     /// The pid set by [`owner_pid`](Self::owner_pid).

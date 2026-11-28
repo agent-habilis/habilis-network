@@ -5,7 +5,7 @@
 //! remote, so the rule lives in the path selector, which reads the pins of its own endpoint here.
 //!
 //! A selector does not know its remote: `PathSelectionContext` of iroh carries no endpoint id. A
-//! multihop path names it, because its address is a source route that ends at the remote
+//! multihop path names it, because its address is the application id of the remote
 //! ([`multihop_remote_of`]), and so does a relay or a `WebRTC` path, so a selector finds the remote
 //! of a set of paths from any of them. A set with an IP path alone names nobody.
 
@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use iroh::EndpointId;
-use iroh::endpoint::transports::{Addr, PathSelectionData};
+use iroh::endpoint::transports::{Addr, FourTuple, PathSelectionData};
 
 use crate::rung::{MULTIHOP_TRANSPORT_ID, Rung, climb, remote_id_of};
 
@@ -102,10 +102,8 @@ pub fn is_pinned(local: EndpointId, remote: EndpointId) -> bool {
 
 /// The endpoint at the end of a multihop address, or `None` for any other address.
 ///
-/// The address of a multihop path is the postcard form of a source route: one byte for the hop
-/// count, and 64 bytes for each hop, the application id and the underlay id. The remote is the
-/// application id of the last hop. The multihop crate writes this form, and a test of that crate
-/// keeps the two in step.
+/// The address of a multihop path holds the 32 bytes of the application id of the remote and nothing
+/// more. The multihop crate writes this form, and a test of that crate keeps the two in step.
 ///
 /// # Examples
 ///
@@ -120,21 +118,13 @@ pub fn is_pinned(local: EndpointId, remote: EndpointId) -> bool {
 /// ```
 #[must_use]
 pub fn multihop_remote_of(address: &Addr) -> Option<EndpointId> {
-    const HOP_BYTES: usize = 64;
-    const ID_BYTES: usize = 32;
     let Addr::Custom(custom) = address else {
         return None;
     };
     if custom.id() != MULTIHOP_TRANSPORT_ID {
         return None;
     }
-    let (count, hops) = custom.data().split_first()?;
-    let count = usize::from(*count);
-    if count == 0 || hops.len() != count * HOP_BYTES {
-        return None;
-    }
-    let last = &hops[(count - 1) * HOP_BYTES..];
-    let bytes: [u8; ID_BYTES] = last[..ID_BYTES].try_into().ok()?;
+    let bytes: [u8; 32] = custom.data().try_into().ok()?;
     EndpointId::from_bytes(&bytes).ok()
 }
 
@@ -183,18 +173,19 @@ pub fn pinned_in(local: EndpointId, paths: &[PathSelectionData<'_>]) -> bool {
 /// use iroh::endpoint::transports::PathSelectionData;
 ///
 /// # fn demo<'a>(local: iroh::EndpointId, paths: &'a [PathSelectionData<'a>]) -> Option<&'a PathSelectionData<'a>> {
-/// climb_pinned(local, paths, custom_rung, |_rung, _path| true)
+/// climb_pinned(local, None, paths, custom_rung, |_rung, _path| true)
 /// # }
 /// ```
 #[must_use]
 pub fn climb_pinned<'a>(
     local: EndpointId,
+    current: Option<&FourTuple>,
     paths: &'a [PathSelectionData<'a>],
     custom: impl Fn(u64) -> Rung,
     usable: impl Fn(Rung, &PathSelectionData<'_>) -> bool,
 ) -> Option<&'a PathSelectionData<'a>> {
     let pinned = pinned_in(local, paths);
-    climb(paths, custom, |rung, path| {
+    climb(current, paths, custom, |rung, path| {
         pin_allows(pinned, rung) && usable(rung, path)
     })
 }
@@ -235,16 +226,14 @@ mod tests {
         SecretKey::from_bytes(&[seed; 32]).public()
     }
 
-    /// The address of a source route through `hops`, in the form that the multihop crate writes:
-    /// one byte for the hop count, then the application id and the underlay id of each hop.
+    /// The address of the last of `hops`, in the form that the multihop crate writes: the 32 bytes of the
+    /// application id of the destination, and nothing more. The earlier hops are not part of the address.
     fn route_to(hops: &[iroh::EndpointId]) -> Addr {
-        let count = u8::try_from(hops.len()).expect("a short route");
-        let mut data = vec![count];
-        for hop in hops {
-            data.extend_from_slice(hop.as_bytes());
-            data.extend_from_slice(hop.as_bytes());
-        }
-        Addr::Custom(CustomAddr::from_parts(MULTIHOP_TRANSPORT_ID, &data))
+        let destination = hops.last().expect("a destination");
+        Addr::Custom(CustomAddr::from_parts(
+            MULTIHOP_TRANSPORT_ID,
+            destination.as_bytes(),
+        ))
     }
 
     fn rung_of_choice(tuples: &[FourTuple], local: iroh::EndpointId) -> Option<Rung> {
@@ -252,7 +241,7 @@ mod tests {
             .iter()
             .map(|tuple| PathSelectionData::for_test(tuple, None))
             .collect();
-        let chosen = climb_pinned(local, &paths, custom_rung, |_rung, _path| true)?;
+        let chosen = climb_pinned(local, None, &paths, custom_rung, |_rung, _path| true)?;
         Some(crate::rung_of(chosen, custom_rung))
     }
 

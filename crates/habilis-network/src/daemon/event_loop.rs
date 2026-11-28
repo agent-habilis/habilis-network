@@ -20,12 +20,13 @@ use iroh_gossip::net;
 use n0_future::time;
 #[cfg(feature = "host")]
 use serde::de;
+#[cfg(feature = "host")]
+use std::fs::File;
 use std::{future, path, process};
 pub(super) mod ctx_parts;
 mod event_loop_error;
 pub(super) mod tick_gap;
 
-#[cfg(feature = "multihop")]
 use iroh::EndpointId;
 #[cfg(feature = "multihop")]
 use std::collections::{BTreeSet, HashSet};
@@ -58,9 +59,10 @@ use crate::{beacon, gossip, lifecycle};
 
 use super::app::NodeDriver;
 use super::cohost_arm::{
-    CohostArm, claims_at_startup, maybe_cohost, maybe_reclaim, note_rival_holds,
-    offer_to_the_new_holder, probes_before_claim, reads_ladder_while_unmeshed, release_rendezvous,
-    schedule_rival_recheck, shed_rival_beacon_if_due, verdict_after_known_holders,
+    CohostArm, apply_holder_answer, arm_holder_probe, claims_at_startup, maybe_cohost,
+    maybe_reclaim, note_rival_holds, offer_to_the_new_holder, probes_before_claim,
+    reads_ladder_while_unmeshed, release_rendezvous, start_holder_probe_if_due,
+    verdict_after_known_holders,
 };
 #[cfg(feature = "host")]
 use super::config::RuntimeConfig;
@@ -70,7 +72,7 @@ use super::heal::{GossipLink, ResubscribeEnv, apply_rung_change, resubscribe_tic
 use super::node::SignalHandling;
 #[cfg(feature = "host")]
 use super::shutdown;
-use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
+use super::shutdown::{OwnedEndpoints, OwnedFiles, QuitParams, announce_departure, never_quit};
 use super::state::{EventLoopState, FrameOverheads, MeshChunks, MeshSecrets};
 use super::timers;
 use crate::daemon::setup::LiveCount;
@@ -139,18 +141,20 @@ async fn run_checked<Driver: NodeDriver>(
     // process on quit and binds the unix socket; in-process drivers
     // (in-process: library API or MCP) take typed requests on `session_rx` instead.
     let exit_on_quit = matches!(runtime.driver, DriverMode::Cli);
+    let owned = OwnedEndpoints::new(endpoints.router, endpoints.endpoint_owner, &transports);
     #[cfg(feature = "host")]
-    let state_file = host_state_file(&app, &mesh, &mut runtime, exit_on_quit);
+    let (named_path, owned, _daemon_lock) = claim_host(&mut runtime, &mesh, owned).await?;
+    #[cfg(feature = "host")]
+    let state_file = host_state_file(&app, &mesh, &mut runtime, exit_on_quit, named_path);
     #[cfg(not(feature = "host"))]
     let state_file = runtime.state_file;
     let (external_quit_rx, external_msg_tx, ipc_listener_disabled, handle_signals) =
         driver_channels(runtime.driver);
-    let external_req_rx = session_rx;
     let started = Instant::now();
     let leave_label = leave_label(&mesh);
     let chunks = open_chunks(runtime.runtime_base.as_deref(), &mesh.mesh, &mesh.author)?;
     let mut state: EventLoopState = initial_state(
-        mesh.keys,
+        mesh.keys.for_mesh(&mesh.mesh),
         MeshSecrets {
             password: mesh.mesh_password.take(),
             key: mesh.mesh_key.take(),
@@ -166,22 +170,16 @@ async fn run_checked<Driver: NodeDriver>(
         chunks,
     );
     state.mint_mesh = mesh.mint_mesh.take(); // creator-only: backs the `invite` command
-    let owned = OwnedEndpoints {
-        router: endpoints.router,
-        owner: endpoints.endpoint_owner,
-        // A handle that the caller injected is the caller's; `close` skips it with the endpoint.
-        #[cfg(feature = "multihop")]
-        multihop: transports.multihop.clone(),
-    };
     let (fetch_tx, fetch_rx) = mpsc::unbounded_channel();
     state.fetches = chunk_fetch::Fetches::new(fetch_tx);
-    let (direct_rx, path_rx) = wire_transports(
+    let (direct_rx, path_rx, send_started_rx) = wire_transports(
         &mut state,
         &endpoints.endpoint,
         transports,
         runtime.live_count.take(),
         &rendezvous.rendezvous_params,
     );
+    let relay_refused_rx = wire_relay_refused(&state);
 
     let (rendezvous_state, rival_probe, rung_reports) = start_rendezvous(
         &mut state,
@@ -192,7 +190,7 @@ async fn run_checked<Driver: NodeDriver>(
     .await;
     let (sender, receiver) = join_gossip(&mut state, endpoints.topic);
 
-    let ipc_rx: Option<mpsc::Receiver<IpcMessage<Driver::Ipc>>> = control_socket(
+    let (ipc_rx, owned_files) = control_socket(
         ipc_listener_disabled,
         runtime.runtime_base.as_deref(),
         &mesh.mesh,
@@ -271,7 +269,7 @@ async fn run_checked<Driver: NodeDriver>(
         cohost: rendezvous.cohost,
         started,
         external_quit_rx,
-        external_req_rx,
+        external_req_rx: session_rx,
         external_msg_tx,
         quit_rx,
         exit_on_quit,
@@ -282,7 +280,10 @@ async fn run_checked<Driver: NodeDriver>(
         lan_contacts: endpoints.lan_contacts,
         direct_rx,
         path_rx,
+        send_started_rx,
+        relay_refused_rx,
         owned,
+        owned_files,
     }))
     .await
 }
@@ -307,8 +308,9 @@ fn driver_channels(
     }
 }
 
-/// The control socket of the daemon, bound here, before the caller marks the session ready. `None`
-/// when the driver has no socket: in-process drivers take requests on their own channel.
+/// The control socket of the daemon, bound here, before the caller marks the session ready, and the
+/// files that the run owns under the runtime base. No socket (`None`) when the driver has none:
+/// in-process drivers take requests on their own channel.
 #[cfg(feature = "host")]
 fn control_socket<Ipc: de::DeserializeOwned + Send + 'static>(
     disabled: bool,
@@ -317,8 +319,10 @@ fn control_socket<Ipc: de::DeserializeOwned + Send + 'static>(
     author: &Nickname,
     // The IPC task keeps a handle to the sink after this call returns.
     sink: &Arc<dyn NodeSink>,
-) -> Option<mpsc::Receiver<IpcMessage<Ipc>>> {
-    spawn_ipc_rx(disabled, runtime_base, mesh_id, author, sink)
+) -> (Option<mpsc::Receiver<IpcMessage<Ipc>>>, OwnedFiles) {
+    let ipc_rx = spawn_ipc_rx(disabled, runtime_base, mesh_id, author, sink);
+    let owned = owned_files(runtime_base, mesh_id, author, ipc_rx.is_some());
+    (ipc_rx, owned)
 }
 
 /// A browser binds no control socket. The loop keeps its IPC `select!` arm — `IpcMessage` is
@@ -331,8 +335,8 @@ fn control_socket<Ipc>(
     _author: &Nickname,
     // Same shape as the host variant, which shares this sink with the IPC task.
     _sink: &Arc<dyn NodeSink>,
-) -> Option<mpsc::Receiver<IpcMessage<Ipc>>> {
-    None
+) -> (Option<mpsc::Receiver<IpcMessage<Ipc>>>, OwnedFiles) {
+    (None, OwnedFiles::default())
 }
 
 /// The loop's quit channel. A session inside a foreground command that owns its own lifetime
@@ -360,18 +364,47 @@ fn quit_channel(handle_signals: SignalHandling, _exit_on_quit: bool) -> mpsc::Re
     never_quit()
 }
 
-/// The state file of a host daemon, seeded by the app. `None` when there is no file to write: an
-/// in-process session that keeps no file.
+/// Whether the member key and the run counter stay at a clean end. A state file that the caller named, or an
+/// owner of the run, is what ties a kept member key to one node: the default path of a run with neither is
+/// not named by anyone, and the key leaves with the run.
+#[cfg(feature = "host")]
+fn keeps_identity(explicit_state_file: bool, has_owner: bool) -> bool {
+    explicit_state_file || has_owner
+}
+
+/// What a host daemon claims before it creates a file: the lock of the one live daemon of this nickname on the mesh.
+/// The run holds it until it ends, after it removed its files. Gives the state file that the caller named, if any.
+/// A start that another daemon refuses closes the endpoint that setup bound for it, so that nothing is dropped without
+/// a close.
+#[cfg(feature = "host")]
+async fn claim_host(
+    runtime: &mut RuntimeConfig,
+    mesh: &MeshSpec,
+    owned: OwnedEndpoints,
+) -> Result<(Option<path::PathBuf>, OwnedEndpoints, Option<File>)> {
+    let named_path: Option<path::PathBuf> = runtime.state_file.take();
+    let base = runtime.runtime_base.as_deref();
+    match setup::hold_daemon_lock(base, &mesh.mesh, &mesh.author, named_path.as_deref()) {
+        Ok(lock) => Ok((named_path, owned, lock)),
+        Err(error) => {
+            owned.close().await;
+            Err(error)
+        }
+    }
+}
+
+/// The state file of a host daemon, seeded by the app: the one that the caller named, or the default path of a CLI
+/// daemon. `None` when there is no file to write: an in-process session that keeps no file.
 #[cfg(feature = "host")]
 fn host_state_file<Driver: NodeDriver>(
     app: &Driver,
     mesh: &MeshSpec,
     runtime: &mut RuntimeConfig,
     exit_on_quit: bool,
+    named_path: Option<path::PathBuf>,
 ) -> Option<StateFile> {
-    let state_file: Option<StateFile> = runtime
-        .state_file
-        .take()
+    let keeps_identity = keeps_identity(named_path.is_some(), runtime.owner.is_some());
+    let state_file: Option<StateFile> = named_path
         .or_else(|| {
             let base = runtime.runtime_base.as_deref()?;
             exit_on_quit.then(|| setup::default_state_path(base, &mesh.mesh, &mesh.author))
@@ -380,7 +413,8 @@ fn host_state_file<Driver: NodeDriver>(
             let owner_pid = runtime.owner.map(shutdown::Owner::pid);
             let pubkey = mesh.keys.session.author_key();
             let file = StateFile::new(path, &mesh.mesh, &mesh.author, &mesh.name, &pubkey)
-                .base(runtime.runtime_base.clone());
+                .base(runtime.runtime_base.clone())
+                .keeps_identity(keeps_identity);
             file.topic(mesh.topic_string.as_deref())
                 .owner_pid(owner_pid)
         });
@@ -417,6 +451,25 @@ fn open_chunks(
     #[cfg(not(feature = "host"))]
     let _ = (runtime_base, mesh, author);
     Ok(MeshChunks::open(None)?)
+}
+
+/// The files that this run made under the runtime base: the chunk folder of its store, and the
+/// control socket when it bound one. A browser and a run with no runtime base made none.
+#[cfg(feature = "host")]
+fn owned_files(
+    runtime_base: Option<&path::Path>,
+    mesh: &MeshId,
+    author: &Nickname,
+    bound_socket: bool,
+) -> OwnedFiles {
+    let Some(base) = runtime_base else {
+        return OwnedFiles::default();
+    };
+    let socket = bound_socket.then(|| path::PathBuf::from(ipc::socket_path(base, mesh, author)));
+    OwnedFiles {
+        socket,
+        chunks: Some(setup::default_chunks_path(base, mesh, author)),
+    }
 }
 
 /// The state file a daemon seeds its state with: a host daemon has one, and a browser keeps its path.
@@ -457,6 +510,15 @@ fn initial_state(
     )
 }
 
+/// The peers that close a gossip dial of ours as relay-only report to the receiver that this
+/// returns, through the sink of the admission table. The channel never closes: the table holds
+/// the sender for the life of the loop.
+fn wire_relay_refused(state: &EventLoopState) -> mpsc::UnboundedReceiver<probe::RelayRefused> {
+    let (sink, refused) = mpsc::unbounded_channel();
+    state.webrtc_admission.set_relay_refused_sink(sink);
+    refused
+}
+
 /// Wires the transports into the state, and returns the receivers of the three channels that
 /// report back to the loop: the direct-path probes, the path watchers and the failed flushes.
 fn wire_transports(
@@ -468,6 +530,7 @@ fn wire_transports(
 ) -> (
     mpsc::UnboundedReceiver<probe::DirectOutcome>,
     mpsc::UnboundedReceiver<probe::PathChange>,
+    mpsc::UnboundedReceiver<EndpointId>,
 ) {
     #[cfg(feature = "multihop")]
     {
@@ -513,6 +576,9 @@ fn wire_transports(
     let (path_tx, path_rx) = mpsc::unbounded_channel();
     state.webrtc_admission.set_path_sink(path_tx.clone());
     state.path_changes = path_tx;
+    // Directed sends report here; the loop proves the pair or asks for its session.
+    let (started_tx, started_rx) = mpsc::unbounded_channel();
+    state.send_started = started_tx;
     state.rendezvous_id = Some(rendezvous_params.id);
     if rendezvous_params.answers_jsep() {
         state.rendezvous_flags.insert(RendezvousFlag::AnswersJsep);
@@ -520,7 +586,7 @@ fn wire_transports(
         state.rendezvous_flags.remove(&RendezvousFlag::AnswersJsep);
     }
     state.write_peer_count();
-    (direct_rx, path_rx)
+    (direct_rx, path_rx, started_rx)
 }
 
 /// Starts the rendezvous: an eager member co-hosts from t=0, and everyone else defers to the heal
@@ -563,7 +629,7 @@ async fn start_rendezvous(
         .await
             == beacon::Held::Claimed;
         if claimed {
-            schedule_rival_recheck(state, cohost, rendezvous_params, endpoint);
+            arm_holder_probe(state, cohost, rendezvous_params);
         }
     } else if !rendezvous_params.bind_ports.is_empty() {
         // A member that does not claim at startup walks first on the reclaim ticker, and its book
@@ -883,8 +949,14 @@ struct EventLoop<Driver: NodeDriver> {
     /// Path watcher reports (`transport::probe::on_path_change`). Never closes,
     /// like `direct_rx`.
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
+    /// The endpoints of the directed sends that start. Never closes, like `direct_rx`.
+    send_started_rx: mpsc::UnboundedReceiver<EndpointId>,
+    /// The peers that closed a gossip dial of ours as relay-only. Never closes, like `direct_rx`.
+    relay_refused_rx: mpsc::UnboundedReceiver<probe::RelayRefused>,
     /// Closed with the rendezvous as the loop ends.
     owned: OwnedEndpoints,
+    /// Removed when the loop ends clean.
+    owned_files: OwnedFiles,
 }
 
 /// The daemon's `select!` loop. Never returns normally on the CLI
@@ -938,9 +1010,12 @@ struct Loop<'node, Driver: NodeDriver> {
     lan_contacts: Option<mpsc::Receiver<lookup::LanEvent>>,
     direct_rx: mpsc::UnboundedReceiver<probe::DirectOutcome>,
     path_rx: mpsc::UnboundedReceiver<probe::PathChange>,
+    send_started_rx: mpsc::UnboundedReceiver<EndpointId>,
+    relay_refused_rx: mpsc::UnboundedReceiver<probe::RelayRefused>,
     anchors: TickAnchors,
     resubscribe_attempts: u32,
     owned: OwnedEndpoints,
+    owned_files: OwnedFiles,
 }
 impl<Driver: NodeDriver> Loop<'_, Driver> {
     /// The app's startup hook, and the first offer of the rendezvous.
@@ -963,6 +1038,11 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         .await;
         super::cohost_arm::wait_for_shed_close(&mut self.state).await;
         super::cohost_arm::wait_for_prober_closes(self.prober_closes).await;
+        // Before the exit below, which skips every destructor. An error end keeps the files: the
+        // operator reads them to find out what went wrong.
+        if outcome.is_ok() {
+            self.owned_files.remove();
+        }
         match outcome {
             Ok(exit_after_release) => {
                 if exit_after_release {
@@ -1010,8 +1090,7 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
                 if arrived != self.parts.endpoint.id()
                     && !self.state.known_endpoints.contains(&arrived)
                 {
-                    self.state
-                        .note_second_group_sign(self.parts.endpoint.id(), Instant::now());
+                    self.state.note_second_group_sign(Instant::now());
                 }
             }
         }
@@ -1133,6 +1212,29 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state.idle.ext.other += 1;
         let context = self.parts.handler_ctx(&self.sender);
         gossip::lan::on_lan_event(event, &mut self.state, &context).await;
+    }
+
+    fn directed_send_started(&mut self, peer: EndpointId) {
+        self.state.idle.ext.other += 1;
+        let context = self.parts.handler_ctx(&self.sender);
+        gossip::directed_send_started(&mut self.state, &context, peer);
+    }
+
+    fn relay_refused(&mut self, refused: probe::RelayRefused) {
+        self.state.idle.ext.relay_refused += 1;
+        let local = self.parts.handler_ctx(&self.sender).endpoint.id();
+        let probe::RefusalEffect {
+            outcome,
+            stamp_cleared,
+        } = self.state.note_relay_refused(refused.peer);
+        tracing::debug!(
+            target: transport::LOG_TARGET,
+            local = %local.fmt_short(),
+            peer = %refused.peer.fmt_short(),
+            outcome,
+            stamp_cleared,
+            "a peer closed our gossip dial as relay-only"
+        );
     }
 
     async fn path_change(&mut self, change: probe::PathChange) {
@@ -1319,6 +1421,34 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         );
     }
 
+    /// An off-loop probe answered. A probe before a claim goes to the claim path. The probe of the
+    /// holder goes to its contest.
+    async fn probe_answer(&mut self, purpose: beacon::ProbePurpose, answer: beacon::WhoAnswer) {
+        match purpose {
+            beacon::ProbePurpose::BeforeClaim => {
+                self.probe_verdict(beacon::holder_is_there(answer)).await;
+            }
+            beacon::ProbePurpose::OfHolder => {
+                self.state.idle.ext.holder_ask += 1;
+                let context = self.parts.handler_ctx(&self.sender);
+                let arm = CohostArm {
+                    policy: self.cohost,
+                    params: &self.rendezvous_params,
+                    started: self.started,
+                };
+                // The policy after a yield: the creator probes before its next claim.
+                self.cohost = apply_holder_answer(
+                    &mut self.state,
+                    &context,
+                    &arm,
+                    &mut self.rendezvous,
+                    answer,
+                )
+                .await;
+            }
+        }
+    }
+
     /// The off-loop probe-before-claim answered. Its own arm rather than a poll at the next heal
     /// tick: the probe already cost up to `HEAL_PROBE`, and making a free rendezvous wait out
     /// another 15s interval before anyone binds it would hand back the claim latency this change
@@ -1330,14 +1460,12 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
         self.state
             .probe_backoff
             .note_verdict(found_rival, Instant::now(), spread);
-        // One free verdict is not enough to claim: a live beacon's
-        // rival re-check periodically releases the rendezvous to
-        // re-probe it, and a probe landing inside that window reads
-        // "free" while a holder is about to re-bind. Claiming on it
-        // stands up a rival copy, and two copies shed each other
-        // longer than most joins are willing to wait. Two frees in a
-        // row (the next reclaim tick re-probes) squares those odds
-        // away; a genuinely dead beacon costs one extra probe round.
+        // One free verdict is not enough to claim: one probe can read
+        // "free" while a live holder is slow to answer (a lost datagram, a
+        // holder in the middle of a bind), and claiming on it stands up a
+        // second copy of the id. Two frees in a row (the next reclaim tick
+        // re-probes) cut those odds; a genuinely dead beacon costs one
+        // extra probe round. This reason is read, not measured.
         if !found_rival
             && !self
                 .state
@@ -1351,35 +1479,30 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             self.state
                 .rendezvous_flags
                 .remove(&RendezvousFlag::ProbeReadFree);
-            let claimed = beacon::claim_after_probe(
+            if found_rival {
+                tracing::debug!(target: "habilis_network::beacon", node = %self.parts.endpoint.id().fmt_short(), "public rendezvous already served by a beacon; staying peer");
+                note_rival_holds(&mut self.state, &self.parts.handler_ctx(&self.sender));
+                return;
+            }
+            beacon::log_claim_on_free(self.parts.endpoint.id());
+            let claim = beacon::claim_after_probe(
                 &self.rendezvous_params,
                 self.parts.endpoint,
                 &self.state.address_book,
                 &mut self.rendezvous,
-                found_rival,
                 &mut self.state.rungs,
             )
             .await;
-            if claimed {
-                // Still from the brisk base: two joiners that start
-                // together both read free twice and claim in the same
-                // instant, and the first re-check is what merges that
-                // split.
-                schedule_rival_recheck(
-                    &mut self.state,
-                    self.cohost,
-                    &self.rendezvous_params,
-                    self.parts.endpoint,
-                );
-                // The new rendezvous never dials us; the reclaim tick re-grafts it.
-                self.state.arm_reclaim(Instant::now());
-                offer_to_the_new_holder(&mut self.state, &self.parts.handler_ctx(&self.sender));
-            } else if found_rival {
-                // A rival holds the identity: this arbitration epoch is
-                // settled, so a later claim (the rival died) starts the
-                // re-check backoff from its brisk base again.
-                self.state.rival_recheck_rounds = 0;
-                note_rival_holds(&mut self.state, &self.parts.handler_ctx(&self.sender));
+            match claim {
+                Ok(()) => {
+                    // Two joiners that start together both read free twice and claim in the same
+                    // instant; the first ask of who serves the rendezvous merges that split.
+                    arm_holder_probe(&mut self.state, self.cohost, &self.rendezvous_params);
+                    // The new rendezvous never dials us; the reclaim tick re-grafts it.
+                    self.state.arm_reclaim(Instant::now());
+                    offer_to_the_new_holder(&mut self.state, &self.parts.handler_ctx(&self.sender));
+                }
+                Err(miss) => beacon::log_claim_missed(self.parts.endpoint.id(), miss),
             }
         }
     }
@@ -1423,8 +1546,8 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
     }
 
     async fn beacon_closed(&mut self) {
-        // The beacon that the re-check shed is closed: the id is free of our own corpse, so
-        // the re-probe starts now. The reclaim tick below stays as the net.
+        // The beacon that was shed (a yield to a rival, or a rehome) is closed: the id is free of
+        // our own corpse, so the re-probe starts now. The reclaim tick below stays as the net.
         self.state.beacon_closing = None;
         self.state.idle.reclaim += 1;
         let context = self.parts.handler_ctx(&self.sender);
@@ -1451,30 +1574,24 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             params: &self.rendezvous_params,
             started: self.started,
         };
-        // The rival re-check shed rides this ticker, NOT the heal tick:
-        // simultaneous joiners' heal tickers align, and a shed deadline
-        // quantized to a shared multi-second boundary re-synchronizes
-        // the very sheds whose ms-scale phase offsets must differ for
-        // one holder to catch the other still up (observed lockstep:
-        // both shed within 5ms, both probe into the gap, both re-bind,
-        // forever). At this cadence the offsets survive; the next tick
-        // (~RECLAIM_INTERVAL later, after the dropped endpoint has
-        // unmapped) runs the re-probe via `maybe_reclaim`.
-        if !shed_rival_beacon_if_due(
+        // The ask of who serves the rendezvous rides this ticker and not the heal tick: its deadline
+        // comes from the claim of each holder, so the asks of 2 holders are not aligned.
+        start_holder_probe_if_due(
             &mut self.state,
             &arm,
-            &mut self.rendezvous,
+            self.rendezvous.as_ref(),
+            &mut self.rival_probe,
             context.endpoint.id(),
-        ) {
-            maybe_reclaim(
-                &mut self.state,
-                &context,
-                &arm,
-                &mut self.rendezvous,
-                &mut self.rival_probe,
-            )
-            .await;
-        }
+        )
+        .await;
+        maybe_reclaim(
+            &mut self.state,
+            &context,
+            &arm,
+            &mut self.rendezvous,
+            &mut self.rival_probe,
+        )
+        .await;
         read_ladder_while_unmeshed(
             &mut self.state,
             &self.rendezvous_params,
@@ -1595,7 +1712,10 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         lan_contacts,
         direct_rx,
         path_rx,
+        send_started_rx,
+        relay_refused_rx,
         owned,
+        owned_files,
     } = loop_state;
 
     log_daemon_start(&author);
@@ -1677,9 +1797,12 @@ async fn event_loop<Driver: NodeDriver>(loop_state: EventLoop<Driver>) -> Result
         lan_contacts,
         direct_rx,
         path_rx,
+        send_started_rx,
+        relay_refused_rx,
         anchors,
         resubscribe_attempts,
         owned,
+        owned_files,
     };
     lp.start().await;
     let outcome = run_loop(
@@ -1745,6 +1868,8 @@ async fn run_loop<Driver: NodeDriver>(
                 }
             }
             Some(change) = lp.path_rx.recv() => { lp.path_change(change).await; },
+            Some(peer) = lp.send_started_rx.recv() => { lp.directed_send_started(peer); },
+            Some(refused) = lp.relay_refused_rx.recv() => { lp.relay_refused(refused); },
             frame = recv_opt(&mut lp.unicast_rx) => match frame {
                 Some(frame) => { lp.unicast(frame).await; },
                 None => { lp.unicast_rx = None; },
@@ -1766,7 +1891,7 @@ async fn run_loop<Driver: NodeDriver>(
             _ = lp.intervals.heal.tick() => { lp.heal().await?; },
             _ = lp.intervals.digest_round.tick() => { lp.digest_round().await; },
             Some(decision) = lp.rung_rx.recv() => { lp.rung_change(decision); },
-            found_rival = beacon::probe_verdict(&mut lp.rival_probe) => { lp.probe_verdict(found_rival).await; },
+            (purpose, answer) = beacon::probe_outcome(&mut lp.rival_probe) => { lp.probe_answer(purpose, answer).await; },
             Some(report) = lp.rung_reports.recv() => { lp.rung_report(report).await; },
             () = closed_opt(&mut lp.state.beacon_closing) => { lp.beacon_closed().await; },
             _ = lp.intervals.reclaim.tick() => { lp.reclaim().await; },
@@ -2094,6 +2219,7 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::time::Duration;
 
     use tokio::sync::oneshot;
@@ -2131,6 +2257,67 @@ mod tests {
                     .push(Report { peers, known });
             }
         }
+    }
+
+    /// A run keeps its member key at a clean end when it has an owner or a state file that the caller
+    /// named, and a run with neither loses it with the run.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_run_keeps_its_member_key_only_with_an_owner_or_a_named_state_file() {
+        let _guard = ::habilis_network_test_tracing::init();
+        for (explicit, owner, kept) in [
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+            (false, false, false),
+        ] {
+            assert_eq!(
+                super::keeps_identity(explicit, owner),
+                kept,
+                "explicit state file: {explicit}, owner: {owner}"
+            );
+        }
+    }
+
+    /// A run owns the chunk folder under its runtime base, and the control socket only when it bound
+    /// one. A run with no runtime base owns neither.
+    #[cfg(feature = "host")]
+    #[test]
+    fn a_run_owns_the_chunk_folder_and_the_socket_that_it_bound() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mesh, author) = (MeshId::from("test"), nick("swift-cedar"));
+        let base = Path::new("/runtime-base");
+
+        let bound = super::owned_files(Some(base), &mesh, &author, true);
+        let socket = bound.socket.expect("the socket that the run bound");
+        let chunks = bound.chunks.expect("the chunk folder of the run");
+        assert_eq!(
+            socket.file_name().and_then(|name| name.to_str()),
+            Some("swift-cedar.ipc.sock"),
+            "the control socket of the member"
+        );
+        assert_eq!(
+            chunks.file_name().and_then(|name| name.to_str()),
+            Some("swift-cedar.chunks"),
+            "the chunk folder of the member"
+        );
+        assert_eq!(
+            socket.parent(),
+            chunks.parent(),
+            "both are in the runtime folder of the mesh"
+        );
+
+        let unbound = super::owned_files(Some(base), &mesh, &author, false);
+        assert!(
+            unbound.socket.is_none(),
+            "a run that bound no socket owns none"
+        );
+        assert!(unbound.chunks.is_some(), "the chunk folder is the run's");
+        assert_eq!(
+            super::owned_files(None, &mesh, &author, true),
+            super::OwnedFiles::default(),
+            "no runtime base, no files"
+        );
     }
 
     /// A state with one peer that was last heard `alive_timeout() + 10 s` ago: due for eviction.
@@ -2607,12 +2794,11 @@ mod route_wake_tests {
         );
     }
 
-    /// A pair on the relay has the direct route dialed. The gate then refuses the
-    /// destination as a first hop: the wake makes the pass dial the route through a
-    /// third member within the same turn, without waiting for the stuck deadline and a
-    /// link-state tick.
+    /// A pair on the relay has the address of its destination dialed. The gate then refuses the destination as
+    /// a first hop: the address does not change, because it holds no route. The way through a third member is
+    /// taken by the next hop of each node, with no new dial and no wait for the stuck deadline.
     #[test]
-    fn a_refused_first_hop_moves_the_dial_of_a_pair_on_the_relay_to_a_route_through_a_third() {
+    fn a_refused_first_hop_does_not_change_the_address_that_a_pair_on_the_relay_is_dialed_with() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,
@@ -2627,7 +2813,7 @@ mod route_wake_tests {
                 );
                 assert!(
                     me.feed_topology(via.link_vector(vec![(dst.app_id(), 1)])),
-                    "a refused first hop moves the relay dial to a route through a third peer"
+                    "the route through the third peer is fed to the topology"
                 );
                 assert!(
                     me.feed_topology(dst.link_vector(vec![])),
@@ -2649,7 +2835,7 @@ mod route_wake_tests {
                     .cloned()
                     .expect("the direct route is dialed");
 
-                me.refuse_hop_for_test(dst.app_id());
+                me.hold_hop_for_test(dst.app_id());
                 route_wake_arm(&mut state, &context);
 
                 let dialed: TransportAddr = state
@@ -2657,11 +2843,16 @@ mod route_wake_tests {
                     .get(&dst_key)
                     .cloned()
                     .expect("a route is dialed");
-                assert_ne!(dialed, direct, "the route through the third is dialed");
+                assert_eq!(dialed, direct, "the address of the destination is the same");
                 assert_eq!(
                     Some(dialed),
                     me.route_addr(dst.app_id()).map(TransportAddr::Custom),
-                    "and it is the route that the handle chooses now"
+                    "and it is the address that the handle gives now: a way through the third exists"
+                );
+                assert_eq!(
+                    me.next_hop_of(dst.app_id()),
+                    Some(via.app_id()),
+                    "the node takes the way through the third peer at once"
                 );
                 state.webrtc_admission.close();
                 me.close().await;

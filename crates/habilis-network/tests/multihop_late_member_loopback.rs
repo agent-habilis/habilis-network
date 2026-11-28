@@ -1,18 +1,18 @@
 //! A node at its cap learns a new member, and dials nobody and evicts nobody for it. A send to a
 //! member that it holds no connection to then pins the peer on a multihop route.
 //!
-//! Four native members on a local relay, with the list `udp,webrtc,multihop`. Alice has a cap of 2.
-//! Bob and carol join with her, and dave joins after her ceiling is full. No path is cut: the rule
-//! does not depend on a path that is missing, only on the ceiling being full. The gossip view of
-//! alice holds 2 of the 3 others, and the third is the peer of the test.
+//! Ten native members on a local relay, with the list `udp,webrtc,multihop`. Alice has the minimum
+//! cap of 8. Eight members join with her, and the ninth joins after her ceiling is full. No path is
+//! cut: the rule does not depend on a path that is missing, only on the ceiling being full. The
+//! gossip view of alice holds 8 of the 9 others, and the ninth is the peer of the test.
 //!
-//! The run shows, after the roster of alice holds the third member and a settle time:
-//! - alice counts 2 direct units, none over the cap, and no more connected peers than the total
+//! The run shows, after the roster of alice holds the ninth member and a settle time:
+//! - alice counts 8 direct units, none over the cap, and no more connected peers than the total
 //!   cap: a dial for the new member (a `PeerInfo` dial, a probe, a courtesy dial) would take a
-//!   third unit or evict one. A connection that takes no unit is legal and is not checked, such as
+//!   ninth unit or evict one. A connection that takes no unit is legal and is not checked, such as
 //!   the connection of a former neighbor that the view change demoted to an extra;
 //! - no member logged an eviction at its ceiling;
-//! - a send of alice to the third member arrives, and her snapshot shows it pinned on the
+//! - a send of alice to the member outside her view arrives, and her snapshot shows it pinned on the
 //!   multihop path.
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
@@ -23,11 +23,21 @@ use habilis_network::membership::{
     self, Inbound, Inspect, InspectHost, InspectTest, Membership, Messaging, Request, Routing,
 };
 use habilis_network::net;
+use habilis_network::net::Bind;
 use habilis_network::protocol::{Lookup, Transport};
 use habilis_network::topology::TopologySnapshot;
+use habilis_network::util::tuning::MIN_MAX_CONNECTIONS;
 use habilis_network_iroh_multihop_transport::MultihopCounters;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time;
+
+/// The cap of alice: the minimum. Her view is full with this many neighbors, so the mesh needs more
+/// members than the cap.
+const CAP: usize = MIN_MAX_CONNECTIONS;
+/// The members that join alice. The first `CAP` fill her ceiling, and the last comes after.
+const JOINERS: [&str; 9] = [
+    "bob", "carol", "dave", "erin", "frank", "grace", "heidi", "ivan", "judy",
+];
 
 /// Long enough for the cuts to take effect, for the gossip view to settle, and for the topology to
 /// hold the route.
@@ -66,7 +76,8 @@ impl Member {
         transport: Vec<Transport>,
         max_connections: usize,
     ) -> Self {
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .lookup(vec![Lookup::Relay]);
         let options = options
@@ -78,7 +89,8 @@ impl Member {
 
     async fn join(nick: &str, creator: &Self) -> Self {
         let mesh = creator.membership.node.mesh_id().to_string();
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .mesh(Some(mesh));
         Self::open(&options).await
@@ -235,9 +247,7 @@ fn neighbor_nicks(snapshot: &TopologySnapshot) -> Vec<&str> {
 /// The member that is no gossip neighbor of alice in `snapshot`, when there is exactly one.
 fn the_third_member(snapshot: &TopologySnapshot) -> Option<&'static str> {
     let neighbors = neighbor_nicks(snapshot);
-    let others = ["bob", "carol", "dave"]
-        .into_iter()
-        .filter(|nick| !neighbors.contains(nick));
+    let others = JOINERS.into_iter().filter(|nick| !neighbors.contains(nick));
     let others: Vec<&'static str> = others.collect();
     match others[..] {
         [only] => Some(only),
@@ -246,7 +256,7 @@ fn the_third_member(snapshot: &TopologySnapshot) -> Option<&'static str> {
 }
 
 /// Whether the snapshot shows `nick` held within the cap: pinned with no unit for it, or a gossip
-/// neighbor, because the random view can make the third member a neighbor between the choice of the
+/// neighbor, because the random view can make the member outside the view a neighbor between the choice of the
 /// peer and the send, and a neighbor needs no pin. The units are the cap and none is over it.
 fn is_held_within_the_cap(snapshot: &TopologySnapshot, nick: &str) -> bool {
     let wanted = Some(nick);
@@ -255,7 +265,7 @@ fn is_held_within_the_cap(snapshot: &TopologySnapshot, nick: &str) -> bool {
         .iter()
         .find(|link| link.nickname.as_deref() == wanted);
     let held = found.is_some_and(|link| link.neighbor || link.pinned);
-    held && snapshot.direct_units == 2 && snapshot.over_ceiling == 0
+    held && snapshot.direct_units == CAP && snapshot.over_ceiling == 0
 }
 
 /// How long the ledger may take to settle after the first frame of a send.
@@ -267,14 +277,14 @@ const LABEL_DEADLINE: Duration = Duration::from_secs(30);
 /// ledger is read every 500 ms in it, and a connection beyond the units fails the run at once.
 const WATCH: Duration = Duration::from_secs(10);
 
-/// The dials that `alice` made since she started, to each of the other three members, as a nickname
-/// and a count. A gossip link to a neighbor is a dial too, and a unit: alice dialed bob and carol
+/// The dials that `alice` made since she started, to each of the other members, as a nickname
+/// and a count. A gossip link to a neighbor is a dial too, and a unit: alice dialed her neighbors
 /// for their links while her ceiling had room, and she dials a new neighbor that the view takes
 /// in. So a test reads the counts once the ceiling is full, and a later dial is allowed only to a
 /// member that she held as a neighbor or as a pinned peer.
 async fn dials_made(alice: &Member) -> Vec<(&'static str, u64)> {
     let mut dials: Vec<(&'static str, u64)> = Vec::new();
-    for nick in ["bob", "carol", "dave"] {
+    for nick in JOINERS {
         dials.push((nick, alice.dials_to(nick).await));
     }
     dials
@@ -327,17 +337,17 @@ fn loose_nicks(snapshot: &TopologySnapshot) -> Vec<&str> {
     loose.filter_map(|link| link.nickname.as_deref()).collect()
 }
 
-/// Why the ledger of a node at its cap of 2 took a unit for the new member, or `None` when it did
-/// not: the units and the units over the cap must be exactly 2 and 0, and the peers that hold any
+/// Why the ledger of a node at its cap of 8 took a unit for the new member, or `None` when it did
+/// not: the units and the units over the cap must be exactly 8 and 0, and the peers that hold any
 /// connection must not pass the total cap. A connection that takes no unit is legal and is not
 /// checked: the connection of a former gossip neighbor is demoted to an extra when the view changes
 /// (CI saw bob so, when dave took his place), the newcomer may dial alice, and a dial with a route
-/// pins its peer. A dial for the new member that takes a unit shows as a third unit, or as an
+/// pins its peer. A dial for the new member that takes a unit shows as a ninth unit, or as an
 /// eviction in the log, and both fail the run.
 fn took_a_unit(snapshot: &TopologySnapshot) -> Option<String> {
     let held = (snapshot.direct_units, snapshot.over_ceiling);
     let within = snapshot.connected_peers <= snapshot.connected_cap;
-    if held == (2, 0) && within {
+    if held == (CAP, 0) && within {
         None
     } else {
         Some(format!(
@@ -355,17 +365,21 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = net::test_relay::spawn_plain().await.expect("local relay");
         let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];
-        let alice = Member::create("alice", &relay, list, 2).await;
-        let bob = Member::join("bob", &alice).await;
-        let carol = Member::join("carol", &alice).await;
+        let alice = Member::create("alice", &relay, list, CAP).await;
+        let mut early: Vec<Member> = Vec::new();
+        for nick in &JOINERS[..CAP] {
+            early.push(Member::join(nick, &alice).await);
+        }
+        let mut group: Vec<&Member> = vec![&alice];
+        group.extend(early.iter());
         assert!(
-            rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
-            "the three members never formed a mesh"
+            rosters_hold(&group, CAP, Duration::from_mins(1)).await,
+            "the nine members never formed a mesh"
         );
         let started = Instant::now();
         loop {
             let (units, over) = alice.direct_units().await;
-            if units == 2 && over == 0 {
+            if units == CAP && over == 0 {
                 break;
             }
             assert!(
@@ -379,17 +393,19 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
         let dials_at_the_cap = dials_made(&alice).await;
 
         // The new member comes after the ceiling of alice is full.
-        let dave = Member::join("dave", &alice).await;
+        let late = Member::join(JOINERS[CAP], &alice).await;
+        let mut everyone: Vec<&Member> = vec![&alice, &late];
+        everyone.extend(early.iter());
         assert!(
-            rosters_hold(&[&alice, &bob, &carol, &dave], 3, Duration::from_mins(1)).await,
-            "the four members never formed a mesh"
+            rosters_hold(&everyone, JOINERS.len(), Duration::from_mins(1)).await,
+            "the ten members never formed a mesh"
         );
         habilis_network_test_tracing::allow_warn(STUCK_TARGET, STUCK_TEXT);
         habilis_network_test_tracing::allow_relay_cell_refusal();
 
         // The state to wait for is the one in which alice has done all that she does for the new
-        // member: her gossip view holds 2 of the 3 others, and her topology holds a route to the
-        // third. The ledger is read at each step of the wait, so a dial that takes a unit fails the run when
+        // member: her gossip view holds 8 of the 9 others, and her topology holds a route to the
+        // ninth. The ledger is read at each step of the wait, so a dial that takes a unit fails the run when
         // it happens and not only at the end.
         let waiting_since = Instant::now();
         let target: String = loop {
@@ -404,7 +420,7 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
             }
             assert!(
                 waiting_since.elapsed() < STEP_DEADLINE,
-                "alice never held a view of 2 neighbors and a route to the third: {}",
+                "alice never held a view of {CAP} neighbors and a route to the ninth: {}",
                 counters_of(&[("alice", &alice)]).await
             );
             time::sleep(Duration::from_millis(500)).await;
@@ -441,7 +457,8 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
 
         // The peer of the test is the one that alice holds no connection to: the member that is no
         // neighbor of hers.
-        let mut members = [("bob", bob), ("carol", carol), ("dave", dave)];
+        let mut members: Vec<(&str, Member)> = JOINERS[..CAP].iter().copied().zip(early).collect();
+        members.push((JOINERS[CAP], late));
         let (_, member) = members
             .iter_mut()
             .find(|(nick, _)| *nick == target)
@@ -468,7 +485,7 @@ fn a_node_at_its_cap_dials_nobody_for_a_new_member_and_pins_the_first_send() {
         }
         assert!(
             is_held_within_the_cap(&after, &target),
-            "the send of alice to {target} was neither pinned nor a neighbor, or her units are not 2 of 2: {after:?}"
+            "the send of alice to {target} was neither pinned nor a neighbor, or her units are not {CAP} of {CAP}: {after:?}"
         );
 
         for (_, held) in members {

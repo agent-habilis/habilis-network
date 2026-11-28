@@ -6,11 +6,13 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use n0_future::task::JoinHandle;
 use tokio::sync::{oneshot, watch};
 
-use crate::lookup::{ProbeAnswer, TransportHandles, build_endpoint, probe_answer, probe_connect};
+use crate::lookup::{ProbeAnswer, TransportHandles, build_endpoint, probe_answer};
 use crate::protocol::meshes::LookupOpts;
 use crate::util::tuning::{HEAL_PROBE, RENDEZVOUS_CLOSE, heal_interval};
 
-use super::{RendezvousParams, beacon_lookups, rendezvous_addr, rung_is_busy};
+use super::{
+    Cause, RendezvousParams, WhoAnswer, ask_who, beacon_lookups, rendezvous_addr, rung_is_busy,
+};
 
 use n0_future::{task, time};
 use std::future;
@@ -30,13 +32,21 @@ use std::future;
 /// channel the loop selects on, exactly as the relay-rung walk does
 /// through [`RendezvousParams::rung_tx`]. What stays on the loop is only
 /// the bind, which is milliseconds.
+/// Why a probe runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbePurpose {
+    /// A node that holds no beacon asks whether a holder serves the id, before it claims.
+    BeforeClaim,
+    /// The holder asks who serves its own rung, and reads whether a rival serves it.
+    OfHolder,
+}
+
 #[derive(Debug)]
 #[must_use]
 pub(crate) struct RivalProbe {
-    /// The verdict: `true` ⇒ a beacon already answers, stay a peer.
-    /// A dropped sender (the task died) reads as `true` — see
-    /// [`probe_verdict`].
-    pub(crate) rx: oneshot::Receiver<bool>,
+    /// The answer of the probe. A dropped sender (the task died) reads as `Reached`: someone may be
+    /// there, so the member stays a peer (see [`answer_of`]).
+    pub(crate) rx: oneshot::Receiver<WhoAnswer>,
     pub(crate) task: JoinHandle<()>,
     /// The throwaway prober endpoints, retained for the same reason `Rendezvous` retains its own:
     /// aborting the task drops the endpoints open, and iroh tears an unclosed endpoint down
@@ -48,6 +58,8 @@ pub(crate) struct RivalProbe {
     /// Tells the task to stop dialing and go straight to its own close.
     /// `None` when there is no dial to stop.
     pub(crate) cancel: Option<oneshot::Sender<()>>,
+    /// Who asked, and so who reads the answer.
+    pub(crate) purpose: ProbePurpose,
 }
 
 impl RivalProbe {
@@ -99,29 +111,50 @@ impl Drop for RivalProbe {
 /// claiming blind is the one outcome the probe exists to prevent.
 ///
 /// [`recv_opt`]: crate::daemon::event_loop
-pub(crate) async fn probe_verdict(probe: &mut Option<RivalProbe>) -> bool {
+pub(crate) async fn probe_outcome(probe: &mut Option<RivalProbe>) -> (ProbePurpose, WhoAnswer) {
     let Some(active) = probe.as_mut() else {
         return future::pending().await;
     };
+    let purpose = active.purpose;
     // `&mut Receiver` so a losing `select!` arm drops this future without
     // dropping the receiver — the verdict survives to the next poll.
-    let found_rival = verdict_of((&mut active.rx).await);
+    let answer = answer_of((&mut active.rx).await);
     *probe = None;
-    found_rival
+    (purpose, answer)
+}
+
+/// [`probe_outcome`] for a probe before a claim: whether a holder serves the id.
+#[cfg(test)]
+pub(crate) async fn probe_verdict(probe: &mut Option<RivalProbe>) -> bool {
+    holder_is_there(probe_outcome(probe).await.1)
+}
+
+/// Whether the answer of the ask says that a holder serves the id. A node that holds nothing reads
+/// `Rival`, and also `Reached`: a connection that came up is proof that a holder is there, even
+/// when it sent no valid frame (a slow beacon), and a claim on the other reading stands up a
+/// second holder. Only `Unknown`, where nothing was reached, reads the id as free.
+pub(crate) fn holder_is_there(answer: WhoAnswer) -> bool {
+    matches!(answer, WhoAnswer::Rival(_) | WhoAnswer::Reached(_))
 }
 
 /// Read a probe task's outcome. A dropped sender — the task was aborted, or
 /// panicked — means we never learned the answer, and "a rival is there" is
 /// the safe reading: claiming blind is the duplicate-id collision the probe
 /// exists to prevent, while a needless extra tick costs one heal interval.
-pub(crate) fn verdict_of(result: Result<bool, oneshot::error::RecvError>) -> bool {
-    result.unwrap_or(true)
+#[cfg(test)]
+pub(crate) fn verdict_of(result: Result<WhoAnswer, oneshot::error::RecvError>) -> bool {
+    holder_is_there(answer_of(result))
+}
+
+/// The answer of a probe whose task may have ended without one: someone may be there, so `Reached`.
+fn answer_of(result: Result<WhoAnswer, oneshot::error::RecvError>) -> WhoAnswer {
+    result.unwrap_or(WhoAnswer::Reached(Cause::ProbeTaskEnded))
 }
 
 /// Start the probe-before-claim on its own task.
 ///
 /// The prober dials from a **throwaway endpoint**, not the member's `peer`:
-/// an ex-holder re-probing after a rival re-check shed carries stale
+/// an ex-holder re-probing after a yield to a rival carries stale
 /// per-id connection state for the shared `rendezvous_id` (the link to its
 /// own just-dropped beacon — the reused-endpoint-id pathology of
 /// iroh-gossip#10), and a dial from it joins that dead state and times out
@@ -152,7 +185,6 @@ pub(crate) async fn spawn_rival_probe(
     params: &RendezvousParams,
     node: EndpointId,
 ) -> Option<RivalProbe> {
-    use tracing::Instrument as _;
     if !params.bind_ports.is_empty() {
         return spawn_ladder_probe(params, node).await;
     }
@@ -167,29 +199,80 @@ pub(crate) async fn spawn_rival_probe(
                 "rival probe has nothing to dial and no lookup to resolve the id; reading the rendezvous as held");
             let (tx, rx) = oneshot::channel();
             // The receiver is held below; this send cannot fail.
-            let _ = tx.send(true);
+            let _ = tx.send(WhoAnswer::Reached(Cause::NothingToDial));
             return Some(RivalProbe {
                 rx,
                 task: task::spawn(async {}),
                 endpoints: Vec::new(),
                 cancel: None,
+                purpose: ProbePurpose::BeforeClaim,
             });
         }
     };
+    spawn_ask(params, node, target, ProbePurpose::BeforeClaim).await
+}
+
+/// Start the probe of a holder: it asks who serves the id on the rung that its own beacon is homed
+/// on, and no other. `None` when there is no rung to name (a private ladder, or a walk that found
+/// no reachable rung): then nothing can displace the beacon, and nothing is asked.
+pub(crate) async fn spawn_holder_probe(
+    params: &RendezvousParams,
+    node: EndpointId,
+) -> Option<RivalProbe> {
+    if !params.bind_ports.is_empty() {
+        return None;
+    }
+    let rung = params.bootstrap_relay.clone()?;
+    let target = EndpointAddr::new(params.id).with_relay_url(rung);
+    spawn_ask(params, node, target, ProbePurpose::OfHolder).await
+}
+
+/// A probe whose answer is known at once: no dial, nothing to close.
+fn resolved(answer: WhoAnswer, purpose: ProbePurpose) -> RivalProbe {
+    let (tx, rx) = oneshot::channel();
+    // The receiver is held below; this send cannot fail.
+    let _ = tx.send(answer);
+    RivalProbe {
+        rx,
+        task: task::spawn(async {}),
+        endpoints: Vec::new(),
+        cancel: None,
+        purpose,
+    }
+}
+
+/// The ask of a probe on its own task, from a throwaway endpoint.
+async fn spawn_ask(
+    params: &RendezvousParams,
+    node: EndpointId,
+    target: EndpointAddr,
+    purpose: ProbePurpose,
+) -> Option<RivalProbe> {
+    use tracing::Instrument as _;
     let lookups = beacon_lookups(params);
     let prober = match build_endpoint(
         &lookups,
         None,
         None,
         Vec::new(),
-        TransportHandles::default(),
+        TransportHandles {
+            options: params.bind_options,
+            ..TransportHandles::default()
+        },
     )
     .await
     {
         Ok(prober) => prober,
         Err(error) => {
             tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), %error, "rival probe endpoint build failed; next tick retries");
-            return None;
+            // A holder whose prober never binds must not probe nothing in silence: the contest
+            // hears `Unknown`, and 3 of them in a row make it claim again.
+            return (purpose == ProbePurpose::OfHolder).then(|| {
+                resolved(
+                    WhoAnswer::Unknown(Cause::ProberNotBound),
+                    ProbePurpose::OfHolder,
+                )
+            });
         }
     };
     tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "rival probe endpoint built");
@@ -208,16 +291,16 @@ pub(crate) async fn spawn_rival_probe(
     );
     let task = task::spawn(
         async move {
-            let found_rival = tokio::select! {
-                found = probe_connect(&prober, target, budget) => found,
+            let answer = tokio::select! {
+                answer = ask_who(&prober, target, node, budget) => answer,
                 // A departure: no one will read the verdict, but the endpoint
                 // must still close below.
-                _ = cancelled => true,
+                _ = cancelled => WhoAnswer::Reached(Cause::Cancelled),
             };
             prober.close().await;
             // A closed receiver means the loop moved on (departure, or the
             // beacon arrived another way); the verdict is simply stale.
-            let _ = tx.send(found_rival);
+            let _ = tx.send(answer);
         }
         .instrument(probe_span),
     );
@@ -226,6 +309,7 @@ pub(crate) async fn spawn_rival_probe(
         task,
         endpoints: vec![endpoint],
         cancel: Some(cancel),
+        purpose,
     })
 }
 
@@ -245,12 +329,13 @@ async fn spawn_ladder_probe(params: &RendezvousParams, node: EndpointId) -> Opti
         .collect();
     let (tx, rx) = oneshot::channel();
     if rungs.is_empty() {
-        let _ = tx.send(false);
+        let _ = tx.send(WhoAnswer::Unknown(Cause::NoBusyRung));
         return Some(RivalProbe {
             rx,
             task: task::spawn(async {}),
             endpoints: Vec::new(),
             cancel: None,
+            purpose: ProbePurpose::BeforeClaim,
         });
     }
     let lookups = beacon_lookups(params);
@@ -304,7 +389,12 @@ async fn spawn_ladder_probe(params: &RendezvousParams, node: EndpointId) -> Opti
                     true
                 }
             };
-            let _ = tx.send(found_rival);
+            let answer = if found_rival {
+                WhoAnswer::Reached(Cause::RungAnsweredAsId)
+            } else {
+                WhoAnswer::Unknown(Cause::NoRungAnswered)
+            };
+            let _ = tx.send(answer);
         }
         .instrument(probe_span),
     );
@@ -313,6 +403,7 @@ async fn spawn_ladder_probe(params: &RendezvousParams, node: EndpointId) -> Opti
         task,
         endpoints,
         cancel: Some(cancel),
+        purpose: ProbePurpose::BeforeClaim,
     })
 }
 

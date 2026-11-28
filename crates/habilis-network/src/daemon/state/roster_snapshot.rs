@@ -27,6 +27,8 @@ pub struct RosterSnapshot {
     pub peers: Vec<RosterEntry>,
     /// How many members there are.
     pub count: usize,
+    /// The member key of this node on this mesh, or `None` where there is no file to keep a key in.
+    pub own_member: Option<AuthorKey>,
     /// The nickname of every live peer, shown or not, one entry per key. A peer that is not shown
     /// has no row, but a send to its nickname still counts it. Not part of the JSON.
     #[serde(skip)]

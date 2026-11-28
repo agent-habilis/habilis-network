@@ -39,7 +39,7 @@ pub enum Transport {
     /// an offer, browsers included.
     #[serde(rename = "webrtc")]
     WebRtc,
-    /// Source-routed multi-hop: reach a peer with no direct path through other
+    /// Hop-by-hop multi-hop: reach a peer with no direct path through other
     /// members. It forwards over a direct path, so the list names `udp` or `webrtc` next to it.
     /// Native only; a browser ignores it, as it ignores `udp`.
     Multihop,

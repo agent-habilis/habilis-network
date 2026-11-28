@@ -102,7 +102,7 @@ mod tests {
         DirectCounts, DirectState, Duration, EndpointId, EventLoopState, KeyOfError, PingRound,
         Reach, RivalFlag,
     };
-    use crate::daemon::state::{BeaconNote, PeerInfoFlood, RendezvousFlag, Standing};
+    use crate::daemon::state::{PeerInfoFlood, RendezvousFlag, Standing};
     use crate::protocol::{
         AppFrameParams, AuthorKey, MeshId, Message, MessageBody, MessageId, Nickname, UnixSecs,
     };
@@ -827,300 +827,193 @@ mod tests {
         }
     }
 
-    /// Two holders of one rendezvous that share an overlay, one dependent on each: the lower
-    /// holder's flag must end the split now, not after the wait for the dependent.
-    #[test]
-    fn a_flag_from_a_lower_holder_makes_us_yield_at_once() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let (low, high) = lower_and_higher();
+    /// A holder of the rendezvous with its next ask of who serves it far out, and the flag that makes
+    /// it a holder that a flag can move.
+    fn holder_with_a_far_ask(far: Instant) -> EventLoopState {
         let mut state = fresh_state();
         state
             .rendezvous_flags
             .insert(RendezvousFlag::HostsRendezvous);
+        state.next_holder_probe = Some(far);
+        state
+    }
+
+    fn held_flag() -> RivalFlag {
+        RivalFlag {
+            proven: true,
+            held: true,
+        }
+    }
+
+    /// A proven flag of a holder with a lower id brings our next ask of who serves the rendezvous
+    /// to now: the answer decides, as for every ask. A flag is a report, and it can be old.
+    #[test]
+    fn a_flag_from_a_lower_holder_brings_our_ask_to_now() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
         let now = Instant::now();
+        let mut state = holder_with_a_far_ask(now + Duration::from_hours(1));
+
+        state.note_rival_beacon_flag(high, AuthorKey::from([9u8; 32]), low, held_flag(), now);
+
+        assert_eq!(state.next_holder_probe, Some(now), "the ask is due now");
+        assert!(state.rival_holder_known(), "the flag is remembered");
+    }
+
+    /// The winner keeps its beacon and its ask: the holder with the higher id reads us in its own
+    /// ask, and a flag does not move ours.
+    #[test]
+    fn a_flag_from_a_higher_holder_leaves_our_ask_where_it_is() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
+        let now = Instant::now();
+        let far = now + Duration::from_hours(1);
+        let mut state = holder_with_a_far_ask(far);
+
+        state.note_rival_beacon_flag(low, AuthorKey::from([9u8; 32]), high, held_flag(), now);
+
+        assert_eq!(state.next_holder_probe, Some(far), "the ask stays");
+        assert!(state.rival_holder_known(), "the flag is remembered");
+    }
+
+    /// A flag read while we hold nothing is remembered, and moves no ask: there is none.
+    #[test]
+    fn a_flag_read_while_we_do_not_hold_is_remembered_and_moves_no_ask() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
 
         state.note_rival_beacon_flag(
             high,
             AuthorKey::from([9u8; 32]),
             low,
-            RivalFlag {
-                proven: true,
-                held: true,
-            },
-            now,
+            held_flag(),
+            Instant::now(),
         );
 
-        assert!(
-            state.beacon_notes.contains(&BeaconNote::YieldToLower),
-            "a lower holder's flag makes us yield at once"
-        );
-        assert_eq!(
-            state.next_rival_recheck,
-            Some(now),
-            "the re-check comes due at the current instant"
-        );
+        assert_eq!(state.next_holder_probe, None, "no ask is armed");
+        assert!(state.rival_holder_known(), "the flag is remembered");
     }
 
-    /// The winner keeps its beacon. Its re-check is pushed one steady round, not dropped: a
-    /// holder that never re-checks never finds a co-host it does not know of.
-    #[test]
-    fn a_flag_from_a_higher_holder_pushes_our_re_check_out() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let (low, high) = lower_and_higher();
-        let mut state = fresh_state();
-        state
-            .rendezvous_flags
-            .insert(RendezvousFlag::HostsRendezvous);
-        state.rival_recheck_rounds = 2;
-        state.rival_recheck_deferrals = 1;
-        let now = Instant::now();
-
-        state.note_rival_beacon_flag(
-            low,
-            AuthorKey::from([9u8; 32]),
-            high,
-            RivalFlag {
-                proven: true,
-                held: true,
-            },
-            now,
-        );
-
-        assert!(
-            !state.beacon_notes.contains(&BeaconNote::YieldToLower),
-            "a higher holder's flag does not make us yield"
-        );
-        let next = state
-            .next_rival_recheck
-            .expect("the re-check is pushed out, not dropped");
-        assert!(next > now, "a steady round out, not due");
-        assert_eq!(state.rival_recheck_rounds, 2, "the rounds stay");
-        assert_eq!(state.rival_recheck_deferrals, 1, "the deferrals stay");
-    }
-
-    /// The longest wait that the first round of a re-check can have: its fast base plus the
-    /// offset of the id.
-    fn brisk_wait() -> Duration {
-        tuning::rival_recheck_first() + tuning::RIVAL_RECHECK_OFFSET_SPAN
-    }
-
-    /// A holder that has found no member has a re-check an hour or two out. A sign that another
-    /// group may exist is all it has to go on: the re-check comes back to the fast base, and the
-    /// rounds start from it again.
-    #[test]
-    fn a_sign_of_a_second_group_brings_the_re_check_to_the_brisk_base() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state
-            .rendezvous_flags
-            .insert(RendezvousFlag::HostsRendezvous);
-        state.rival_recheck_rounds = 7;
-        let now = Instant::now();
-        state.next_rival_recheck = Some(now + Duration::from_hours(1));
-
-        state.note_second_group_sign(endpoint_id(1), now);
-
-        let next = state.next_rival_recheck.expect("a re-check is armed");
-        assert!(
-            next <= now + brisk_wait(),
-            "the re-check is due within the fast base"
-        );
-        assert_eq!(state.rival_recheck_rounds, 0, "the rounds start again");
-    }
-
-    /// A burst of members that arrive must not shed the beacon again and again.
-    #[test]
-    fn a_second_sign_inside_one_steady_interval_changes_nothing() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state
-            .rendezvous_flags
-            .insert(RendezvousFlag::HostsRendezvous);
-        let now = Instant::now();
-        let far = now + Duration::from_hours(1);
-        state.next_rival_recheck = Some(far);
-        state.note_second_group_sign(endpoint_id(1), now);
-        assert!(
-            state.next_rival_recheck.is_some_and(|next| next < far),
-            "the first sign counts"
-        );
-
-        state.next_rival_recheck = Some(far);
-        state.rival_recheck_rounds = 3;
-        state.note_second_group_sign(endpoint_id(1), now + Duration::from_secs(10));
-
-        assert_eq!(
-            state.next_rival_recheck,
-            Some(far),
-            "a second sign inside one steady interval keeps the first re-check time"
-        );
-        assert_eq!(
-            state.rival_recheck_rounds, 3,
-            "the round count does not move on a second sign inside one interval"
-        );
-    }
-
-    #[test]
-    fn a_sign_changes_nothing_while_we_do_not_hold_the_beacon() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        let now = Instant::now();
-        let far = now + Duration::from_hours(1);
-        state.next_rival_recheck = Some(far);
-
-        state.note_second_group_sign(endpoint_id(1), now);
-
-        assert_eq!(
-            state.next_rival_recheck,
-            Some(far),
-            "a sign while we do not hold the beacon leaves the re-check time alone"
-        );
-    }
-
-    /// A loopback room has no re-check, and the creator never has one: a sign arms nothing.
-    #[test]
-    fn a_sign_arms_no_re_check_where_none_applies() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state
-            .rendezvous_flags
-            .insert(RendezvousFlag::HostsRendezvous);
-        state.next_rival_recheck = None;
-
-        state.note_second_group_sign(endpoint_id(1), Instant::now());
-
-        assert_eq!(
-            state.next_rival_recheck, None,
-            "no re-check is armed where none applies"
-        );
-    }
-
-    #[test]
-    fn a_sign_does_not_push_out_a_re_check_that_is_due_sooner() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let mut state = fresh_state();
-        state
-            .rendezvous_flags
-            .insert(RendezvousFlag::HostsRendezvous);
-        state.rival_recheck_rounds = 4;
-        let now = Instant::now();
-        let soon = now + Duration::from_secs(1);
-        state.next_rival_recheck = Some(soon);
-
-        state.note_second_group_sign(endpoint_id(1), now);
-
-        assert_eq!(
-            state.next_rival_recheck,
-            Some(soon),
-            "a sign does not push out a re-check that is due sooner"
-        );
-        assert_eq!(
-            state.rival_recheck_rounds, 4,
-            "the round count does not advance for a re-check that is not due"
-        );
-    }
-
-    /// A flag is remembered only from a proven sender that is not us, and moves our re-check
-    /// only while we hold the beacon.
+    /// A flag that is not proven, that does not say held, or that our own endpoint sent, moves
+    /// nothing; a flag that says not held forgets the holder.
     #[test]
     fn a_flag_that_does_not_count_changes_nothing() {
         let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
-        let signer = AuthorKey::from([9u8; 32]);
         let now = Instant::now();
+        let far = now + Duration::from_hours(1);
+        let mut state = holder_with_a_far_ask(far);
+        let signer = AuthorKey::from([9u8; 32]);
 
-        let mut no_flag = fresh_state();
-        no_flag
-            .rendezvous_flags
-            .insert(RendezvousFlag::HostsRendezvous);
-        no_flag.note_rival_beacon_flag(
-            high,
-            signer,
-            low,
-            RivalFlag {
-                proven: true,
-                held: false,
-            },
-            now,
+        let unproven = RivalFlag {
+            proven: false,
+            held: true,
+        };
+        state.note_rival_beacon_flag(high, signer, low, unproven, now);
+        state.note_rival_beacon_flag(high, signer, high, held_flag(), now);
+        assert_eq!(state.next_holder_probe, Some(far), "nothing moved the ask");
+        assert!(!state.rival_holder_known(), "no holder is known");
+
+        state.note_rival_beacon_flag(high, signer, low, held_flag(), now);
+        assert!(state.rival_holder_known(), "a proven holder is known");
+        let released = RivalFlag {
+            proven: true,
+            held: false,
+        };
+        state.note_rival_beacon_flag(high, signer, low, released, now);
+        assert!(
+            !state.rival_holder_known(),
+            "a flag that says not held forgets it"
         );
-
-        let mut unproven = fresh_state();
-        unproven
-            .rendezvous_flags
-            .insert(RendezvousFlag::HostsRendezvous);
-        unproven.note_rival_beacon_flag(
-            high,
-            signer,
-            low,
-            RivalFlag {
-                proven: false,
-                held: true,
-            },
-            now,
-        );
-
-        let mut ourselves = fresh_state();
-        ourselves
-            .rendezvous_flags
-            .insert(RendezvousFlag::HostsRendezvous);
-        ourselves.note_rival_beacon_flag(
-            high,
-            signer,
-            high,
-            RivalFlag {
-                proven: true,
-                held: true,
-            },
-            now,
-        );
-
-        for state in [&no_flag, &unproven, &ourselves] {
-            assert!(
-                !state.beacon_notes.contains(&BeaconNote::YieldToLower),
-                "a flag that does not count does not make us yield"
-            );
-            assert_eq!(
-                state.next_rival_recheck, None,
-                "a flag that does not count arms no re-check"
-            );
-            assert!(
-                !state.rival_holder_known(),
-                "a flag that does not count is not remembered as a rival holder"
-            );
-        }
     }
 
-    /// A node that does not hold the rendezvous still learns who does: it is what keeps it from
-    /// probing to claim. Its own re-check has nothing to move.
+    /// The expected state of a lower holder on another rung: its flag comes with each `PeerInfo`
+    /// for minutes. The flags and the signs share one limit: the ask moves once per ask period,
+    /// whatever the mix of them.
     #[test]
-    fn a_flag_read_while_we_do_not_hold_is_remembered() {
+    fn flags_and_signs_inside_one_period_move_the_ask_once() {
         let _guard = ::habilis_network_test_tracing::init();
         let (low, high) = lower_and_higher();
-        let mut state = fresh_state();
+        let now = Instant::now();
+        let far = now + Duration::from_hours(1);
+        let mut state = holder_with_a_far_ask(far);
+        let signer = AuthorKey::from([9u8; 32]);
 
-        state.note_rival_beacon_flag(
-            high,
-            AuthorKey::from([9u8; 32]),
-            low,
-            RivalFlag {
-                proven: true,
-                held: true,
-            },
-            Instant::now(),
-        );
-
-        assert!(
-            state.rival_holder_known(),
-            "a flag read while we do not hold the beacon is remembered"
-        );
-        assert!(
-            !state.beacon_notes.contains(&BeaconNote::YieldToLower),
-            "a flag read while we do not hold the beacon does not make us yield"
-        );
+        state.note_rival_beacon_flag(high, signer, low, held_flag(), now);
         assert_eq!(
-            state.next_rival_recheck, None,
-            "a flag read while we do not hold the beacon arms no re-check"
+            state.next_holder_probe,
+            Some(now),
+            "the first flag moves the ask"
         );
+
+        // The ask started and armed the next one, far out.
+        state.next_holder_probe = Some(far);
+        state.note_rival_beacon_flag(high, signer, low, held_flag(), now + Duration::from_secs(2));
+        state.note_second_group_sign(now + Duration::from_secs(3));
+        assert_eq!(
+            state.next_holder_probe,
+            Some(far),
+            "a flag and a sign inside the same period move nothing"
+        );
+    }
+
+    /// A sign of a second group brings our next ask to now, once per ask period.
+    #[test]
+    fn a_sign_of_a_second_group_brings_our_ask_to_now_once_per_period() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let now = Instant::now();
+        let far = now + Duration::from_hours(1);
+        let mut state = holder_with_a_far_ask(far);
+
+        state.note_second_group_sign(now);
+        assert_eq!(state.next_holder_probe, Some(now), "the ask is due now");
+
+        state.next_holder_probe = Some(far);
+        state.note_second_group_sign(now + Duration::from_secs(1));
+        assert_eq!(
+            state.next_holder_probe,
+            Some(far),
+            "a second sign inside one period changes nothing"
+        );
+
+        state.note_second_group_sign(now + tuning::heal_interval());
+        assert_eq!(
+            state.next_holder_probe,
+            Some(now + tuning::heal_interval()),
+            "a sign one period later counts again"
+        );
+    }
+
+    /// A sign changes nothing where there is no ask to move: a node that holds nothing, a node that
+    /// does not host the rendezvous, and an ask that is due sooner than now.
+    #[test]
+    fn a_sign_moves_no_ask_that_is_not_armed_and_never_pushes_one_out() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let now = Instant::now();
+
+        let mut unarmed = fresh_state();
+        unarmed
+            .rendezvous_flags
+            .insert(RendezvousFlag::HostsRendezvous);
+        unarmed.note_second_group_sign(now);
+        assert_eq!(unarmed.next_holder_probe, None, "no ask is armed");
+
+        let mut not_hosting = fresh_state();
+        not_hosting.next_holder_probe = Some(now + Duration::from_hours(1));
+        not_hosting.note_second_group_sign(now);
+        assert_eq!(
+            not_hosting.next_holder_probe,
+            Some(now + Duration::from_hours(1)),
+            "a node that does not host the rendezvous keeps its ask"
+        );
+
+        let due = now
+            .checked_sub(Duration::from_secs(5))
+            .expect("a clock that has run for 5 s");
+        let mut overdue = holder_with_a_far_ask(due);
+        overdue.note_second_group_sign(now);
+        assert_eq!(overdue.next_holder_probe, Some(due), "a due ask stays due");
     }
 
     /// A member that let go of the rendezvous and reads a holder that no member of its mesh hosts
@@ -1264,79 +1157,6 @@ mod tests {
         assert!(
             !state.rival_holder_known(),
             "a forgotten member takes its rival flag with it"
-        );
-    }
-
-    /// A holder that sends its flag again and again must not keep our re-check away: the push
-    /// happens once per holder, and exists only to hold our release until the higher one yields.
-    #[test]
-    fn a_holder_that_repeats_its_flag_pushes_our_re_check_out_once() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let (low, high) = lower_and_higher();
-        let mut state = fresh_state();
-        state
-            .rendezvous_flags
-            .insert(RendezvousFlag::HostsRendezvous);
-        let first = Instant::now();
-
-        state.note_rival_beacon_flag(
-            low,
-            AuthorKey::from([9u8; 32]),
-            high,
-            RivalFlag {
-                proven: true,
-                held: true,
-            },
-            first,
-        );
-        let pushed = state.next_rival_recheck;
-        assert!(pushed.is_some_and(|due| due > first), "pushed out once");
-
-        state.note_rival_beacon_flag(
-            low,
-            AuthorKey::from([9u8; 32]),
-            high,
-            RivalFlag {
-                proven: true,
-                held: true,
-            },
-            first + Duration::from_secs(5),
-        );
-
-        assert_eq!(
-            state.next_rival_recheck, pushed,
-            "the repeat changes nothing"
-        );
-    }
-
-    /// The push is to at least a steady round out. A re-check that is already later stays.
-    #[test]
-    fn a_push_never_brings_a_later_re_check_closer() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let (low, high) = lower_and_higher();
-        let mut state = fresh_state();
-        state
-            .rendezvous_flags
-            .insert(RendezvousFlag::HostsRendezvous);
-        let now = Instant::now();
-        let far = now + Duration::from_secs(100_000);
-        state.next_rival_recheck = Some(far);
-
-        state.note_rival_beacon_flag(
-            low,
-            AuthorKey::from([9u8; 32]),
-            high,
-            RivalFlag {
-                proven: true,
-                held: true,
-            },
-            now,
-        );
-
-        assert_eq!(
-            state.next_rival_recheck,
-            Some(far),
-            "a later push never brings the re-check closer"
         );
     }
 
@@ -4631,6 +4451,134 @@ mod tests {
             state.below_target_since,
             Some(restarted),
             "a node that stays below G keeps its first timestamp"
+        );
+    }
+
+    /// A receiver that holds the `joined` proof of a session that `member` signed for the nickname `proved`, and
+    /// has that session in its roster under the nickname `shown`. `claimant_enters` false keeps the proof pending.
+    fn receiver_with_a_proved_peer(
+        member: &protocol::identity::Identity,
+        proved: &str,
+        shown: &str,
+        claimant_enters: bool,
+    ) -> (EventLoopState, AuthorKey) {
+        let mut receiver = fresh_state();
+        let mesh = MeshId::from("💬test");
+        let session = protocol::identity::Identity::generate();
+        let key = session.author_key();
+        let proof = member.prove(&key, proved, mesh.as_ref(), 1);
+        let joined = Message::new_joined_with_proof(&mesh, &nick(proved), &proof).sign(&session);
+        receiver.note_joined_proof(&joined, &mesh, &nick("reader"), claimant_enters);
+        receiver.peers.insert(key);
+        receiver.names.insert(key, nick(shown));
+        receiver.surfaced.insert(key);
+        (receiver, key)
+    }
+
+    /// The roster shows the member key that a held proof of the session names, for the nickname that
+    /// the proof names.
+    #[test]
+    fn the_roster_shows_the_member_key_that_a_held_proof_names() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let member = protocol::identity::Identity::generate();
+        let (receiver, _) = receiver_with_a_proved_peer(&member, "alice", "alice", true);
+
+        let snapshot = receiver.roster_snapshot();
+
+        let row = snapshot.peers.first().expect("the peer is in the roster");
+        assert_eq!(
+            row.member,
+            Some(member.author_key()),
+            "the member key of a verified proof"
+        );
+    }
+
+    /// A pending proof (valid, and its sender is not live) is never shown for a row, a peer with no proof
+    /// shows null, and a session that proved one nickname and speaks as another shows null for it.
+    #[test]
+    fn the_roster_shows_no_member_key_for_a_pending_proof_no_proof_or_another_nickname() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let member = protocol::identity::Identity::generate();
+
+        let (pending, _) = receiver_with_a_proved_peer(&member, "alice", "alice", false);
+        let (renamed, _) = receiver_with_a_proved_peer(&member, "alice", "mallory", true);
+        let mut bare = fresh_state();
+        bare.peer_for_test("swift-cedar");
+        bare.surfaced_for_test("swift-cedar");
+
+        assert_eq!(
+            pending
+                .roster_snapshot()
+                .peers
+                .first()
+                .map(|row| row.member),
+            Some(None),
+            "a pending proof is not shown for a live row"
+        );
+        assert_eq!(
+            renamed
+                .roster_snapshot()
+                .peers
+                .first()
+                .map(|row| row.member),
+            Some(None),
+            "a session that proved alice shows null as mallory"
+        );
+        assert_eq!(
+            bare.roster_snapshot().peers.first().map(|row| row.member),
+            Some(None),
+            "a peer with no proof shows null"
+        );
+    }
+
+    /// A quiet peer keeps the member key of its held proof, and the snapshot names our own member key.
+    #[test]
+    fn a_quiet_row_keeps_its_member_key_and_the_snapshot_names_our_own() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let member = protocol::identity::Identity::generate();
+        let (mut receiver, key) = receiver_with_a_proved_peer(&member, "alice", "alice", true);
+        receiver.peers.remove(&key);
+        receiver.quiet.insert(key);
+
+        let snapshot = receiver.roster_snapshot();
+
+        let row = snapshot
+            .peers
+            .first()
+            .expect("the quiet peer is in the roster");
+        assert!(row.quiet, "the premise: the row is quiet");
+        assert_eq!(
+            row.member,
+            Some(member.author_key()),
+            "a quiet row keeps it"
+        );
+        assert_eq!(
+            snapshot.own_member,
+            receiver
+                .member_identity
+                .as_ref()
+                .map(|own| own.author_key()),
+            "the snapshot names our own member key"
+        );
+        assert!(
+            snapshot.own_member.is_some(),
+            "a test state has a member key"
+        );
+    }
+
+    /// The JSON of a row has the key `member`: the 64 hex digits, or null.
+    #[test]
+    fn the_json_of_a_roster_row_has_a_member_field() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let member = protocol::identity::Identity::generate();
+        let (receiver, _) = receiver_with_a_proved_peer(&member, "alice", "alice", true);
+
+        let json = serde_json::to_value(receiver.roster_snapshot()).expect("a snapshot serializes");
+
+        assert_eq!(
+            json["peers"][0]["member"],
+            serde_json::Value::String(member.author_key().to_string()),
+            "the member key as hex"
         );
     }
 }

@@ -1,3 +1,4 @@
+use super::GatePolicy;
 use crate::transport::webrtc;
 // Only the `host` loopback bind names a socket address; a browser has no IP
 // stack to bind one on.
@@ -34,14 +35,16 @@ pub(crate) fn build_mesh(
         transport::SignalAdmission,
         transport::IceProfile,
     )>,
+    // The question that the gossip gate asks of an inbound connection: a peer passes the table of
+    // its node, and the rendezvous of the beacon the old question of the connection alone.
+    gate: transport::PathGate,
     protocols: habilis_network_iroh_transport_util::ProtocolSet,
-    // The mesh's `transport.relay_transport`: with it off, every inbound gossip
-    // connection is held until iroh selects a direct path on it.
-    relay_transport: bool,
-    // This node has no UDP path, so its gossip gate needs a `WebRTC` session
-    // with the dialer (see `DirectOnlyGossip::accept`).
-    needs_session: bool,
+    policy: GatePolicy,
 ) -> (Gossip, Router, MemoryLookup) {
+    let GatePolicy {
+        relay_transport,
+        needs_session,
+    } = policy;
     // `active_view_capacity` is the live direct-neighbor cap (`--max-connections`),
     // raised above iroh-gossip's default (5) so meshes up to it form a full mesh
     // with nothing to shuffle — no membership churn, hence none of the
@@ -73,15 +76,15 @@ pub(crate) fn build_mesh(
     )> = gated.map(|(handle, admission, _)| (handle.clone(), admission.clone(), local));
     // Every router serves the nudge, the beacon's too: a session that attaches to the rendezvous
     // is followed by a nudge, and it does its work only when the connect completes.
+    let gossip_acceptor = transport::DirectOnlyGossip::new(
+        gossip.clone(),
+        PayloadPath::from(relay_transport),
+        session_gate,
+        gate,
+    )
+    .local(local);
     let mut builder = Router::builder(endpoint)
-        .accept(
-            GOSSIP_ALPN,
-            transport::DirectOnlyGossip::new(
-                gossip.clone(),
-                PayloadPath::from(relay_transport),
-                session_gate,
-            ),
-        )
+        .accept(GOSSIP_ALPN, gossip_acceptor)
         .accept(webrtc::NUDGE_ALPN, webrtc::NudgeAcceptor);
     // A peer also accepts inbound unicast; the rendezvous/beacon endpoint
     // passes `None` (it is not a peer and carries no unicast traffic).

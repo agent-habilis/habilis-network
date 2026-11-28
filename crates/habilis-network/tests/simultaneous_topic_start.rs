@@ -108,13 +108,7 @@ fn round_log_path(topic: &str) -> path::PathBuf {
 fn init_process() -> habilis_network_test_tracing::Guard {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let tuning = Tuning::DEFAULTS
-            .heal_interval(Duration::from_secs(5))
-            .rival_recheck_first(Duration::from_secs(3))
-            .rival_recheck(Duration::from_secs(8));
-        let tuning = tuning
-            .rival_recheck_meshed(Duration::from_secs(12))
-            .rival_recheck_alone(Duration::from_secs(12));
+        let tuning = Tuning::DEFAULTS.heal_interval(Duration::from_secs(5));
         init(tuning);
     });
     habilis_network_test_tracing::init_with_writer(

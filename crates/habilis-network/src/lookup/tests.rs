@@ -1,9 +1,9 @@
-use super::{TransportOpts, build_peer_endpoint};
+use super::{GatePolicy, TransportOpts, build_peer_endpoint};
 #[cfg(feature = "host")]
 use crate::protocol::meshes::RelayChoice;
 use crate::protocol::meshes::{LookupOpts, TransportPolicy};
 #[cfg(feature = "host")]
-use crate::transport::PayloadPath;
+use crate::transport::{PathGate, PayloadPath};
 #[cfg(feature = "host")]
 use std::collections::HashSet;
 
@@ -557,27 +557,6 @@ fn loopback_all_off_binds() {
     });
 }
 
-// A handles value with only gossip is a member endpoint: it must not read as a beacon.
-#[test]
-fn a_handles_value_with_only_gossip_is_not_empty() {
-    let _guard = ::habilis_network_test_tracing::init();
-    let handle = habilis_network_iroh_gossip_transport::GossipHandle::new(
-        iroh::SecretKey::from_bytes(&[51; 32]).public(),
-    );
-    assert!(
-        super::TransportHandles::default().is_empty(),
-        "a default handles value is empty"
-    );
-    let only_gossip = super::TransportHandles {
-        gossip: Some(handle),
-        ..super::TransportHandles::default()
-    };
-    assert!(
-        !only_gossip.is_empty(),
-        "a handles value with only gossip is not empty"
-    );
-}
-
 // Gossip is a choice of the mesh: the opts follow the policy, and it needs a direct path.
 #[test]
 fn the_mesh_policy_decides_gossip_for_the_opts() {
@@ -878,6 +857,136 @@ fn an_injected_multihop_handle_must_obey_the_mesh_relay_rule() {
 /// `Router::spawn`). A dial on `GOSSIP_ALPN` then fails on the ALPN, which a listener sends
 /// before any certificate: it proves nothing about the identity, so the probe must not
 /// answer `Foreign`, which makes a walk bind a second rung.
+/// **The endpoint of a loopback mesh listens on loopback sockets only, the `IPv6` ones included.** A
+/// bind address replaces the default of its own family and no other, so the default `[::]`, which
+/// listens on every interface, stayed beside the loopback `127.0.0.1` that the branch bound: the mesh
+/// that promises "zero external network calls" could be reached from the network over `IPv6`.
+#[test]
+#[cfg(feature = "host")]
+fn the_endpoint_of_a_loopback_mesh_listens_on_loopback_sockets_only() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        use super::{TransportHandles, build_endpoint};
+
+        let endpoint = build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            Vec::new(),
+            TransportHandles::default(),
+        )
+        .await
+        .expect("an endpoint");
+        let sockets = endpoint.bound_sockets();
+        endpoint.close().await;
+
+        assert!(
+            sockets.iter().all(|socket| socket.ip().is_loopback()),
+            "the endpoint of a loopback mesh listens beyond it: {sockets:?}"
+        );
+    });
+}
+
+/// **The application endpoint of a node that asks for a loopback bind listens on this host only,
+/// whatever its mesh looks up.** The members of a test that runs on one machine used to listen on
+/// every interface of it, because their mesh names a relay, and a host on the network could send a
+/// handshake to a test member. The other sockets of the node have a test each: the underlay, the
+/// rendezvous endpoint, and the session of a `WebRTC` link.
+#[test]
+#[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+fn the_application_endpoint_of_a_node_that_asks_for_a_loopback_bind_listens_on_this_host_only() {
+    ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+        use super::{TransportHandles, build_endpoint, test_relay};
+        use crate::lookup::{Bind, TransportOpts};
+
+        let (relay_url, _relay) = test_relay::spawn_plain().await.expect("a local relay");
+        let lookups = LookupOpts::new(RelayChoice::Custom(vec![relay_url]));
+        let handles = TransportHandles {
+            options: TransportOpts::default().bind(Bind::Loopback),
+            ..TransportHandles::default()
+        };
+        let endpoint = build_endpoint(&lookups, None, None, Vec::new(), handles)
+            .await
+            .expect("an endpoint");
+        let sockets = endpoint.bound_sockets();
+        endpoint.close().await;
+
+        assert!(
+            sockets.iter().all(|socket| socket.ip().is_loopback()),
+            "the endpoint of a mesh with a relay on this host listens beyond it: {sockets:?}"
+        );
+    });
+}
+
+/// **The endpoints that a node builds beside its own take its bind and no other option.** The
+/// rendezvous endpoint and the prober of a beacon have no transport choice of their own, so a node
+/// with `udp` off must not hand that choice to them.
+#[test]
+#[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+fn a_side_endpoint_takes_the_bind_of_the_node_and_no_other_option() {
+    use crate::lookup::Bind;
+
+    let node = TransportOpts {
+        udp: false,
+        ..TransportOpts::default()
+    }
+    .bind(Bind::Loopback);
+
+    let side = super::bind_only(node);
+
+    assert_eq!(side.bind, Bind::Loopback, "the bind of the node");
+    assert!(
+        side.udp,
+        "the udp choice of the node stays with its member endpoint"
+    );
+}
+
+/// **A node stays on this host when its mesh is loopback or when it binds loopback.** One answer
+/// for 2 things: the `WebRTC` sessions of the node gather host candidates only, and bind their
+/// sockets on loopback.
+#[test]
+#[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+fn a_node_stays_on_this_host_when_its_mesh_or_its_bind_says_so() {
+    use crate::lookup::Bind;
+
+    let all_interfaces = TransportOpts::default();
+    let loopback = TransportOpts::default().bind(Bind::Loopback);
+    assert!(
+        super::stays_on_this_host(true, all_interfaces),
+        "a loopback mesh"
+    );
+    assert!(
+        super::stays_on_this_host(false, loopback),
+        "a loopback bind"
+    );
+    assert!(super::stays_on_this_host(true, loopback), "both");
+    assert!(!super::stays_on_this_host(false, all_interfaces), "neither");
+}
+
+/// **The underlay of a node that binds loopback binds loopback too.** A node has 2 endpoints, the
+/// application endpoint and its underlay, and the second one took no bind: it listened on every
+/// interface of the host, and so did the sockets that a subnet bind added to it.
+#[test]
+#[cfg(all(feature = "multihop", feature = "iroh-test-utils"))]
+fn the_underlay_of_a_node_that_binds_loopback_binds_loopback_too() {
+    use super::peer;
+    use crate::lookup::Bind;
+
+    let node = TransportOpts::default().bind(Bind::Loopback);
+    assert_eq!(
+        peer::underlay_options(node).bind,
+        Bind::Loopback,
+        "the underlay of a loopback node listens beyond the host"
+    );
+    let without_udp = TransportOpts {
+        udp: false,
+        ..TransportOpts::default()
+    };
+    assert!(
+        !peer::underlay_options(without_udp).udp,
+        "the underlay keeps the udp of the node"
+    );
+}
+
 #[test]
 fn a_holder_of_our_identity_that_serves_no_alpn_yet_is_not_a_foreign_mesh() {
     ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
@@ -1031,9 +1140,12 @@ fn a_router_that_carries_no_unicast_completes_a_nudge() {
             5,
             None,
             None,
+            PathGate::SelectedOnly,
             habilis_network_iroh_transport_util::ProtocolSet::default(),
-            true,
-            false,
+            GatePolicy {
+                relay_transport: true,
+                needs_session: false,
+            },
         );
         let dialer = build_endpoint(
             &LookupOpts::loopback(),

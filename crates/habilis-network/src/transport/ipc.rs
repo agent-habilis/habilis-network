@@ -7,7 +7,7 @@ pub use ipc_error::IpcError;
 mod json_reply;
 pub use json_reply::{json_ack, json_error, json_ok_msg};
 mod listener;
-pub(crate) use listener::{bind, serve};
+pub(crate) use listener::{bind, serve, socket_path};
 mod no_daemon;
 pub use no_daemon::NoDaemon;
 

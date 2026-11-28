@@ -628,6 +628,7 @@ mod tests {
             let config = IceConfig {
                 stun_servers: vec![silent_addr.to_string(), live_addr.to_string()],
                 stun_timeout: Duration::from_secs(2),
+                ..IceConfig::host_only()
             };
             let start = Instant::now();
             let reflexive = gather_reflexive(&client, &config).await;
@@ -659,6 +660,7 @@ mod tests {
             let config = IceConfig {
                 stun_servers: vec!["hung.invalid:3478".to_owned(), live_addr.to_string()],
                 stun_timeout: Duration::from_secs(2),
+                ..IceConfig::host_only()
             };
             let start = Instant::now();
             let reflexive =
@@ -696,6 +698,7 @@ mod tests {
             let config = IceConfig {
                 stun_servers: vec![live_addr.to_string()],
                 stun_timeout: Duration::from_secs(2),
+                ..IceConfig::host_only()
             };
             let reflexive =
                 super::gather_with_resolver(&client, &config, |name: String| async move {
@@ -778,6 +781,7 @@ mod tests {
             let config = IceConfig {
                 stun_servers: vec!["203.0.113.9:3478".to_owned()],
                 stun_timeout: Duration::from_secs(2),
+                ..IceConfig::host_only()
             };
             let reflexive =
                 super::gather_with_resolver(&socket, &config, |name: String| async move {
@@ -824,6 +828,7 @@ mod tests {
             let config = IceConfig {
                 stun_servers: vec![address.to_string()],
                 stun_timeout: Duration::from_millis(500),
+                ..IceConfig::host_only()
             };
             let reflexive = gather_reflexive(&client, &config).await;
             server.abort();
@@ -844,6 +849,7 @@ mod tests {
             let config = IceConfig {
                 stun_servers: vec![silent_addr.to_string()],
                 stun_timeout: Duration::from_millis(300),
+                ..IceConfig::host_only()
             };
             let reflexive = gather_reflexive(&client, &config).await;
             drop(silent);

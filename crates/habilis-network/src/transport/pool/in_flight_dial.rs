@@ -5,12 +5,13 @@ use std::collections::HashMap;
 use iroh::EndpointId;
 use tokio::sync::watch;
 
-use super::unicast_pool::{DialOutcome, UnicastPool};
+use super::unicast_pool::{DialEnd, DialOutcome, UnicastPool};
 
 /// An endpoint's entry in the in-flight dial map, removed on drop: a dial that panics or is dropped
 /// with its runtime must not leave the peer marked in flight, which would make every later cold send
-/// to it wait for a dial that is gone. A dial that ends without an outcome publishes one, so that
-/// its waiters wake with an error.
+/// to it wait for a dial that is gone. A dial that ends without an outcome publishes
+/// [`DialEnd::DialerLeft`], so that its waiters wake and take its place: a dropped dialer did not
+/// fail to dial, and no caller fails for it.
 #[derive(Debug, Clone)]
 #[must_use]
 pub(crate) struct InFlightDial {
@@ -29,7 +30,11 @@ impl InFlightDial {
         let mut dialing = self.pool.inner.dialing.lock();
         self.release_plan_once();
         self.leave(&mut dialing);
-        self.outcome_tx.send_replace(Some(outcome));
+        let end = match outcome {
+            Ok(()) => DialEnd::Ready,
+            Err(error) => DialEnd::Failed(error),
+        };
+        self.outcome_tx.send_replace(Some(end));
     }
 
     /// The dial planned a unit or a pin, and a dial that ends with no connection gives it back. A
@@ -66,7 +71,7 @@ impl Drop for InFlightDial {
             if outcome.is_some() {
                 return false;
             }
-            *outcome = Some(Err("the dial was cancelled".to_owned()));
+            *outcome = Some(DialEnd::DialerLeft);
             true
         });
     }

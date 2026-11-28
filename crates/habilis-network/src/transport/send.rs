@@ -11,17 +11,16 @@ mod deliver;
 mod route;
 #[cfg(any(test, all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
 pub(crate) use deliver::resolve;
-pub(crate) use deliver::{
-    can_unicast, lane_for, note_held, note_unproven, send_best_effort, send_dialing_back,
-};
+pub(crate) use deliver::{ask_lane, can_unicast, lane_for, send_best_effort, send_dialing_back};
 pub use deliver::{deliver, deliver_in_background, deliver_to, deliver_to_in_background};
-pub(crate) use route::directed_endpoint;
 #[cfg(test)]
 use route::{Route, route};
 mod lane;
 pub use lane::Lane;
 mod pending_send;
 pub use pending_send::PendingSend;
+mod send_verdict;
+pub use send_verdict::SendVerdict;
 mod send_error;
 pub use send_error::SendError;
 #[cfg(test)]
@@ -35,10 +34,7 @@ mod tests {
 
     use iroh::EndpointId;
 
-    use super::{
-        Lane, Route, SendError, can_unicast, deliver, lane_for, note_held, note_unproven, resolve,
-        route,
-    };
+    use super::{Lane, Route, SendError, ask_lane, can_unicast, deliver, lane_for, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::messages::{AppFrameParams, Verified};
     use crate::protocol::{
@@ -49,7 +45,7 @@ mod tests {
     use crate::daemon::state::DirectState;
     use crate::lookup::test_relay;
     use crate::protocol::messages::WireFrame;
-    use crate::transport::{PayloadPath, payload_path};
+    use crate::transport::{PayloadPath, SendVerdict, payload_path, unicast_acceptor};
     use crate::util::clock;
     use crate::{lookup, transport};
     use iroh::endpoint::{Connection, presets};
@@ -57,7 +53,7 @@ mod tests {
     use iroh_gossip::net::Gossip;
     use iroh_gossip::proto;
     use iroh_relay::server::Server;
-    use std::net::{UdpSocket, UdpSocket as std_UdpSocket};
+    use std::net::{SocketAddr, UdpSocket, UdpSocket as std_UdpSocket};
     use std::time::{Duration as std_Duration, Instant as std_Instant};
     use tokio::sync::mpsc;
     use tokio::{task, time as tokio_time};
@@ -109,9 +105,8 @@ mod tests {
 
     // ── lane peers ────────────────────────────────────────────────────
 
-    /// A lane peer: no IP address, only a relay. On a mesh whose relay is lookup only, a frame to
-    /// it is held once a probe reads its path as the relay, and holding it is what asks for its
-    /// session. Before that reading it is unproven, and the send asks for the session itself.
+    /// A lane peer: no IP address, only a relay. On a mesh whose relay is lookup only, the pair is
+    /// unproven until a direct path is shown, and a send to it asks for the session itself.
     fn state_knowing_a_lane_bob() -> (EventLoopState, EndpointId) {
         let mut state = fresh_state();
         state.standing.insert(Standing::Meshed);
@@ -127,31 +122,40 @@ mod tests {
         (state, bob)
     }
 
-    /// A cold send to a lane peer with no session holds the frame and marks the session wanted.
+    /// A send to a lane peer with no session is not refused, and it marks the session wanted.
     #[test]
-    fn a_frame_held_for_a_lane_peer_marks_its_session_wanted() {
+    fn a_send_to_a_lane_peer_read_as_relay_marks_its_session_wanted() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_a_lane_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
         let now = clock::Instant::now();
-        assert!(!state.lane_session_wanted(bob, now), "nothing is held yet");
+        assert!(
+            !state.lane_session_wanted(bob, now),
+            "nothing asked for a session yet"
+        );
 
-        let error = resolve(
-            &directed_msg(),
-            directed_msg().serialize().expect("serialize"),
-            &state,
-        )
-        .expect_err("a lookup-only relay holds the frame");
-        note_held(&mut state, &error);
+        assert!(
+            resolve(
+                &directed_msg(),
+                directed_msg().serialize().expect("serialize"),
+                &state,
+            )
+            .is_ok(),
+            "the stored state refused the send"
+        );
+        ask_lane(&mut state, bob);
 
-        assert!(state.lane_session_wanted(bob, now), "the held frame asks");
+        assert!(
+            state.lane_session_wanted(bob, now),
+            "the send asks for the session"
+        );
     }
 
     /// Two live keys use one nickname, and the second is a lane peer whose endpoint the roster
-    /// keeps by key. A frame held for the second key asks for the session of the second key: the
+    /// keeps by key. A send to the second key asks for the session of the second key: the
     /// member list of the transport plane has one row for each key, not one for each nickname.
     #[test]
-    fn a_frame_held_for_the_second_key_of_a_nickname_marks_its_session_wanted() {
+    fn a_send_to_the_second_key_of_a_nickname_marks_its_session_wanted() {
         let _guard = ::habilis_network_test_tracing::init();
         let mut state = fresh_state();
         state.standing.insert(Standing::Meshed);
@@ -170,24 +174,27 @@ mod tests {
         state.retain_refused_endpoint(second, lane(second_endpoint));
         state.direct.insert(second_endpoint, DirectState::RelayOnly);
 
-        let error = resolve(
-            &directed_msg_to(second),
-            directed_msg_to(second).serialize().expect("serialize"),
-            &state,
-        )
-        .expect_err("a lookup-only relay holds the frame");
-        note_held(&mut state, &error);
+        assert!(
+            resolve(
+                &directed_msg_to(second),
+                directed_msg_to(second).serialize().expect("serialize"),
+                &state,
+            )
+            .is_ok(),
+            "the stored state refused the send"
+        );
+        ask_lane(&mut state, second_endpoint);
 
         assert!(
             state.lane_session_wanted(second_endpoint, clock::Instant::now()),
-            "the held frame of the second key did not ask for its session"
+            "the send to the second key did not ask for its session"
         );
     }
 
-    /// A peer with an IP path is held too on a lookup-only relay once a probe reads its path as
-    /// the relay, but its direct path comes from the probe, so no session is wanted for it.
+    /// A peer with an IP path that no probe has proven direct is asked for too on a lookup-only
+    /// relay, but its direct path comes from the probe, so no session is wanted for it.
     #[test]
-    fn a_frame_held_for_a_peer_with_an_ip_path_does_not_want_a_session() {
+    fn a_send_to_a_peer_with_an_ip_path_does_not_want_a_session() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
@@ -199,25 +206,28 @@ mod tests {
         );
         state.local_udp_transport = UdpTransport::Present;
 
-        let error = resolve(
-            &directed_msg(),
-            directed_msg().serialize().expect("serialize"),
-            &state,
-        )
-        .expect_err("a lookup-only relay holds the frame");
-        note_held(&mut state, &error);
+        assert!(
+            resolve(
+                &directed_msg(),
+                directed_msg().serialize().expect("serialize"),
+                &state,
+            )
+            .is_ok(),
+            "the stored state refused the send"
+        );
+        ask_lane(&mut state, bob);
 
         assert!(
             !state.lane_session_wanted(bob, clock::Instant::now()),
-            "a held frame for a peer on an ip path wants no session"
+            "a send to a peer on an ip path wants no session"
         );
     }
 
-    /// A pair that had a direct path and lost it reads as the relay. Its parked frame asks for a
+    /// A pair that had a direct path and lost it reads as the relay. A send to it asks for a
     /// session even though the pair has an IP address: a failed offer leaves the pair on the
-    /// relay with nobody to offer again, and the next parked frame renews the want.
+    /// relay with nobody to offer again, and the next send renews the want.
     #[test]
-    fn a_frame_held_for_a_pair_that_reads_as_relay_wants_a_session() {
+    fn a_send_to_a_pair_that_reads_as_relay_wants_a_session() {
         use crate::daemon::state::DirectState;
         use crate::transport::probe::PathKind;
 
@@ -233,17 +243,20 @@ mod tests {
         state.direct.insert(bob, DirectState::RelayOnly);
         state.path_kinds.insert(bob, PathKind::Relay);
 
-        let error = resolve(
-            &directed_msg(),
-            directed_msg().serialize().expect("serialize"),
-            &state,
-        )
-        .expect_err("a lookup-only relay holds the frame");
-        note_held(&mut state, &error);
+        assert!(
+            resolve(
+                &directed_msg(),
+                directed_msg().serialize().expect("serialize"),
+                &state,
+            )
+            .is_ok(),
+            "the stored state refused the send"
+        );
+        ask_lane(&mut state, bob);
 
         assert!(
             state.lane_session_wanted(bob, clock::Instant::now()),
-            "a held frame for a relay pair wants a session"
+            "a send to a relay pair wants a session"
         );
     }
 
@@ -533,8 +546,10 @@ mod tests {
                     .expect("an incoming connection")
                     .await
                     .expect("accept the connection");
-                let mut stream = connection.accept_uni().await.expect("a uni stream");
-                let bytes = stream.read_to_end(64 * 1024).await.expect("read the frame");
+                let (acknowledgement, stream) = connection.accept_bi().await.expect("a stream");
+                let bytes = unicast_acceptor::receive_for_test(acknowledgement, stream)
+                    .await
+                    .expect("read the frame");
                 (bytes, bob_endpoint, connection)
             });
             let connection = state
@@ -579,8 +594,10 @@ mod tests {
 
     impl ProtocolHandler for Collect {
         async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-            while let Ok(mut stream) = connection.accept_uni().await {
-                if let Ok(bytes) = stream.read_to_end(64 * 1024).await {
+            while let Ok((acknowledgement, stream)) = connection.accept_bi().await {
+                if let Some(bytes) =
+                    unicast_acceptor::receive_for_test(acknowledgement, stream).await
+                {
                     let _ = self.0.send(bytes);
                 }
             }
@@ -620,13 +637,81 @@ mod tests {
         (pool, client, server.id(), received, router, relay)
     }
 
+    /// **A stored `RelayOnly` does not refuse a send that the live connection can carry.**
+    ///
+    /// The state of a pair lags the connection, and the connection has the last word on the path
+    /// of a payload (`payload_path`). Here the pair is stored as relay-only while the connection to
+    /// the peer is direct on loopback, as in the moment after a pair climbs off the relay and
+    /// before its watcher reports. The send must go out and be delivered. No sleep and no race
+    /// stands in the test: the stored value is set by hand and the connection is live.
+    #[test]
+    fn a_directed_send_to_a_stored_relay_only_pair_on_a_direct_connection_is_delivered() {
+        ::habilis_network_test_tracing::run_multi_thread(
+            ::habilis_network_test_tracing::init(),
+            2,
+            async {
+                let (frames, mut received) = mpsc::unbounded_channel();
+                let server = iroh::Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind the server on loopback");
+                let router = Router::builder(server.clone())
+                    .accept(transport::UNICAST_ALPN, Collect(frames))
+                    .spawn();
+                let port: u16 = server
+                    .bound_sockets()
+                    .first()
+                    .map(SocketAddr::port)
+                    .expect("the server has a bound socket");
+                let server_addr = iroh::EndpointAddr::from_parts(
+                    server.id(),
+                    [iroh::TransportAddr::Ip(SocketAddr::from((
+                        [127, 0, 0, 1],
+                        port,
+                    )))],
+                );
+                let (client, sender) = loopback_node().await;
+                let mut state = state_with_pool(&client, server_addr);
+                state.relay_transport = PayloadPath::DirectOnly;
+                state.direct.insert(server.id(), DirectState::RelayOnly);
+
+                let message = directed_msg();
+                let bytes = message.serialize().expect("serialize");
+                let delivered = deliver(&message, bytes, &state, &sender)
+                    .await
+                    .expect("the stored state refused a send that the live connection carries");
+                let Delivered::Pending(handle) = delivered else {
+                    panic!("a send to a cold peer runs on a task of its own");
+                };
+                let verdict = tokio_time::timeout(std_Duration::from_secs(10), handle)
+                    .await
+                    .expect("the send ends in time")
+                    .expect("the task reports");
+                assert!(
+                    matches!(verdict, SendVerdict::Delivered),
+                    "the verdict is delivered: {verdict}"
+                );
+                assert!(
+                    tokio_time::timeout(std_Duration::from_secs(5), received.recv())
+                        .await
+                        .is_ok_and(|frame| frame.is_some()),
+                    "the server read the frame"
+                );
+
+                router.shutdown().await.expect("shutdown");
+                client.close().await;
+            },
+        );
+    }
+
     /// **A send on a warm connection that reads relay waits one path budget, then fails.**
     ///
     /// A connection that is young reads relay until its direct path is selected, so the check of
     /// a warm send cannot tell a path that is forming from a path that never comes. The send
-    /// waits for the path on a task of its own, like the send to a cold peer. A second send
-    /// shares that wait. Here no direct path can come, so both sends end with the relay refusal
-    /// within one budget, and the server reads no frame.
+    /// waits for the path on a task of its own, like the send to a cold peer. Each send waits
+    /// for the path on its own, so that each gets its own verdict. Here no direct path can come, so
+    /// both sends end with the relay refusal within one budget, and the server reads no frame.
     #[test]
     fn a_send_on_a_relay_selected_warm_connection_waits_one_budget_then_fails() {
         ::habilis_network_test_tracing::run_multi_thread(
@@ -655,21 +740,23 @@ mod tests {
                     };
                     handles.push(handle);
                 }
-                assert!(pool.is_dialing(server_id), "the wait is registered");
                 // The budget to select a path (5 s) and one second more, for both sends together.
                 tokio_time::timeout(std_Duration::from_secs(6), async {
                     for handle in handles {
                         let ended = handle.await.expect("the task reports");
-                        let error = ended.expect_err("no direct path comes");
                         assert!(
-                            format!("{error:#}").contains(transport::RELAY_REFUSED),
-                            "the refusal names the relay: {error:#}"
+                            matches!(&ended, SendVerdict::NotDelivered(reason) if reason.contains(transport::RELAY_REFUSED)),
+                            "the refusal names the relay, and it is certain: {ended}"
                         );
                     }
                 })
                 .await
                 .expect("both sends end within one path budget");
-                assert_eq!(pool.dial_attempts(), 1, "the two sends share one wait");
+                assert_eq!(
+                    pool.dials_to(server_id),
+                    1,
+                    "the sends dial nothing: the connection is the one of the probe"
+                );
                 assert!(received.try_recv().is_err(), "no frame went over the relay");
 
                 router.shutdown().await.expect("shutdown");
@@ -740,10 +827,9 @@ mod tests {
                     .await
                     .expect("the send ends within one path budget");
                 let ended = waited.expect("the task reports");
-                let error = ended.expect_err("no direct path comes");
                 assert!(
-                    format!("{error:#}").contains(transport::RELAY_REFUSED),
-                    "the refusal names the relay: {error:#}"
+                    matches!(&ended, SendVerdict::NotDelivered(reason) if reason.contains(transport::RELAY_REFUSED)),
+                    "the refusal names the relay, and it is certain: {ended}"
                 );
 
                 router.shutdown().await.expect("shutdown");
@@ -1071,7 +1157,7 @@ mod tests {
     /// dial waits for a direct path, and the live path of the connection refuses the relay. The
     /// state lags the connection by a few milliseconds after a join, so it must not refuse alone.
     #[test]
-    fn a_directed_frame_is_held_only_for_a_pair_that_a_probe_proved_relay_only() {
+    fn a_directed_frame_to_a_pair_that_a_probe_proved_relay_only_is_sent() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
@@ -1085,7 +1171,7 @@ mod tests {
         for (reading, expected) in [
             (None, Route::Unicast(bob)),
             (Some(DirectState::Pending), Route::Unicast(bob)),
-            (Some(DirectState::RelayOnly), Route::Held(bob)),
+            (Some(DirectState::RelayOnly), Route::Unicast(bob)),
             (Some(DirectState::Direct), Route::Unicast(bob)),
         ] {
             match reading {
@@ -1104,6 +1190,37 @@ mod tests {
         }
     }
 
+    /// A lane peer that a probe stored as relay-only is sent to, and the send asks for its lane
+    /// session the same way as for an unread peer. The refusal that used to carry this ask is gone,
+    /// so the ask must come from the send path itself.
+    #[test]
+    fn a_send_to_a_stored_relay_only_lane_peer_asks_for_its_session_and_is_not_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (mut state, bob) = state_knowing_a_lane_bob();
+        state.relay_transport = PayloadPath::DirectOnly;
+        state.direct.insert(bob, DirectState::RelayOnly);
+        let now = clock::Instant::now();
+        assert!(!state.lane_session_wanted(bob, now), "nothing asked yet");
+
+        assert!(
+            ask_lane(&mut state, bob),
+            "a stored relay-only peer is unproven"
+        );
+        assert!(
+            state.lane_session_wanted(bob, now),
+            "the send path did not ask for the lane session"
+        );
+        assert!(
+            resolve(
+                &directed_msg(),
+                directed_msg().serialize().expect("serialize"),
+                &state,
+            )
+            .is_ok(),
+            "the stored state refused the send"
+        );
+    }
+
     /// A send that is not held still asks for the lane session of an unproven peer that needs
     /// one: the send dials it and waits for a direct path, and a lane peer has none to wait for.
     /// A proven peer, and a mesh whose relay carries payload, ask for nothing.
@@ -1115,10 +1232,7 @@ mod tests {
         let now = clock::Instant::now();
 
         state.direct.insert(bob, DirectState::Direct);
-        assert!(
-            !note_unproven(&mut state, &directed_msg()),
-            "a proven peer is not unproven"
-        );
+        assert!(!ask_lane(&mut state, bob), "a proven peer is not unproven");
         assert!(
             !state.lane_session_wanted(bob, now),
             "a proven peer asked for a session"
@@ -1127,7 +1241,7 @@ mod tests {
         state.direct.remove(&bob);
         state.relay_transport = PayloadPath::RelayAllowed;
         assert!(
-            !note_unproven(&mut state, &directed_msg()),
+            !ask_lane(&mut state, bob),
             "a mesh whose relay carries payload has no unproven peer"
         );
         assert!(
@@ -1137,7 +1251,7 @@ mod tests {
 
         state.relay_transport = PayloadPath::DirectOnly;
         assert!(
-            note_unproven(&mut state, &directed_msg()),
+            ask_lane(&mut state, bob),
             "an unread peer on a lookup-only relay is unproven"
         );
         assert_eq!(
@@ -1149,10 +1263,28 @@ mod tests {
             state.lane_session_wanted(bob, now),
             "the unproven lane peer did not ask for its session"
         );
-        assert!(
-            !note_unproven(&mut state, &open_broadcast()),
-            "a broadcast has no addressee to prove"
-        );
+    }
+
+    /// A broadcast has no addressee to prove or to ask for, so its send tells the loop nothing.
+    #[test]
+    fn a_broadcast_tells_the_loop_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (endpoint, sender) = loopback_node().await;
+            let (mut state, _bob) = state_knowing_bob();
+            let (started, mut told) = mpsc::unbounded_channel();
+            state.send_started = started;
+            let message = open_broadcast();
+            let bytes = message.serialize().expect("serialize");
+
+            let delivered = deliver(&message, bytes, &state, &sender).await;
+
+            assert!(delivered.is_ok(), "the broadcast is sent: {delivered:?}");
+            assert!(
+                told.try_recv().is_err(),
+                "a broadcast told the loop that a directed send starts"
+            );
+            endpoint.close().await;
+        });
     }
 
     /// **A peer with no path watcher is proven by its multihop route when a send needs it.**
@@ -1161,9 +1293,9 @@ mod tests {
     /// the sweep tick, so for up to one sweep its directed sends were held though the pair rode a
     /// multihop route. The proof of the addressee runs at the send now.
     #[test]
-    fn a_directed_send_to_an_unwatched_peer_on_a_multihop_route_is_proven_and_not_held() {
+    fn a_directed_send_to_an_unwatched_peer_on_a_multihop_route_is_proven() {
         use crate::daemon::state::DirectState;
-        use crate::transport::probe::{PathKind, prove_addressee};
+        use crate::transport::probe::{PathKind, prove_by_route};
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.relay_transport = PayloadPath::DirectOnly;
@@ -1172,12 +1304,12 @@ mod tests {
         let frame = directed_msg();
         assert_eq!(
             route(&frame, &state),
-            Route::Held(bob),
-            "the premise: before the proof the send is held"
+            Route::Unicast(bob),
+            "the premise: before the proof the send is not refused"
         );
 
         assert_eq!(
-            prove_addressee(&mut state, &frame),
+            prove_by_route(&mut state, [bob]).pop(),
             Some(bob),
             "the route proves the unwatched peer"
         );
@@ -1197,9 +1329,9 @@ mod tests {
     /// **A peer with a path watcher is left to its watcher.** The watcher is the only writer of the
     /// proof of a watched peer, and it also revokes it.
     #[test]
-    fn a_directed_send_to_a_watched_peer_on_a_multihop_route_stays_held_for_its_watcher() {
+    fn a_directed_send_to_a_watched_peer_on_a_multihop_route_is_not_refused_by_the_stored_state() {
         use crate::daemon::state::DirectState;
-        use crate::transport::probe::{PathKind, prove_addressee};
+        use crate::transport::probe::{PathKind, prove_by_route};
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.relay_transport = PayloadPath::DirectOnly;
@@ -1209,7 +1341,7 @@ mod tests {
         let frame = directed_msg();
 
         assert_eq!(
-            prove_addressee(&mut state, &frame),
+            prove_by_route(&mut state, [bob]).pop(),
             None,
             "the route proves no watched peer"
         );
@@ -1221,8 +1353,8 @@ mod tests {
         );
         assert_eq!(
             route(&frame, &state),
-            Route::Held(bob),
-            "a watched peer stays held until its watcher proves it"
+            Route::Unicast(bob),
+            "the stored state of a watched peer refuses nothing: the live connection decides"
         );
     }
 
@@ -1424,17 +1556,17 @@ mod tests {
     }
 
     #[test]
-    fn an_own_frame_to_a_relay_only_pair_is_held() {
+    fn an_own_frame_to_a_relay_only_pair_waits_for_the_path() {
         let _guard = ::habilis_network_test_tracing::init();
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
         let message = own_broadcast(&state);
 
-        let error = resolved_to(&test_key("bob"), &message, &state).expect_err("a held pair");
+        let resolved = resolved_to(&test_key("bob"), &message, &state);
 
         assert!(
-            matches!(error, SendError::Held { eid } if eid == bob),
-            "the directed rules hold the frame for a direct path: {error:?}"
+            matches!(resolved, Ok((eid, _)) if eid == bob),
+            "an own frame to a relay-only pair is sent: the live connection decides"
         );
     }
 }

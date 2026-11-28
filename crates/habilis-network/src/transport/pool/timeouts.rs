@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crate::util::tuning::QUIC_PATH_IDLE_TIMEOUT;
+
 /// How long an inline dial keeps trying before giving up. Deliberately short —
 /// far under the application's 90s discovery deadline — because the dial blocks the send,
 /// and an unreachable peer should surface as an error now, not stall the
@@ -40,15 +42,56 @@ pub(crate) const PINNED_IDLE: Duration = super::super::ceiling::EXTRA_IDLE;
 /// may be gone. The next send plans the dial with a fresh route.
 pub(super) const PINNED_REDIAL: &str = "pinned peer: the next send plans a fresh route";
 
-/// How long a connection stays busy after a send finished, if the peer has not read the frame. A
-/// reader that is slower than this is not protected: the connection can be evicted under its frame.
-pub(super) const BUSY_AFTER_FINISH: Duration = Duration::from_secs(2);
-
-/// How long one send may take: the open of the stream and the write of the frame. A peer that accepts the
-/// connection and reads nothing fills its limit of streams, and the open then waits. Each send sits in a task of
-/// its own, so a wait without a bound grows the tasks of this node for as long as the peer makes it send. The
-/// budget is the dial's, because a send that waits this long is as dead as a peer that does not answer a dial.
+/// How long the open of the stream and the write of the frame may take. Both are local: a peer that
+/// accepts the connection and reads nothing fills its limit of streams, and the open then waits.
+/// Each send sits in a task of its own, so a wait without a bound grows the tasks of this node for
+/// as long as the peer makes it send. The budget is the dial's, because a send that waits this long
+/// is as dead as a peer that does not answer a dial.
 pub(super) const SEND_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// The error of a send that passed [`SEND_TIMEOUT`]. A caller that tells the two apart reads it.
+/// How long a send waits for the peer: once for `HELD`, and once for the end of the frame. The
+/// transport under the connection can need its whole path idle timeout to leave a path that died
+/// with no signal, and then the frame needs the time of a normal send, which is [`SEND_TIMEOUT`]. A
+/// shorter wait turns every failover of a path into a failed send. The cost is the same number: a
+/// send to a peer that is gone answers "not delivered" after this time, and the connection is busy
+/// in the ledger until then. One send waits at most [`SEND_TIMEOUT`] and this time twice. A call
+/// makes a second send after a lost connection: see [`LONGEST_SEND_CALL`].
+pub(crate) const SEND_ANSWER_TIMEOUT: Duration =
+    QUIC_PATH_IDLE_TIMEOUT.saturating_add(SEND_TIMEOUT);
+
+/// One attempt of a send: the dial, the wait for a direct path, and one [`send_one`]
+/// (the open and the write, the wait for `HELD`, and the wait for the end).
+///
+/// [`send_one`]: super::unicast_pool::send_one
+const SEND_ATTEMPT: Duration = DIAL_TIMEOUT
+    .saturating_add(PATH_SELECT_TIMEOUT)
+    .saturating_add(SEND_TIMEOUT)
+    .saturating_add(SEND_ANSWER_TIMEOUT.saturating_mul(2));
+
+/// The longest time that one call to send a directed frame takes before it gives a verdict. A call
+/// makes one attempt, and a second one after a lost connection (see `SEND_ATTEMPT` in the source:
+/// the dial, the wait for a direct path, and the send with its two waits for the peer). A caller
+/// that waits for the dial of another is told when that connection is ready, so it sends its own
+/// frame and fits the same bound. A caller that must give up on a send for itself, and not decide
+/// before the engine does, reads this and adds a margin.
+///
+/// This is a bound of the parts, not a proof. A call that finds the connection lost after a dial
+/// that it waited for takes a new place behind a new dial, and it can wait again behind another
+/// caller each time; each turn costs at most the dial and the wait for a direct path, and no code
+/// bounds the number of turns. A backstop that reads this adds a margin.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use habilis_network::ops::LONGEST_SEND_CALL;
+///
+/// // The backstop of a caller that waits for the verdict of a send: the bound of the engine, and a margin.
+/// let backstop: Duration = LONGEST_SEND_CALL.saturating_add(Duration::from_secs(10));
+/// # let _ = backstop;
+/// ```
+pub const LONGEST_SEND_CALL: Duration = SEND_ATTEMPT.saturating_mul(2);
+
+/// The error of a send that passed [`SEND_TIMEOUT`] or [`SEND_ANSWER_TIMEOUT`]. A caller that tells
+/// the two apart reads it.
 pub(super) const SEND_TIMED_OUT: &str = "unicast send timed out";

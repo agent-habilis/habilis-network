@@ -4,10 +4,18 @@
 //! and with a short dial budget so a send to an unreachable peer fails fast
 //! rather than stalling the event loop.
 
+mod committed;
 mod in_flight_dial;
+mod outgoing_frame;
 mod plan_release;
 mod registration;
+mod send_fault;
+mod uncommitted_stream;
+pub(crate) use send_fault::SendFault;
 mod timeouts;
+pub use timeouts::LONGEST_SEND_CALL;
+#[cfg(test)]
+pub(crate) use timeouts::SEND_ANSWER_TIMEOUT;
 pub(crate) use timeouts::{COOLDOWN_REFUSED, DIAL_TIMEOUT};
 mod unicast_pool;
 pub(crate) use unicast_pool::UnicastPool;
@@ -26,9 +34,11 @@ mod tests {
     use crate::lookup;
     use crate::transport::PayloadPath;
     use crate::util::tuning;
+    use futures_util::future::join_all;
     use iroh::endpoint::{ConnectionError, presets};
     use iroh::{endpoint, protocol};
-    use std::{mem, net};
+    use std::collections::HashSet;
+    use std::{future, mem, net};
     use tokio::sync::mpsc;
     use tokio::{runtime, task, time};
     #[test]
@@ -140,16 +150,36 @@ mod tests {
         iroh::Endpoint,
     ) {
         use iroh::endpoint::Connection;
-        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+        use iroh::protocol::{AcceptError, ProtocolHandler};
 
+        /// A server that reads each frame and acknowledges it.
         #[derive(Debug, Clone, Copy)]
-        struct Hold;
-        impl ProtocolHandler for Hold {
+        struct Acknowledge;
+        impl ProtocolHandler for Acknowledge {
             async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                connection.closed().await;
+                while let Ok((acknowledgement, stream)) = connection.accept_bi().await {
+                    let _ =
+                        super::super::unicast_acceptor::receive_for_test(acknowledgement, stream)
+                            .await;
+                }
                 Ok(())
             }
         }
+        pool_serving(idle, Acknowledge).await
+    }
+
+    /// [`pool_with_idle`] with the handler that the server runs.
+    async fn pool_serving<Serving: protocol::ProtocolHandler>(
+        idle: Duration,
+        handler: Serving,
+    ) -> (
+        super::UnicastPool,
+        iroh::EndpointId,
+        protocol::Router,
+        iroh::Endpoint,
+    ) {
+        use iroh::protocol::Router;
+
         let bind = || async {
             iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled)
@@ -159,7 +189,7 @@ mod tests {
         };
         let server = bind().await;
         let router = Router::builder(server.clone())
-            .accept(super::super::UNICAST_ALPN, Hold)
+            .accept(super::super::UNICAST_ALPN, handler)
             .spawn();
         let client = bind().await;
         lookup::add_peer_addr(&lookup::address_book(&client), server.addr());
@@ -190,8 +220,12 @@ mod tests {
     #[test]
     fn a_pinned_connection_is_closed_after_a_minute_idle_and_a_direct_one_is_not() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
             let (pool, server, router, client) =
                 pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
             let connection = pool.warm_or_dial(server).await.expect("dial");
             time::pause();
 
@@ -201,10 +235,12 @@ mod tests {
                 "a direct connection keeps the idle timeout of the pool"
             );
 
+            admission.plan_dial(server, true);
+            admission.note_connection(&connection);
+            assert!(admission.is_pinned(server), "the ledger pins the peer");
             {
                 let mut conns = pool.inner.conns.lock().await;
                 let pooled = conns.get_mut(&server).expect("the connection is pooled");
-                pooled.pinned = true;
                 pooled.last_used = time::Instant::now();
             }
             advance_secs(55).await;
@@ -253,6 +289,141 @@ mod tests {
             );
 
             time::resume();
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// The node is at its ceiling with an extra that it dialed: no unit was free or evictable, and
+    /// no route was known when it dialed. A send finds the connection unusable, a route exists now,
+    /// and the plan says: dial through multihop. The pool used to find the open connection first
+    /// and reuse it, so the plan was not made and every later send failed the same way. The
+    /// connection is not the pinned one, so the route replaces it: it closes, and the dial takes the
+    /// route. The route of the test answers nothing, so the dial itself fails.
+    #[test]
+    fn a_pinned_dial_replaces_an_open_connection_that_the_ledger_does_not_pin() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) =
+                pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            let _busy = admission.busy(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            admission.note_connection(&connection);
+            assert!(admission.is_extra(server), "no unit was free or evictable");
+            assert_eq!(pool.dials_to(server), 1, "one dial made the connection");
+
+            assert!(
+                pool.dial_and_send_in_background(server, bytes::Bytes::from_static(b"hi"), || {
+                    Some(a_route())
+                })
+                .await,
+                "a send with a route plans a dial"
+            );
+            time::timeout(Duration::from_secs(10), async {
+                while pool.is_dialing(server) {
+                    task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the dial ends");
+
+            assert!(
+                connection.close_reason().is_some(),
+                "the connection that the ledger does not pin is closed for the route"
+            );
+            assert_eq!(
+                pool.dials_to(server),
+                2,
+                "the plan dialed through the route"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// Control: the plan is a direct dial, because the peer holds a unit. The open connection is
+    /// reused and nothing is dialed, though the send has a route.
+    #[test]
+    fn a_direct_plan_reuses_an_open_connection() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) =
+                pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let admission = SignalAdmission::new(3);
+            admission.note_success(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            admission.note_connection(&connection);
+            assert!(!admission.is_extra(server), "the connection holds a unit");
+
+            assert!(
+                pool.dial_and_send_in_background(server, bytes::Bytes::from_static(b"hi"), || {
+                    Some(a_route())
+                })
+                .await,
+                "a send with a route plans a dial"
+            );
+            time::timeout(Duration::from_secs(10), async {
+                while pool.is_dialing(server) {
+                    task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the dial ends");
+
+            assert!(
+                connection.close_reason().is_none(),
+                "the connection of a unit stays"
+            );
+            assert_eq!(pool.dials_to(server), 1, "nothing is dialed");
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// Control: the ledger pins the peer and its pinned connection is open. The plan is Multihop
+    /// and the open connection is the pinned one: it is reused and nothing is dialed.
+    #[test]
+    fn a_pinned_dial_reuses_the_open_connection_that_the_ledger_pins() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+            let (pool, server, router, client) =
+                pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            let _busy = admission.busy(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            admission.plan_dial(server, true);
+            admission.note_connection(&connection);
+            assert!(
+                admission.pinned_peers().contains(&server),
+                "the ledger pins the open connection"
+            );
+
+            assert!(
+                pool.dial_and_send_in_background(server, bytes::Bytes::from_static(b"hi"), || {
+                    Some(a_route())
+                })
+                .await,
+                "a send with a route plans a dial"
+            );
+            time::timeout(Duration::from_secs(10), async {
+                while pool.is_dialing(server) {
+                    task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the dial ends");
+
+            assert!(
+                connection.close_reason().is_none(),
+                "the pinned connection stays"
+            );
+            assert_eq!(pool.dials_to(server), 1, "nothing is dialed");
             router.shutdown().await.expect("shutdown");
             client.close().await;
         });
@@ -510,16 +681,14 @@ mod tests {
             use super::super::admission::SignalAdmission;
             let (pool, server, router, client) =
                 pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
-            let admission = SignalAdmission::new(2);
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
             pool.set_admission(admission.clone());
             let connection = pool.warm_or_dial(server).await.expect("dial");
-            pool.inner
-                .conns
-                .lock()
-                .await
-                .get_mut(&server)
-                .expect("the connection is pooled")
-                .pinned = true;
+            admission.plan_dial(server, true);
+            admission.note_connection(&connection);
+            assert!(admission.is_pinned(server), "the ledger pins the peer");
+            admission.set_neighbors(&HashSet::from([server]));
             assert!(
                 !pool.close_pinned(server).await && connection.close_reason().is_none(),
                 "the ledger does not pin the peer any more: the connection stays"
@@ -571,20 +740,19 @@ mod tests {
     #[test]
     fn a_pinned_connection_closes_when_its_route_is_gone_and_a_direct_one_stays() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
             let (pool, server, router, client) =
                 pool_with_holds(Duration::from_secs(300), Duration::from_secs(8)).await;
+            let admission = SignalAdmission::new(1);
+            admission.note_success(testing::endpoint_id(7));
+            pool.set_admission(admission.clone());
             let connection = pool.warm_or_dial(server).await.expect("dial");
             assert!(
                 !pool.close_pinned(server).await && connection.close_reason().is_none(),
                 "a direct connection stays"
             );
-            pool.inner
-                .conns
-                .lock()
-                .await
-                .get_mut(&server)
-                .expect("the connection is pooled")
-                .pinned = true;
+            admission.plan_dial(server, true);
+            admission.note_connection(&connection);
             assert!(
                 pool.close_pinned(server).await,
                 "a pinned connection closes"
@@ -628,45 +796,442 @@ mod tests {
         });
     }
 
+    /// A peer that answers each frame by its first byte. A frame that starts with `a` gets no answer
+    /// at all, or `NOT_TAKEN` when `refuse_a` is set. Any other frame is held, committed and
+    /// acknowledged.
+    #[derive(Debug, Clone, Copy)]
+    struct Picky {
+        refuse_a: bool,
+    }
+
+    impl protocol::ProtocolHandler for Picky {
+        async fn accept(
+            &self,
+            connection: endpoint::Connection,
+        ) -> Result<(), protocol::AcceptError> {
+            use super::super::unicast_acceptor::{HELD, NOT_TAKEN};
+
+            let refuse_a = self.refuse_a;
+            let mut streams = task::JoinSet::new();
+            while let Ok((mut ack, mut recv)) = connection.accept_bi().await {
+                streams.spawn(async move {
+                    let mut prefix = [0u8; 4];
+                    recv.read_exact(&mut prefix).await.ok()?;
+                    let mut frame = vec![0u8; usize::try_from(u32::from_be_bytes(prefix)).ok()?];
+                    recv.read_exact(&mut frame).await.ok()?;
+                    if frame.first() == Some(&b'a') {
+                        if refuse_a {
+                            ack.reset(NOT_TAKEN.into()).ok()?;
+                        } else {
+                            let () = future::pending().await;
+                        }
+                        return Some(());
+                    }
+                    ack.write_all(&[HELD]).await.ok()?;
+                    recv.read_to_end(0).await.ok()?;
+                    ack.finish().ok()?;
+                    ack.stopped().await.ok()?;
+                    Some(())
+                });
+            }
+            Ok(())
+        }
+    }
+
+    /// **A caller that waits for the dial of another is not held up by the frame of the dialer.** The
+    /// dialer sends a frame that the peer never answers, and its send waits for the whole wait of a
+    /// send. The waiter wanted a connection, and it has one as soon as the dial is ready: it sends its
+    /// own frame, and the peer takes it. Before, the dialer told its waiters only when its own send
+    /// ended, so every frame behind it waited for the verdict of a frame that was not its own.
+    #[test]
+    fn a_waiter_sends_its_own_frame_while_the_frame_of_its_dialer_waits_for_the_peer() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: false }).await;
+            let dialer = pool.register_dial(server);
+            let waiter = pool.register_dial(server);
+            let first = pool.send_registered(dialer, server, bytes::Bytes::from_static(b"a frame"));
+            let second =
+                pool.send_registered(waiter, server, bytes::Bytes::from_static(b"b frame"));
+            tokio::pin!(first);
+
+            let outcome = tokio::select! {
+                _ = &mut first => panic!("the frame that the peer never answers ended at once"),
+                outcome = time::timeout(Duration::from_secs(5), second) => outcome,
+            };
+
+            assert!(
+                matches!(outcome, Ok(Ok(()))),
+                "the waiter did not deliver its own frame while the frame of its dialer waited: {outcome:?}"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **A caller that waits for the dial of another gets the verdict of its own frame.** The peer
+    /// refuses the frame of the dialer and takes the frame of the waiter. The dialer says "not
+    /// delivered", and the waiter says "delivered": before, the waiter got the error of the frame of
+    /// the dialer, and its own frame was never sent.
+    #[test]
+    fn a_waiter_delivers_its_own_frame_when_the_frame_of_its_dialer_is_refused() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: true }).await;
+            let dialer = pool.register_dial(server);
+            let waiter = pool.register_dial(server);
+            let first = pool.send_registered(dialer, server, bytes::Bytes::from_static(b"a frame"));
+            let second =
+                pool.send_registered(waiter, server, bytes::Bytes::from_static(b"b frame"));
+
+            let (first, second) = tokio::join!(first, second);
+
+            assert!(first.is_err(), "the peer refused the frame of the dialer");
+            assert!(
+                second.is_ok(),
+                "the waiter got the verdict of the frame of its dialer: {second:?}"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **A connection that dies right after the dial published it costs one new dial, not one for
+    /// each waiter.** Four callers send to a cold peer: one is the dialer and three wait for it. The
+    /// connection is closed after the dialer made it ready and before it published. The dialer sends
+    /// on a lost connection and dials again, and the waiters find the pool cold: they take a new place
+    /// behind that dial. All four frames arrive, and the pool made two dials, the first and the
+    /// second, and not one for each waiter.
+    #[cfg(feature = "iroh-test-utils")]
+    #[test]
+    fn waiters_of_a_connection_that_dies_after_the_publish_make_one_new_dial_together() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: false }).await;
+            let (reached, release) = pool.hold_next_outcome(server);
+            let sends: Vec<_> = (0..4)
+                .map(|index| {
+                    let registration = pool.register_dial(server);
+                    let frame = bytes::Bytes::from(format!("b frame {index}"));
+                    pool.send_registered(registration, server, frame)
+                })
+                .collect();
+            let lose = async {
+                reached.await.expect("the dialer holds its outcome");
+                let connection = pool
+                    .connection(server)
+                    .expect("the dialer pooled a connection");
+                connection.close(0u32.into(), b"lost");
+                pool.inner.conns.lock().await.remove(&server);
+                drop(release);
+            };
+
+            let (outcomes, ()) = tokio::join!(join_all(sends), lose);
+
+            for outcome in outcomes {
+                outcome.expect("each caller delivers its own frame");
+            }
+            assert_eq!(
+                pool.dials_to(server),
+                2,
+                "the first dial, and one new dial for the dialer and the three waiters"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **A probe and a send to one cold peer at once make one dial.** The probe is not a send: it
+    /// plans its dial as a courtesy. Both ask the pool for a connection to the same peer, and the
+    /// peer is dialed once, by whoever asked first.
+    #[test]
+    fn a_probe_and_a_send_to_one_cold_peer_at_once_make_one_dial() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: false }).await;
+
+            let probe = pool.probe_connection(server);
+            let send = pool.dial_or_warm_send(server, bytes::Bytes::from_static(b"b frame"));
+            let (connection, delivered) = tokio::join!(probe, send);
+
+            connection.expect("the probe has a connection");
+            delivered.expect("the send is delivered");
+            assert_eq!(
+                pool.dials_to(server),
+                1,
+                "one dial for the probe and the send"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **A dial that fails reaches every caller that waited for it, a probe included, with the error
+    /// of the dial.** Four sends and one probe ask for a peer that is not there. The peer is dialed
+    /// once, and each caller says why: none of them meets the cooldown of the dial that it waited for.
+    #[test]
+    fn callers_of_a_dial_that_fails_make_one_dial_and_each_gets_its_error() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let gone = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint");
+            let address = gone.addr();
+            let peer = gone.id();
+            gone.close().await;
+            let client = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint");
+            lookup::add_peer_addr(&lookup::address_book(&client), address);
+            let pool =
+                super::UnicastPool::with_idle(client.clone(), false, Duration::from_secs(600));
+            time::pause();
+
+            let probe = pool.probe_connection(peer);
+            let sends: Vec<_> = (0..4)
+                .map(|index| {
+                    let registration = pool.register_dial(peer);
+                    let frame = bytes::Bytes::from(format!("b frame {index}"));
+                    pool.send_registered(registration, peer, frame)
+                })
+                .collect();
+            let (probed, sent) = tokio::join!(probe, join_all(sends));
+
+            let mut errors: Vec<String> = sent
+                .into_iter()
+                .map(|outcome| format!("{:#}", outcome.expect_err("the peer is not there")))
+                .collect();
+            errors.push(format!("{:#}", probed.expect_err("the peer is not there")));
+            assert_eq!(pool.dials_to(peer), 1, "one dial for the five callers");
+            let first = errors[0].clone();
+            assert!(
+                errors.iter().all(|error| *error == first),
+                "each caller got the error of the dial: {errors:?}"
+            );
+            client.close().await;
+        });
+    }
+
+    /// **A probe that waits behind the dial of a send leaves the connection held as used.** The
+    /// probe reads the connection with its own hold, which does not turn a connection that a send
+    /// opened into a probe hold.
+    #[test]
+    fn a_probe_that_waits_on_a_send_dial_leaves_the_connection_as_used() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: false }).await;
+
+            let gate = pool.hold_next_dial();
+            let send = pool.dial_or_warm_send(server, bytes::Bytes::from_static(b"b frame"));
+            let probe = async {
+                wait_until(|| pool.is_dialing(server)).await;
+                pool.probe_connection(server).await
+            };
+            // The dial of the send is held while the probe asks for the same peer.
+            let release = async {
+                time::sleep(Duration::from_millis(300)).await;
+                gate.notify_one();
+            };
+            let (delivered, connection, ()) = tokio::join!(send, probe, release);
+
+            delivered.expect("the send is delivered");
+            connection.expect("the probe has a connection");
+            let hold = pool
+                .inner
+                .conns
+                .lock()
+                .await
+                .get(&server)
+                .map(|pooled| pooled.hold);
+            assert!(
+                matches!(hold, Some(super::unicast_pool::Hold::Used)),
+                "the connection of a send stays used, not {hold:?}"
+            );
+            assert_eq!(pool.dials_to(server), 1, "one dial");
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **A dialer that is dropped in its dial does not fail the caller that waits for it.** The probe
+    /// dials, and its future is dropped while the dial is held, as a task that is aborted. A send that
+    /// waited for that dial did not fail to dial: nobody dialed. It takes the place of the dialer, dials
+    /// once, and is delivered.
+    #[test]
+    fn a_dialer_that_is_dropped_in_its_dial_does_not_fail_the_caller_that_waits_for_it() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: false }).await;
+
+            let _gate = pool.hold_next_dial();
+            let dialer = {
+                let pool = pool.clone();
+                tokio::spawn(async move { pool.probe_connection(server).await })
+            };
+            wait_until(|| pool.is_dialing(server)).await;
+            let waiter = {
+                let pool = pool.clone();
+                let registration = pool.register_dial(server);
+                tokio::spawn(async move {
+                    pool.send_registered(
+                        registration,
+                        server,
+                        bytes::Bytes::from_static(b"b frame"),
+                    )
+                    .await
+                })
+            };
+            wait_until(|| pool.waiting_callers() >= 1).await;
+            dialer.abort();
+            let _ = dialer.await;
+
+            let delivered = waiter.await.expect("the send task ends");
+
+            assert!(
+                delivered.is_ok(),
+                "the send failed because another caller was dropped: {delivered:?}"
+            );
+            assert_eq!(
+                pool.dials_to(server),
+                1,
+                "the send dialed once, in place of the dialer"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **A send that waits behind a probe uses the unit that the probe reserved.** The probe reserves
+    /// one of the two units for the peer. The other unit is taken while the probe dials, and then a
+    /// send to the same peer waits for that dial. The connection takes the reserved unit: it is no
+    /// extra, the count is not over the ceiling, and nobody is evicted for the send.
+    #[test]
+    fn a_send_that_waits_behind_a_probe_uses_the_unit_that_the_probe_reserved() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use super::super::admission::SignalAdmission;
+
+            let (pool, server, router, client) =
+                pool_serving(Duration::from_secs(600), Picky { refuse_a: false }).await;
+            let admission = SignalAdmission::new(2);
+            pool.set_admission(admission.clone());
+            let other = testing::endpoint_id(7);
+
+            let gate = pool.hold_next_dial();
+            let probe = pool.probe_connection(server);
+            let send = async {
+                wait_until(|| pool.is_dialing(server)).await;
+                admission.note_success(other);
+                let registration = pool.register_dial(server);
+                pool.send_registered(registration, server, bytes::Bytes::from_static(b"b frame"))
+                    .await
+            };
+            let release = async {
+                wait_until(|| pool.waiting_callers() >= 1).await;
+                gate.notify_one();
+            };
+            let (connection, delivered, ()) = tokio::join!(probe, send, release);
+
+            let connection = connection.expect("the probe has a connection");
+            delivered.expect("the send is delivered");
+            admission.note_connection(&connection);
+            assert!(
+                !admission.is_extra(server),
+                "the connection took the unit that the probe reserved"
+            );
+            assert_eq!(
+                admission.over_ceiling(),
+                0,
+                "the count is not over the ceiling"
+            );
+            assert!(
+                !admission.is_extra(other),
+                "the peer that took the other unit was not evicted for the send"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **No path of one send call is longer than `LONGEST_SEND_CALL`.** The paths are the ones of the
+    /// code: a call that dials and dials again after a lost connection (`dial_and_send`), a send on a
+    /// warm connection that dials after it was lost (`send_if_warm`, `redial_and_send`), and a caller
+    /// that waits for the dial of another, sends its own frame, and dials after a lost connection.
+    /// Each is a sum of the named bounds, and the longest is the constant.
+    #[test]
+    fn no_path_of_a_send_call_is_longer_than_the_longest_send_call() {
+        use super::timeouts::{
+            DIAL_TIMEOUT, PATH_SELECT_TIMEOUT, SEND_ANSWER_TIMEOUT, SEND_TIMEOUT,
+        };
+
+        let send: Duration = SEND_TIMEOUT + SEND_ANSWER_TIMEOUT * 2;
+        let connection: Duration = DIAL_TIMEOUT + PATH_SELECT_TIMEOUT;
+        let paths = [
+            (
+                "dial_and_send, then redial_and_send",
+                connection + send + connection + send,
+            ),
+            (
+                "send_if_warm, then redial_and_send",
+                send + connection + send,
+            ),
+            (
+                "a waiter: the connection of its dialer, its own send, then a redial",
+                connection + send + connection + send,
+            ),
+        ];
+
+        for (name, length) in paths {
+            assert!(
+                length <= super::LONGEST_SEND_CALL,
+                "{name} takes {length:?}, longer than {:?}",
+                super::LONGEST_SEND_CALL
+            );
+        }
+        assert_eq!(
+            paths.iter().map(|(_, length)| *length).max(),
+            Some(super::LONGEST_SEND_CALL),
+            "the constant is the longest path, and no more"
+        );
+    }
+
     /// A send to a peer that reads nothing ends. The peer accepts the connection, never accepts a stream and keeps
-    /// the connection alive, so every finished stream stays open: once its limit of streams is full, `open_uni`
-    /// waits. Each send sits in a task of its own, so a wait without a bound grows the tasks of the node for as
-    /// long as the peer answers nothing.
+    /// the connection alive, so no stream gets its acknowledgement: the send ends with the deadline of a send, and
+    /// not with a wait without a bound. Each send sits in a task of its own, so a wait without a bound grows the
+    /// tasks of the node for as long as the peer answers nothing.
     #[test]
     fn a_send_to_a_peer_that_reads_nothing_ends_within_its_budget() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
-            let (pool, server, router, client) = pool_with_idle(Duration::from_secs(600)).await;
-            let connection = pool.warm_or_dial(server).await.expect("dial");
+            use iroh::endpoint::Connection;
+            use iroh::protocol::{AcceptError, ProtocolHandler};
 
-            let fills_the_streams_of_the_peer = async {
-                let mut sent = 0u32;
-                for _ in 0..4096u32 {
-                    match super::unicast_pool::send_one(&connection, b"frame", None, None).await {
-                        Ok(()) => sent += 1,
-                        Err(error) => return (sent, Some(error.to_string())),
-                    }
+            #[derive(Debug, Clone, Copy)]
+            struct Mute;
+            impl ProtocolHandler for Mute {
+                async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                    connection.closed().await;
+                    Ok(())
                 }
-                (sent, None)
-            };
+            }
+            let (pool, server, router, client) = pool_serving(Duration::from_secs(600), Mute).await;
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            time::pause();
+
             let ended = time::timeout(
-                super::timeouts::SEND_TIMEOUT * 3,
-                fills_the_streams_of_the_peer,
+                super::timeouts::SEND_TIMEOUT + super::timeouts::SEND_ANSWER_TIMEOUT * 2,
+                super::unicast_pool::send_one(&connection, b"frame", None, None),
             )
             .await;
 
-            let (sent, refusal) = ended.expect(
-                "a send to a peer that reads nothing is still waiting, so the wait of a send has no bound",
-            );
-            let refusal: String = refusal.expect(
-                "4096 sends never filled the streams of the peer, so the wait of a send has no bound to prove",
-            );
-            assert!(
-                sent > 0,
-                "the first send already failed with \"{refusal}\", so the refusal below is not the one of a full peer"
-            );
+            let refusal: String = ended
+                .expect("a send to a peer that reads nothing is still waiting, so the wait of a send has no bound")
+                .expect_err("a peer that reads nothing acknowledges nothing")
+                .to_string();
             assert!(
                 refusal.contains(super::timeouts::SEND_TIMED_OUT),
-                "the send of the frame number {sent} ended with \"{refusal}\", which is not the deadline of a send"
+                "the send ended with \"{refusal}\", which is not the deadline of a send"
             );
             router.shutdown().await.expect("shutdown");
             client.close().await;
@@ -674,7 +1239,7 @@ mod tests {
     }
 
     /// A write that fails drops the connection it failed on, and not the one that another dial
-    /// pooled while it waited. A send that times out holds for `SEND_TIMEOUT`, which is long enough
+    /// pooled while it waited. A send that times out holds for `SEND_ANSWER_TIMEOUT`, which is long enough
     /// for a parallel send to replace a dead connection, and an eviction by endpoint id alone would
     /// put that replacement out of the pool as well.
     #[test]
@@ -905,8 +1470,11 @@ mod tests {
         struct Collect(mpsc::UnboundedSender<Vec<u8>>);
         impl ProtocolHandler for Collect {
             async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-                while let Ok(mut stream) = connection.accept_uni().await {
-                    if let Ok(frame) = stream.read_to_end(64 * 1024).await {
+                while let Ok((acknowledgement, stream)) = connection.accept_bi().await {
+                    if let Some(frame) =
+                        super::super::unicast_acceptor::receive_for_test(acknowledgement, stream)
+                            .await
+                    {
                         let _ = self.0.send(frame);
                     }
                 }
@@ -1197,10 +1765,12 @@ mod tests {
         );
     }
 
-    /// A dialer that is aborted mid-dial wakes the callers that wait on it, with an error, long
-    /// before the dial would have timed out, and leaves no entry behind.
+    /// A dialer that is aborted mid-dial hands its place to the callers that wait on it. The cancelled
+    /// dialer leaves no entry, and the first waiter wakes at once, long before the dial would have
+    /// timed out, and dials in its place. A dial that nobody failed is no error for a waiter. (The
+    /// test said that the waiter "gets an error that says the dial was cancelled".)
     #[test]
-    fn a_cancelled_dialer_wakes_its_waiters() {
+    fn a_cancelled_dialer_hands_its_place_to_the_callers_that_wait_on_it() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             let (pool, bob, endpoint, _silent) = pool_with_silent_peer().await;
             let dialer = tokio::spawn({
@@ -1219,22 +1789,21 @@ mod tests {
                 let pool = pool.clone();
                 async move { pool.dial_or_warm_send(bob, bytes::Bytes::new()).await }
             });
-            time::sleep(Duration::from_millis(100)).await;
+            wait_until(|| pool.waiting_callers() >= 1).await;
 
             dialer.abort();
+            let _ = dialer.await;
 
-            let outcome = time::timeout(Duration::from_secs(1), waiter)
-                .await
-                .expect("the waiter wakes long before the dial times out")
-                .expect("the waiter task ends");
-            let error = outcome.expect_err("a waiter of a cancelled dial gets an error");
+            wait_until(|| pool.is_dialing(bob) && pool.waiting_callers() == 0).await;
             assert!(
-                error.to_string().contains("cancelled"),
-                "the error says that the dial was cancelled: {error}"
+                !waiter.is_finished(),
+                "the waiter dials in the place of the dialer, and does not end with an error"
             );
+            waiter.abort();
+            let _ = waiter.await;
             assert!(
-                !pool.inner.dialing.lock().contains_key(&bob),
-                "the cancelled dialer left its entry"
+                !pool.is_dialing(bob),
+                "the entry of the last dialer is gone with it"
             );
 
             endpoint.close().await;
@@ -1348,7 +1917,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -1410,14 +1979,6 @@ mod tests {
         }
     }
 
-    /// The handles that hold the dial lock of a peer: the map, and the turn of each dial that waits or dials.
-    fn lock_handles(pool: &super::UnicastPool) -> usize {
-        use std::sync::Arc;
-
-        let locks = pool.inner.dial_locks.lock();
-        locks.values().map(Arc::strong_count).max().unwrap_or(0)
-    }
-
     /// Two probes that dial one cold peer at once share one connection, and it keeps the hold of a probe: `Probing`
     /// while the probes run, and `Probed` once they end. A send is what turns it into `Used`.
     #[test]
@@ -1440,7 +2001,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -1455,11 +2016,11 @@ mod tests {
                 let gate = pool.hold_next_dial();
                 let first_probe = pool.probe_connection(peer);
                 let second_probe = async {
-                    wait_until(|| lock_handles(&pool) >= 2).await;
+                    wait_until(|| pool.is_dialing_any()).await;
                     pool.probe_connection(peer).await
                 };
                 let release = async {
-                    wait_until(|| lock_handles(&pool) >= 3).await;
+                    wait_until(|| pool.waiting_callers() >= 1).await;
                     gate.notify_one();
                 };
                 let (one, two, ()) = tokio::join!(first_probe, second_probe, release);
@@ -1518,7 +2079,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -1533,7 +2094,7 @@ mod tests {
                 let gate = pool.hold_next_dial();
                 let dial = pool.probe_connection(peer);
                 let force = async {
-                    wait_until(|| lock_handles(&pool) >= 2).await;
+                    wait_until(|| pool.is_dialing_any()).await;
                     let forcing = pool.fail_dial_for_test(peer);
                     tokio::pin!(forcing);
                     let early = time::timeout(Duration::from_millis(300), &mut forcing).await;
@@ -1565,7 +2126,7 @@ mod tests {
     /// A dial that is cancelled leaves no lock behind: the lock of the peer goes when the dial future is dropped, not
     /// only when the dial ends.
     #[test]
-    fn a_cancelled_dial_leaves_no_lock_behind() {
+    fn a_cancelled_dial_leaves_no_place_behind() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,
@@ -1586,14 +2147,14 @@ mod tests {
                 });
                 time::sleep(Duration::from_millis(300)).await;
                 assert!(
-                    !pool.inner.dial_locks.lock().is_empty(),
-                    "a dial that waits holds the lock of its peer"
+                    pool.is_dialing(peer),
+                    "a dial that waits holds the place of its peer"
                 );
                 task.abort();
                 let _ = task.await;
                 assert!(
-                    pool.inner.dial_locks.lock().is_empty(),
-                    "a cancelled dial leaves no lock behind"
+                    !pool.is_dialing(peer),
+                    "a cancelled dial leaves no place behind"
                 );
                 node.close().await;
             },
@@ -1622,7 +2183,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let node: iroh::Endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -1636,12 +2197,12 @@ mod tests {
                 let gate = pool.hold_next_dial();
                 let probe_dial = pool.probe_connection(server.id());
                 let send = async {
-                    wait_until(|| lock_handles(&pool) >= 2).await;
+                    wait_until(|| pool.is_dialing_any()).await;
                     pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"one"))
                         .await
                 };
                 let release = async {
-                    wait_until(|| lock_handles(&pool) >= 3).await;
+                    wait_until(|| pool.waiting_callers() >= 1).await;
                     gate.notify_one();
                 };
                 let (dialed, outcome, ()) = tokio::join!(probe_dial, send, release);
@@ -1689,7 +2250,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let admission = SignalAdmission::new(8);
@@ -1747,7 +2308,7 @@ mod tests {
                 let router = Router::builder(server.clone())
                     .accept(
                         super::super::UNICAST_ALPN,
-                        UnicastAcceptor::new(tx, PayloadPath::RelayAllowed),
+                        UnicastAcceptor::for_test(tx, PayloadPath::RelayAllowed),
                     )
                     .spawn();
                 let admission = SignalAdmission::new(8);
@@ -1788,12 +2349,40 @@ mod tests {
         );
     }
 
-    /// **The busy mark lasts until the peer has read the frame.** `finish()` returns while the frame
-    /// is still in flight, so a mark that ended there left a connection with a slow reader open to
-    /// eviction, with its frame in the air. The mark now ends when the peer has read the stream to the
-    /// end, or after 2 s.
+    /// **A frame that the sender drops before the commit is reset, never finished.** A stream that is
+    /// dropped finishes by itself, and the finish is the commit: any early return of a send, or a
+    /// send task that is cancelled, would have told the peer to take a frame that the user was told
+    /// had failed. The peer reads a reset, and takes nothing.
     #[test]
-    fn a_send_keeps_its_connection_busy_until_the_peer_has_read_the_frame() {
+    fn a_frame_that_is_dropped_before_the_commit_is_reset_and_the_peer_takes_nothing() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let (pool, server, router, client, mut frames) = pool_with_collecting_server().await;
+            let connection = pool.warm_or_dial(server).await.expect("dial");
+            let (stream, held) = connection.open_bi().await.expect("open a stream");
+            let mut frame = super::outgoing_frame::OutgoingFrame::new(stream, held);
+            frame.write(b"frame").await.expect("write");
+            frame.held().await.expect("the peer holds the frame");
+
+            drop(frame);
+
+            // The commit of a frame crosses loopback in well under a millisecond: a second is
+            // thousands of round trips, so a frame that the peer meant to take is in by then.
+            time::sleep(Duration::from_secs(1)).await;
+            assert!(
+                frames.try_recv().is_err(),
+                "the peer took a frame that the sender dropped before the commit"
+            );
+            router.shutdown().await.expect("shutdown");
+            client.close().await;
+        });
+    }
+
+    /// **The busy mark lasts until the peer has acknowledged the frame.** `finish()` returns while
+    /// the frame is still in flight, so a mark that ended there left a connection with a slow reader
+    /// open to eviction, with its frame in the air. The send holds the mark until the peer took the
+    /// frame, and the send ends then.
+    #[test]
+    fn a_send_keeps_its_connection_busy_until_the_peer_has_acknowledged_the_frame() {
         ::habilis_network_test_tracing::run_multi_thread(
             ::habilis_network_test_tracing::init(),
             2,
@@ -1809,12 +2398,16 @@ mod tests {
                         &self,
                         connection: endpoint::Connection,
                     ) -> Result<(), AcceptError> {
-                        let mut stream = connection
-                            .accept_uni()
+                        let (acknowledgement, stream) = connection
+                            .accept_bi()
                             .await
                             .map_err(AcceptError::from_err)?;
                         time::sleep(Duration::from_millis(800)).await;
-                        let _ = stream.read_to_end(1 << 20).await;
+                        let _ = super::super::unicast_acceptor::receive_for_test(
+                            acknowledgement,
+                            stream,
+                        )
+                        .await;
                         connection.closed().await;
                         Ok(())
                     }
@@ -1840,23 +2433,31 @@ mod tests {
                 let pool = super::UnicastPool::new(node.clone(), true);
                 pool.set_admission(admission.clone());
 
-                pool.dial_and_send(server.id(), bytes::Bytes::from(vec![7u8; 3000]))
-                    .await
-                    .expect("the send");
-                assert!(
-                    admission.is_busy(server.id()),
-                    "the frame is in flight: the peer has not read it"
-                );
-
-                let mut idle = false;
-                for _ in 0..60 {
-                    if !admission.is_busy(server.id()) {
-                        idle = true;
-                        break;
-                    }
+                let sending = {
+                    let pool = pool.clone();
+                    let id = server.id();
+                    task::spawn(async move {
+                        pool.dial_and_send(id, bytes::Bytes::from(vec![7u8; 3000]))
+                            .await
+                    })
+                };
+                let mut busy = false;
+                for _ in 0..8 {
+                    busy |= admission.is_busy(server.id());
                     time::sleep(Duration::from_millis(50)).await;
                 }
-                assert!(idle, "the mark ends once the peer has read the frame");
+                assert!(
+                    busy,
+                    "the frame is in flight: the peer has not read it, so it has not acknowledged it"
+                );
+                sending
+                    .await
+                    .expect("the send task")
+                    .expect("the peer acknowledged the frame");
+                assert!(
+                    !admission.is_busy(server.id()),
+                    "the mark ends with the acknowledgement"
+                );
 
                 router.shutdown().await.expect("shutdown");
                 node.close().await;

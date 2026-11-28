@@ -1,3 +1,4 @@
+use super::endpoint_role::EndpointRole;
 use super::transport_opts::TransportOpts;
 
 use crate::transport;
@@ -39,7 +40,7 @@ use crate::transport;
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct TransportHandles {
-    /// Source-routed multi-hop: reach a peer with no direct path by relaying
+    /// Hop-by-hop multi-hop: reach a peer with no direct path by relaying
     /// through intermediate peers. Built with the `multihop` feature; the native
     /// underlay builder, `build_peer_multihop_with`, is host-only.
     #[cfg(feature = "multihop")]
@@ -55,22 +56,9 @@ pub struct TransportHandles {
     /// endpoint reports every connection to it, so that it can drop the ones
     /// that are gone.
     pub admission: Option<transport::SignalAdmission>,
-    /// The endpoint is a multi-hop underlay, an internal forwarding endpoint
-    /// and not a peer or a beacon. Changes only the role a log line names.
-    pub underlay: bool,
+    /// What the endpoint is for. Set by the code that builds the endpoint, and by nothing else.
+    pub role: EndpointRole,
     /// Which transports this instance may carry data on. Lives here rather than
     /// as another positional argument for the same reason the handles do.
     pub options: TransportOpts,
-}
-
-impl TransportHandles {
-    /// True when no custom transport is registered.
-    #[must_use]
-    pub(super) fn is_empty(&self) -> bool {
-        #[cfg(feature = "multihop")]
-        if self.multihop.is_some() {
-            return false;
-        }
-        self.webrtc.is_none() && self.gossip.is_none()
-    }
 }

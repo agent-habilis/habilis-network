@@ -409,14 +409,6 @@ pub struct Tuning {
     pub directory_expiry: Duration,
     /// Whether a directory advertiser keeps its mesh unlisted.
     pub directory_private: bool,
-    /// How soon the first rival check runs after a probed claim.
-    pub rival_recheck_first: Duration,
-    /// How often a lone public beacon holder rechecks for a rival.
-    pub rival_recheck: Duration,
-    /// How often a meshed public beacon holder rechecks for a rival.
-    pub rival_recheck_meshed: Duration,
-    /// The cap of the ramping recheck interval of a beacon holder with no peers (a topic peer that stays alone).
-    pub rival_recheck_alone: Duration,
     /// How often a node revisits the rendezvous to meet split islands.
     pub rendezvous_periodic_return: Duration,
     /// Whether a topic mesh looks up peers over mDNS only.
@@ -442,27 +434,6 @@ impl Tuning {
     #[must_use]
     pub fn backfill_interval(mut self, backfill_interval: Duration) -> Self {
         self.backfill_interval = backfill_interval;
-        self
-    }
-
-    /// Set how long the first rival recheck waits.
-    #[must_use]
-    pub fn rival_recheck_first(mut self, rival_recheck_first: Duration) -> Self {
-        self.rival_recheck_first = rival_recheck_first;
-        self
-    }
-
-    /// Set how long each rival recheck waits.
-    #[must_use]
-    pub fn rival_recheck(mut self, rival_recheck: Duration) -> Self {
-        self.rival_recheck = rival_recheck;
-        self
-    }
-
-    /// Set how long each rival recheck waits once meshed.
-    #[must_use]
-    pub fn rival_recheck_meshed(mut self, rival_recheck_meshed: Duration) -> Self {
-        self.rival_recheck_meshed = rival_recheck_meshed;
         self
     }
 
@@ -542,13 +513,6 @@ impl Tuning {
         self.rendezvous_periodic_return = rendezvous_periodic_return;
         self
     }
-
-    /// Set the rival recheck interval for a lone member.
-    #[must_use]
-    pub fn rival_recheck_alone(mut self, rival_recheck_alone: Duration) -> Self {
-        self.rival_recheck_alone = rival_recheck_alone;
-        self
-    }
 }
 
 impl Tuning {
@@ -566,10 +530,6 @@ impl Tuning {
         advertise_interval: ADVERTISE_INTERVAL,
         directory_expiry: DIRECTORY_EXPIRY,
         directory_private: false,
-        rival_recheck_first: RIVAL_RECHECK_FIRST,
-        rival_recheck: RIVAL_RECHECK,
-        rival_recheck_meshed: RIVAL_RECHECK_MESHED,
-        rival_recheck_alone: RIVAL_RECHECK_ALONE,
         rendezvous_periodic_return: RENDEZVOUS_PERIODIC_RETURN,
         topic_mdns_only: false,
         peerinfo_refresh_min: PEERINFO_REFRESH_MIN,
@@ -956,106 +916,6 @@ pub fn directory_expiry() -> Duration {
     current().directory_expiry
 }
 
-/// First shed of an `EagerProbed` public beacon after a probed claim — see
-/// [`RIVAL_RECHECK_FIRST`] for the rationale.
-/// Hidden flag `--rival-recheck-first-secs` (tests converge in seconds).
-/// Clamped to `>= 1 s`.
-pub const RIVAL_RECHECK_FIRST: Duration = Duration::from_secs(12);
-
-/// The live value, after any CLI override of [`RIVAL_RECHECK_FIRST`].
-///
-/// # Examples
-///
-/// The first rival recheck is always positive.
-///
-/// ```
-/// use habilis_network_util::tuning::rival_recheck_first;
-/// use std::time::Duration;
-///
-/// assert!(rival_recheck_first() > Duration::ZERO);
-/// ```
-#[must_use]
-pub fn rival_recheck_first() -> Duration {
-    current().rival_recheck_first.max(Duration::from_secs(1))
-}
-
-/// Steady shed cadence for a lone `EagerProbed` public beacon holder —
-/// see [`RIVAL_RECHECK`]. Hidden flag
-/// `--rival-recheck-secs`. Clamped to `>= 1 s`.
-pub const RIVAL_RECHECK: Duration = Duration::from_secs(30);
-
-/// The live value, after any CLI override of [`RIVAL_RECHECK`].
-///
-/// # Examples
-///
-/// The rival recheck is always positive.
-///
-/// ```
-/// use habilis_network_util::tuning::rival_recheck;
-/// use std::time::Duration;
-///
-/// assert!(rival_recheck() > Duration::ZERO);
-/// ```
-#[must_use]
-pub fn rival_recheck() -> Duration {
-    current().rival_recheck.max(Duration::from_secs(1))
-}
-
-/// Steady shed cadence while meshed (island-vs-island backstop) — see
-/// [`RIVAL_RECHECK_MESHED`]. Hidden flag
-/// `--rival-recheck-meshed-secs`. Clamped to `>= 1 s`.
-pub const RIVAL_RECHECK_MESHED: Duration = Duration::from_mins(5);
-
-/// The live value, after any CLI override of [`RIVAL_RECHECK_MESHED`].
-///
-/// # Examples
-///
-/// The meshed rival recheck is always positive.
-///
-/// ```
-/// use habilis_network_util::tuning::rival_recheck_meshed;
-/// use std::time::Duration;
-///
-/// assert!(rival_recheck_meshed() > Duration::ZERO);
-/// ```
-#[must_use]
-pub fn rival_recheck_meshed() -> Duration {
-    current().rival_recheck_meshed.max(Duration::from_secs(1))
-}
-
-/// Shed cadence ceiling for a holder with an **empty roster** — the tier
-/// `daemon::cohost_arm::next_recheck_delay` picks when `roster == 0`.
-///
-/// [`RIVAL_RECHECK_MESHED`] is priced for two multi-member islands, and
-/// the geometric ramp caps there for every small roster. A node that knows no
-/// peer at all has nothing to reconcile: the brisk early rounds still run,
-/// and they are what repairs a double-claim, but once a run of probes has
-/// found no rival the only thing a 300s cap buys is a public-endpoint rebind
-/// every ~7 minutes, forever. Measured on a permanently-alone topic peer:
-/// ~138 rebinds/hour before the ramp existed, ~8/hour with the 300s cap, and
-/// the rebind is the suspected road into a `recvmsg` spin. At 3600 the ramp
-/// converges to a ~1.5h mean interval.
-///
-/// Hidden flag `--rival-recheck-alone-secs`. Clamped to `>= 1 s`.
-pub const RIVAL_RECHECK_ALONE: Duration = Duration::from_hours(1);
-
-/// The live value, after any CLI override of [`RIVAL_RECHECK_ALONE`].
-///
-/// # Examples
-///
-/// The alone rival recheck is always positive.
-///
-/// ```
-/// use habilis_network_util::tuning::rival_recheck_alone;
-/// use std::time::Duration;
-///
-/// assert!(rival_recheck_alone() > Duration::ZERO);
-/// ```
-#[must_use]
-pub fn rival_recheck_alone() -> Duration {
-    current().rival_recheck_alone.max(Duration::from_secs(1))
-}
-
 /// Topic meshes are the public preset; the `--topic-mdns-only` flag narrows
 /// their lookups to mDNS (no DHT, no relay). **Test-only** (hidden flag): the
 /// beacon-claim race is otherwise unreachable in CI (no public relay), same
@@ -1203,33 +1063,30 @@ pub const SETUP_RUNG_READ: Duration = Duration::from_millis(250);
 /// as "usually 3 seconds". 4s clears that with headroom.
 pub const RENDEZVOUS_CLOSE: Duration = Duration::from_secs(4);
 
-/// How long `Node::leave` waits for the event loop to wind down before it
-/// detaches it: the 500ms `Left` propagation sleep, then the endpoint closes,
-/// which run concurrently and so cost one [`RENDEZVOUS_CLOSE`], plus
-/// headroom. A shorter budget let `serve` return and drop the runtime while a
-/// close was still in flight, which aborts that close.
-pub const NODE_LEAVE: Duration = RENDEZVOUS_CLOSE.saturating_add(Duration::from_secs(2));
+/// The wait of the loop after it broadcast `Left`, so that the peers get the frame before the
+/// endpoints close. Part of [`NODE_LEAVE`].
+pub const LEFT_PROPAGATION: Duration = Duration::from_millis(500);
 
-/// Roster size (known live members) at or below which a *meshed* holder uses
-/// the brisk lone cadence ([`RIVAL_RECHECK`]) instead of the slow
-/// [`RIVAL_RECHECK_MESHED`] backstop.
+/// How long `Node::leave` waits for the event loop to end: the whole of `Loop::finish` and the
+/// `Left` propagation before it, plus headroom. A node that is not closed in this time is an
+/// error, and the loop task is aborted: the node is not closed, and `leave` never says `Ok` for
+/// it.
 ///
-/// The slow cadence is priced for the case it was written for: two
-/// **multi-member** islands, where a shed's beacon blip costs a healthy gossip
-/// something and the split is rare. A two-tab mesh left behind by a departed
-/// origin is neither — the split is the routine outcome of that departure, and
-/// a shed there disturbs almost nobody. So the tier is chosen by how much a
-/// shed actually costs, which is roster size, not by the meshed flag alone.
-///
-/// A pure const with no flag, like [`RIVAL_RECHECK_OFFSET_SPAN`]: it
-/// picks between two cadences that already have their own knobs.
-pub const RIVAL_RECHECK_SMALL_ROSTER: usize = 4;
+/// The sum has 3 close budgets, not 1. `Loop::finish` awaits 3 steps in series, and each is
+/// bounded by [`RENDEZVOUS_CLOSE`]: the release of the rendezvous (its closes run concurrently,
+/// so the step costs one budget), the close of a beacon that the node shed before the quit, and
+/// the closes of the probers (spawned together, so they cost one budget). A shorter limit let
+/// `leave` return `Ok` while a close was still in flight, and the runtime that dropped next
+/// aborted the close: iroh logs `Endpoint dropped without calling Endpoint::close`. The CLI
+/// confirm wait is derived from this value.
+pub const NODE_LEAVE: Duration = LEFT_PROPAGATION
+    .saturating_add(RENDEZVOUS_CLOSE.saturating_mul(3))
+    .saturating_add(Duration::from_secs(2));
 
-/// Span of the deterministic per-node phase offset added to the first shed,
-/// derived from the peer endpoint id. Orders simultaneous claimants so
-/// the earlier-offset node sheds first, finds the other's still-held beacon,
-/// and yields — a tie-break, not a delay knob, so no flag.
-pub const RIVAL_RECHECK_OFFSET_SPAN: Duration = Duration::from_secs(8);
+const _: () = assert!(
+    NODE_LEAVE.as_millis() >= LEFT_PROPAGATION.as_millis() + 3 * RENDEZVOUS_CLOSE.as_millis(),
+    "NODE_LEAVE must cover the Left propagation and the 3 serial close budgets of Loop::finish"
+);
 
 /// `HyParView` **active view** capacity (G): the number of direct gossip
 /// neighbors (open QUIC links) each member keeps per topic. A mesh of G + 1
@@ -1242,11 +1099,23 @@ pub const RIVAL_RECHECK_OFFSET_SPAN: Duration = Duration::from_secs(8);
 /// D from a memory budget" in `docs/perf/direct-peer-memory.md`. It was 64,
 /// which kept meshes of up to 65 free of churn at 50 to 100 MB per node, and then 32. G is a
 /// count bound only: `HyParView` still accepts a high-priority join at a full
-/// view and drops a random member. This is the default for the public
-/// `--max-connections` cap, and `0` asks for it. The passive (healing/shuffle) pool is
-/// derived as 2x the live view. Set `--max-connections` *small* to deliberately
-/// reproduce the gossip-churn leak at any node count.
+/// view and drops a random member. A caller that does not name a cap gets this
+/// default. A cap below [`MIN_MAX_CONNECTIONS`] is an error.
+/// The passive (healing/shuffle) pool is derived as 2x the live view.
 pub const MAX_CONNECTIONS: usize = 16;
+
+/// The lowest cap on direct connections that the engine accepts. A lower number, `0` too, is an
+/// error at setup, and the engine does not raise it.
+///
+/// The rule that lets a member leave the rendezvous needs [`RENDEZVOUS_RELEASE_LINKS`] member
+/// links, so a node with a smaller view never leaves it. On real hosts, a cap of 2 left one end
+/// with a link that the other end did not hold, for 60 s or more. The cause is not known.
+pub const MIN_MAX_CONNECTIONS: usize = 8;
+
+const _: () = assert!(
+    MIN_MAX_CONNECTIONS <= MAX_CONNECTIONS && MIN_MAX_CONNECTIONS > RENDEZVOUS_RELEASE_LINKS,
+    "the minimum cap is at most the default and above the release count of the rendezvous"
+);
 
 /// How often the direct-peer slot table drops the connections that are gone and
 /// the peers that nothing holds. One timer per admission table, not one task
@@ -1328,6 +1197,14 @@ pub const QUIC_CONNECTION_RECEIVE_WINDOW: u32 = 16 * 1024 * 1024;
 
 /// How many bytes a node sends to a peer before the peer acknowledges them (decision D11): 16 `MiB`.
 pub const QUIC_SEND_WINDOW: u64 = 16 * 1024 * 1024;
+
+/// How long a path of a QUIC connection can carry nothing from the peer before the transport
+/// abandons it. It is the time that the transport needs to leave a path that died with no signal,
+/// and it is the largest value that iroh takes: iroh clamps a larger one to 15 s. Two things read
+/// it. The endpoint passes it to iroh, and the wait of a send for its peer (`SEND_ANSWER_TIMEOUT`
+/// of the pool) is not shorter than it, so a send that starts while its path dies is delivered when
+/// the transport moves to another path, and is not given up as a failure of the peer.
+pub const QUIC_PATH_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long after a `Neighbor` request a node reads "no link came up" as a refusal: the longer of
 /// the relink cooldown (10 s) and the probe deadline (15 s), plus 5 s. A link that comes up later

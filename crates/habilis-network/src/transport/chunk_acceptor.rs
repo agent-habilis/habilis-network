@@ -89,17 +89,31 @@ pub(crate) struct ChunkAcceptor {
     deadline: Duration,
     /// How long an accepted connection can carry no new stream before it is closed.
     idle: Duration,
+    /// The table of the node: the gate reads the other connections of the remote from it.
+    admission: super::SignalAdmission,
 }
 
 impl ChunkAcceptor {
-    pub(crate) fn new(tx: mpsc::Sender<ChunkAsk>, relay_transport: PayloadPath) -> Self {
+    /// An acceptor of a peer, with the table of its node.
+    pub(crate) fn new(
+        tx: mpsc::Sender<ChunkAsk>,
+        relay_transport: PayloadPath,
+        admission: super::SignalAdmission,
+    ) -> Self {
         Self {
             tx,
             relay_transport,
             streams: OpenStreams::default(),
             deadline: CHUNK_STREAM_TIMEOUT,
             idle: DIRECT_IDLE_BACKSTOP,
+            admission,
         }
+    }
+
+    /// [`Self::new`] with a table of its own, for a test.
+    #[cfg(test)]
+    pub(crate) fn for_test(tx: mpsc::Sender<ChunkAsk>, relay_transport: PayloadPath) -> Self {
+        Self::new(tx, relay_transport, super::SignalAdmission::new(8))
     }
 
     /// The answer to the request on `recv`. The request is read up to its cap, handed to the loop, and the loop
@@ -147,14 +161,16 @@ impl ChunkAcceptor {
 impl ProtocolHandler for ChunkAcceptor {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         // The sender checks its own selected path, but an old build or a hostile peer may not.
-        if !payload_path::refuse_unless_direct(
+        if !payload_path::refuse_unless_direct_in(
             &connection,
             self.relay_transport,
             payload_path::PROBE_DEADLINE,
             UNICAST_RELAY_REFUSED,
+            &payload_path::PathGate::Table(self.admission.clone()),
         )
         .await
         {
+            payload_path::log_accept_refused("chunk", None, &connection);
             return Ok(());
         }
         let peer = connection.remote_id();
@@ -259,7 +275,7 @@ mod tests {
 
     fn acceptor(capacity: usize, deadline: Duration) -> (ChunkAcceptor, mpsc::Receiver<ChunkAsk>) {
         let (tx, rx) = mpsc::channel(capacity);
-        let mut acceptor = ChunkAcceptor::new(tx, PayloadPath::RelayAllowed);
+        let mut acceptor = ChunkAcceptor::for_test(tx, PayloadPath::RelayAllowed);
         acceptor.deadline = deadline;
         (acceptor, rx)
     }

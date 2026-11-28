@@ -1,7 +1,7 @@
 use iroh::address_lookup::memory;
 use iroh::{Endpoint, EndpointId};
 
-use super::{Held, Rendezvous, RendezvousParams, RungWatch, claim};
+use super::{Miss, Rendezvous, RendezvousParams, RungWatch, claim};
 
 /// Two holders of one beacon: this node and a rival that it has read. One struct for the pair,
 /// because both are an `EndpointId` and a swap compiles and flips the answer.
@@ -30,17 +30,13 @@ pub(crate) async fn claim_after_probe(
     peer: &Endpoint,
     peer_book: &memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
-    found_rival: bool,
     rungs: &mut RungWatch,
-) -> bool {
-    if found_rival {
-        tracing::debug!(target: "habilis_network::beacon", node = %peer.id().fmt_short(), "public rendezvous already served by a beacon; staying peer");
-        return false;
-    }
+) -> Result<(), Miss> {
     if !releasable(current) {
-        return false;
+        return Err(Miss::SlotTaken);
     }
-    claim::claim_holder(params, peer, peer_book, current, rungs).await == Held::Claimed
+    let held = claim::claim_holder(params, peer, peer_book, current, rungs).await;
+    Miss::of(held).map_or(Ok(()), Err)
 }
 
 /// Whether the beacon slot is free to (re)claim: empty, or holding a

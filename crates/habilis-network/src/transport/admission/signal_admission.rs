@@ -88,6 +88,7 @@ impl SignalAdmission {
                 we_evicted: ceiling::EvictionBackoff::default(),
                 denied: HashSet::new(),
                 proven_sink: None,
+                relay_refused_sink: None,
                 path_sink: None,
                 gossip: None,
                 closed_on_rung: HashMap::new(),
@@ -496,6 +497,7 @@ impl SignalAdmission {
         } else {
             inner.ceiling.register_inbound(peer, Instant::now())
         };
+        inner.sync_pin(peer, "inbound connection");
         let victims = inner.take_victims(&evictions, "a connection");
         if !inner.sampler_running {
             inner.sampler_running = true;
@@ -506,6 +508,33 @@ impl SignalAdmission {
             self.watch_for_eviction(connection.clone());
         }
         victims.end();
+    }
+
+    /// The paths of each open connection of `peer` but the one with `except` as its stable id, for
+    /// the gate of an acceptor. The paths are read after the table is let go.
+    pub(crate) fn facts_of_other_connections(
+        &self,
+        peer: EndpointId,
+        except: usize,
+    ) -> Vec<Vec<transport::payload_path::PathFact>> {
+        let connections: Vec<Connection> = {
+            let inner = self.lock();
+            inner.slots.get(&peer).map_or_else(Vec::new, |slot| {
+                slot.conns
+                    .iter()
+                    .filter_map(WeakConnectionHandle::upgrade)
+                    .collect()
+            })
+        };
+        let open: Vec<&Connection> = connections
+            .iter()
+            .filter(|connection| {
+                connection.close_reason().is_none() && connection.stable_id() != except
+            })
+            .collect();
+        open.into_iter()
+            .map(transport::payload_path::PathFact::of)
+            .collect()
     }
 
     /// Whether `peer` is pinned to multihop: a dial planned it, or its pinned connection is open.
@@ -531,6 +560,23 @@ impl SignalAdmission {
         self.lock().ceiling.set_rendezvous(peer);
     }
 
+    /// The endpoint that this table serves, once `set_local` named it.
+    pub(crate) fn local(&self) -> Option<EndpointId> {
+        self.lock().local
+    }
+
+    /// The short ids of the peers that hold a connection or a session, for a debug line.
+    pub(crate) fn holders(&self) -> String {
+        let inner = self.lock();
+        let quic: Vec<EndpointId> = inner.ceiling.quic_peers();
+        let session: Vec<EndpointId> = inner.ceiling.session_peers();
+        format!(
+            "quic=[{}] session=[{}]",
+            short_list(&quic),
+            short_list(&session)
+        )
+    }
+
     /// The endpoint that this table serves. The pin of a peer reaches its path selector.
     pub(crate) fn set_local(&self, local: EndpointId) {
         self.lock().local = Some(local);
@@ -542,7 +588,7 @@ impl SignalAdmission {
     pub(crate) fn plan_dial(&self, peer: EndpointId, route: bool) -> ceiling::DialPlan {
         let mut inner = self.lock();
         let plan = inner.ceiling.plan_dial(peer, route);
-        inner.sync_pin(peer);
+        inner.sync_pin(peer, "plan_dial");
         plan
     }
 
@@ -562,7 +608,7 @@ impl SignalAdmission {
     pub(crate) fn release_dial(&self, peer: EndpointId) {
         let mut inner = self.lock();
         inner.ceiling.release_dial(peer);
-        inner.sync_pin(peer);
+        inner.sync_pin(peer, "release_dial");
     }
 
     /// When `conn` closes, whatever the reason, the peer leaves the ledger unless it holds another
@@ -575,6 +621,9 @@ impl SignalAdmission {
             let peer = connection.remote_id();
             let mut inner = admission.lock();
             inner.drop_quic_without_connection(peer);
+            // The connection that this peer opened may have been the one that kept the selector
+            // pin off: read the pin again.
+            inner.sync_pin(peer, "connection closed");
             if let ConnectionError::ApplicationClosed(close) = reason
                 && close.error_code.into_inner() == u64::from(webrtc::close_code::EVICTED)
             {
@@ -647,7 +696,7 @@ impl SignalAdmission {
         let mut inner = self.lock();
         let evictions = inner.ceiling.set_neighbors(neighbors, Instant::now());
         for peer in neighbors {
-            inner.sync_pin(*peer);
+            inner.sync_pin(*peer, "set_neighbors");
         }
         let victims = inner.take_victims(&evictions, "a gossip neighbor");
         drop(inner);
@@ -680,6 +729,14 @@ impl SignalAdmission {
     /// The event loop's channel for the dialed gossip links that left a direct path.
     pub(crate) fn set_path_sink(&self, sink: mpsc::UnboundedSender<probe::PathChange>) {
         self.lock().path_sink = Some(sink);
+    }
+
+    pub(crate) fn set_relay_refused_sink(&self, sink: mpsc::UnboundedSender<probe::RelayRefused>) {
+        self.lock().relay_refused_sink = Some(sink);
+    }
+
+    pub(crate) fn relay_refused_sink(&self) -> Option<mpsc::UnboundedSender<probe::RelayRefused>> {
+        self.lock().relay_refused_sink.clone()
     }
 
     pub(crate) fn path_sink(&self) -> Option<mpsc::UnboundedSender<probe::PathChange>> {
@@ -742,4 +799,13 @@ impl SignalAdmission {
     pub(crate) fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().expect("signal admission poisoned")
     }
+}
+
+/// The short ids of `peers`, joined by commas.
+fn short_list(peers: &[EndpointId]) -> String {
+    let mut shorts: Vec<String> = Vec::new();
+    for peer in peers {
+        shorts.push(peer.fmt_short().to_string());
+    }
+    shorts.join(",")
 }

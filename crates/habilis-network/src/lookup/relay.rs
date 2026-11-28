@@ -1808,6 +1808,7 @@ mod tests {
             relay_transport: PayloadPath::DirectOnly,
             bootstrap_relay: Some(home.clone()),
             rung_tx: mpsc::unbounded_channel().0,
+            bind_options: TransportOpts::default(),
         }
     }
 
@@ -1904,7 +1905,7 @@ mod tests {
             // What the event loop holds: the beacon, the parameters, and the rung that it applies.
             let mut params = beacon_params(beacon.id(), &second);
             let mut state = testing::fresh_state();
-            let beacon_held = Rendezvous::for_test(beacon.clone(), None);
+            let beacon_held = Rendezvous::for_test(beacon.clone());
             let generation = beacon_held.generation;
             let mut rendezvous = Some(beacon_held);
             let (rung_tx, mut rung_rx): (

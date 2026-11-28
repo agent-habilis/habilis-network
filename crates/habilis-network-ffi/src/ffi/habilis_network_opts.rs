@@ -1,10 +1,12 @@
 use std::ffi::c_char;
 
+use habilis_network::util::tuning;
 use std::ptr;
 /// The mesh selectors, mirroring `habilis_network_opts` in the header. String fields are
-/// NUL-terminated C strings or NULL; `max_connections == 0` takes the engine default (16).
+/// NUL-terminated C strings or NULL. `max_connections` below 8, `0` too, is an error: a caller
+/// that wants the engine default of 16 sets it, or starts from [`HabilisNetworkOpts::empty`].
 #[repr(C)]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HabilisNetworkOpts {
     /// The mesh id to join, NUL-terminated, or NULL. Set at most one of `mesh` and `topic`.
@@ -28,8 +30,14 @@ pub struct HabilisNetworkOpts {
     pub max_connections: usize,
 }
 
+impl Default for HabilisNetworkOpts {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 impl HabilisNetworkOpts {
-    /// Every pointer NULL and every number zero, which takes the engine defaults.
+    /// Every pointer NULL and the cap at the engine default of 16.
     #[must_use]
     pub fn empty() -> Self {
         Self {
@@ -40,7 +48,7 @@ impl HabilisNetworkOpts {
             lookup: ptr::null(),
             transport: ptr::null(),
             relay_urls: ptr::null(),
-            max_connections: 0,
+            max_connections: tuning::MAX_CONNECTIONS,
         }
     }
 }

@@ -18,6 +18,7 @@ use crate::{daemon, transport};
 use n0_future::{task, time};
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use std::net;
+use std::time::Duration;
 /// Whether a session registers the process-wide ctrl-c and SIGTERM listeners.
 ///
 /// # Examples
@@ -280,8 +281,10 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
     }
 
     /// Ask the loop to broadcast `Left` and wind down, waiting up to
-    /// [`NODE_LEAVE`]. On
-    /// timeout returns `Ok(())` and the task detaches.
+    /// [`NODE_LEAVE`]. `Ok(())` means that the loop ended and the node is closed. When the loop
+    /// does not end in that time, the loop task is aborted and the result is an error that says
+    /// the node was not closed. The abort drops the endpoints open, and iroh logs an ERROR for
+    /// that: it is right for a state that must not occur, so do not remove the abort to hide it.
     ///
     /// The loop closes the endpoint that setup bound for this node, with its
     /// router and multi-hop underlay. It does not close an endpoint that the
@@ -292,18 +295,33 @@ impl<Driver: NodeDriver + 'static> Node<Driver> {
     /// Returns an error if the event-loop task panicked or returned an error.
     pub async fn leave(mut self) -> Result<(), transport::SendError> {
         let _ = self.quit_tx.send(()).await;
-        if let Some(task) = self.task.take() {
-            let timeout = time::sleep(NODE_LEAVE);
-            tokio::select! {
-                joined = task => {
-                    joined
-                        .map_err(|error| transport::SendError::internal(anyhow::anyhow!("mesh task panicked: {error}")))?
-                        .map_err(transport::SendError::EventLoop)?;
-                }
-                () = timeout => {}
-            }
+        match self.task.take() {
+            Some(task) => wait_for_loop(task, NODE_LEAVE).await,
+            None => Ok(()),
         }
-        Ok(())
+    }
+}
+
+/// Waits for the event loop task to end, up to `bound`. `Ok` means that the task ended. On the
+/// bound the task is aborted and the error says that the node is not closed.
+async fn wait_for_loop(
+    mut task: JoinHandle<Result<(), super::event_loop::EventLoopError>>,
+    bound: Duration,
+) -> Result<(), transport::SendError> {
+    let timeout = time::sleep(bound);
+    tokio::select! {
+        joined = &mut task => {
+            joined
+                .map_err(|error| transport::SendError::internal(anyhow::anyhow!("mesh task panicked: {error}")))?
+                .map_err(transport::SendError::EventLoop)
+        }
+        () = timeout => {
+            task.abort();
+            Err(transport::SendError::internal(anyhow::anyhow!(
+                "the node was not closed in {:.1} s",
+                bound.as_secs_f64()
+            )))
+        }
     }
 }
 
@@ -313,5 +331,104 @@ impl<Driver: NodeDriver> Drop for Node<Driver> {
         if let Some(task) = self.task.take() {
             task.abort();
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use std::future::{self, Pending};
+    use std::io;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use n0_future::{task, time};
+
+    use super::super::event_loop::EventLoopError;
+    use crate::daemon::node;
+
+    /// Sets the flag when the task that owns it is dropped: the task ended or was aborted.
+    // the flag is shared between the test and the task that it watches
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_leave_that_returns_ok_has_ended_the_loop_task() {
+        // the flag is shared between the test and the task that sets it
+        let ended = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ended);
+        let loop_task = task::spawn(async move {
+            time::sleep(Duration::from_millis(300)).await;
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        let outcome = node::wait_for_loop(loop_task, Duration::from_millis(50)).await;
+        assert!(
+            outcome.is_err() || ended.load(Ordering::SeqCst),
+            "the wait returned Ok while the loop task still ran: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_that_never_ends_gives_an_error_and_is_aborted() {
+        // the flag is shared between the test and the task that owns the guard
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = DropFlag(Arc::clone(&dropped));
+        let loop_task = task::spawn(async move {
+            let _guard = guard;
+            let forever: Pending<()> = future::pending();
+            forever.await;
+            Ok(())
+        });
+        let outcome = node::wait_for_loop(loop_task, Duration::from_millis(50)).await;
+        time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            outcome.is_err(),
+            "the bound passed: the wait must say that the node is not closed, not Ok"
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the loop task still runs after the bound: it must be aborted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_that_ends_in_time_gives_ok_after_it_ended() {
+        // the flag is shared between the test and the task that sets it
+        let ended = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ended);
+        let loop_task = task::spawn(async move {
+            time::sleep(Duration::from_millis(100)).await;
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        let outcome = node::wait_for_loop(loop_task, Duration::from_secs(5)).await;
+        assert!(
+            outcome.is_ok(),
+            "a loop that ended in time is a clean leave: {outcome:?}"
+        );
+        assert!(
+            ended.load(Ordering::SeqCst),
+            "Ok came before the loop task ended: the wait returned early"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_loop_error_comes_back_to_the_caller() {
+        let loop_task = task::spawn(async {
+            Err(EventLoopError::Internal(Box::new(io::Error::other(
+                "the loop failed",
+            ))))
+        });
+        let outcome = node::wait_for_loop(loop_task, Duration::from_secs(5)).await;
+        assert!(
+            outcome.is_err(),
+            "the error of the loop must reach the caller"
+        );
     }
 }

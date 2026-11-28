@@ -172,8 +172,8 @@ pub(crate) enum Held {
 /// spawned co-host task.
 ///
 /// Returns what the call left behind: [`Held::Claimed`] is a **new**
-/// rendezvous (a `None`/dead → live transition), the edge the event loop's
-/// rival re-check scheduling keys on. Starting a probe is not that edge.
+/// rendezvous (a `None`/dead → live transition), the edge that arms the ask of the holder
+/// (`arm_holder_probe`). Starting a probe is not that edge.
 pub(crate) async fn walk_ladder(
     params: &RendezvousParams,
     peer: &Endpoint,

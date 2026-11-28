@@ -82,17 +82,21 @@ pub(crate) fn install_transports(
 /// The memory windows of a QUIC connection, on every endpoint of the engine, the multihop underlay
 /// and the blob endpoint included (decision D11). They are generous on purpose: the count of direct
 /// connections is the real limit, and these only keep one connection from growing without bound.
-/// Keep-alive, idle timeout, multipath, stream counts and datagrams stay at the iroh defaults.
+/// The idle timeout of a path is set to the constant that the wait of a send reads. Keep-alive, the
+/// idle timeout of the connection, multipath, stream counts and datagrams stay at the iroh defaults.
 pub(crate) fn quic_limits() -> endpoint::QuicTransportConfig {
     use crate::util::tuning::{
-        QUIC_CONNECTION_RECEIVE_WINDOW, QUIC_SEND_WINDOW, QUIC_STREAM_RECEIVE_WINDOW,
+        QUIC_CONNECTION_RECEIVE_WINDOW, QUIC_PATH_IDLE_TIMEOUT, QUIC_SEND_WINDOW,
+        QUIC_STREAM_RECEIVE_WINDOW,
     };
     use iroh::endpoint::{QuicTransportConfig, VarInt};
 
-    QuicTransportConfig::builder()
+    let windows = QuicTransportConfig::builder()
         .stream_receive_window(VarInt::from_u32(QUIC_STREAM_RECEIVE_WINDOW))
         .receive_window(VarInt::from_u32(QUIC_CONNECTION_RECEIVE_WINDOW))
-        .send_window(QUIC_SEND_WINDOW)
+        .send_window(QUIC_SEND_WINDOW);
+    windows
+        .default_path_max_idle_timeout(QUIC_PATH_IDLE_TIMEOUT)
         .build()
 }
 

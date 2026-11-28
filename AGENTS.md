@@ -102,6 +102,8 @@ Layer: identity. Keyed by public key.
 
 The Ed25519 key that a process makes when it creates or joins a mesh. The public key is the identity of an author. The nickname is a display label and no claim. Every message is signed with this key, and a receiver verifies it.
 
+The session key is new at each start. The member key is the stable half: the seed in `<state>.key` names it, it is derived with the mesh id so each mesh shows another member key, and a clean leave keeps it for a run that has an owner or a named state file. It signs the proof that a session speaks as a nickname, and the roster shows it as `member` only for a proof that the node verified for that session.
+
 Code: `protocol::identity`, `AuthorKey`.
 
 ### surfaced
@@ -224,6 +226,13 @@ Correctness is imperative. Choose the correct design, whatever the size of the r
 Do not keep a workaround, a heuristic, or a smaller change when it hides a wrong model.
 If the correct fix is large, split it into small steps. Each step compiles and passes the tests.
 
+## Simplicity
+
+Make the code as simple as possible. Remove cyclomatic complexity: each branch, flag, and special case must earn its place.
+The fewer special cases, the better. If two designs are correct, choose the one with fewer branches and fewer special cases.
+If a fix can remove a special case or add one, remove one. If a fix must add a special case, say why in the commit message and in the PR.
+Model a state as one value (an enum), not as several booleans, so that a state with no meaning cannot exist.
+
 ## Compatibility
 
 Until version 1.0, we do not care about backward compatibility. Before 1.0, break compatibility when it gives a better design, better performance, or better reliability. Do not keep a shim, an alias, or a fallback only for old versions.
@@ -317,7 +326,7 @@ Issue #29 records each decision.
 
 ### Remaining `#[expect]` attributes
 
-Seventeen `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (the C ABI of the ffi crate and its test, libc calls that have no safe wrapper, and a test hook between a fork and its exec), one that suppresses `deprecated`, six that suppress a `clippy` lint, and one that suppresses `dead_code`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
+Nineteen `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (the C ABI of the ffi crate and its test, libc calls that have no safe wrapper, and a test hook between a fork and its exec), one that suppresses `deprecated`, eight that suppress a `clippy` lint, and one that suppresses `dead_code`. Each one names the lint it suppresses and the reason it cannot go. A new `#[expect]` needs a row here. The iroh trait impls that do no async work return a ready future, so they need no `clippy::unused_async_trait_impl` expect.
 
 | File | Lint | Reason |
 | --- | --- | --- |
@@ -331,8 +340,10 @@ Seventeen `#[expect(...)]` attributes stay: nine that suppress `unsafe_code` (th
 | `habilis-network/src/daemon/state/event_loop_state.rs` (constructor `EventLoopState::new`) | `clippy::too_many_lines` | the proof and the member-key lock are four fields over the limit; the constructor is split later |
 | `habilis-network-ffi/src/ffi.rs` (crate) | `unsafe_code` | this module is the C ABI: raw pointers from the foreign caller, and a boxed handle it owns |
 | `habilis-network-ffi/tests/ffi_smoke.rs` (crate) | `unsafe_code` | the surface under test is `unsafe extern "C"`; calling it is the test |
-| `habilis-network/src/daemon/setup.rs` (`hold_member_key`) | `clippy::unused_async` | the same signature as the version for a target with files |
-| `habilis-network/src/daemon/setup.rs` (`hold_member_key_once`) | `clippy::unnecessary_wraps` | the same signature as the version for a target with files |
+| `habilis-network/src/daemon/setup.rs` (`hold_member_key`) | `clippy::unnecessary_wraps` | the same signature as the version for a target with files |
+| `habilis-network-util/src/process_start.rs` (`ProcessStart`) | `clippy::exhaustive_enums` | a caller matches every state, so a new state breaks the build of the caller and never passes in a wildcard arm (user rule: one enum for a state) |
+| `habilis-network/src/daemon/registry/daemon_state.rs` (`DaemonState`) | `clippy::exhaustive_enums` | the same reason as `ProcessStart` |
+| `habilis-network/src/transport/send/send_verdict.rs` (`SendVerdict`) | `clippy::exhaustive_enums` | the same reason as `ProcessStart`: a caller of a directed send matches the three verdicts, so a send that is not confirmed is never printed as a failure |
 | `habilis-network/src/daemon/setup.rs` (test `a_restart_waits_out_a_child_that_holds_a_copy_of_the_lock_until_its_exec`) | `unsafe_code` | `CommandExt::pre_exec`: only a hook between the fork and the exec keeps a child in the gap where it holds a copy of the lock file |
 | `habilis-network/src/daemon/setup.rs` (`next_run`) | `clippy::unnecessary_wraps` | the same signature as the file-backed version, so the caller is one call |
 | `habilis-network/src/daemon/setup.rs` (`member_key`) | `clippy::unnecessary_wraps` | the same signature as the version for a target with files |

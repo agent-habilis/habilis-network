@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -12,25 +12,47 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 use crate::app_id::{AppId, UnderlayId};
-use crate::cell::Cell;
-use crate::route::{Route, RouteHop};
+use crate::cell::{Cell, MAX_CELL_HOPS};
+use crate::destination::Destination;
+use crate::next_hop::NextHop;
+use crate::next_hop_cache::{CacheKey, NextHopCache};
 use crate::topology::Topology;
 
 use super::delivered::Delivered;
 use super::{
-    FORWARD_QUEUE_BYTES, HEARD_HOPS_CAP, HeardHops, LOG_TARGET, MAX_WRITERS, RelayRule,
-    UNRESOLVED_SEEN_CAP, WRITER_QUEUE, WriterPool, path_list, paths_of, writer_task,
+    Charged, LOG_TARGET, MAX_WRITERS, RelayRule, WRITER_QUEUE, WriterPool, path_list, paths_of,
+    writer_task,
 };
 
 #[cfg(target_arch = "wasm32")]
 use n0_future::task;
 use tokio::sync;
-/// Routes cells outbound to next hops and delivers terminal cells locally.
+
+/// Why a cell that starts at this node could not leave it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotSent {
+    /// The destination is this node: a packet to ourselves needs no transport.
+    ToSelf,
+    /// No neighbor of this node can reach the destination now.
+    NoNextHop,
+}
+
+impl NotSent {
+    /// The words of the error that the transport gives to iroh.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::ToSelf => "multihop destination is this node",
+            Self::NoNextHop => "multihop has no next hop to the destination",
+        }
+    }
+}
+
+/// Picks the next hop of each cell from the table of this node, sends cells outbound to the next hops, and
+/// delivers terminal cells locally.
 #[derive(Debug)]
 pub(crate) struct Forwarder {
     pub(super) underlay: Endpoint,
-    /// This node's application-layer id, the other half of the identity a cell's
-    /// current hop must name.
+    /// This node's application-layer id: the destination that a cell must name to end here.
     pub(super) self_app_id: AppId,
     /// The runtime that spawns the writers. `enqueue` runs inside `poll_send`, which
     /// iroh calls from the socket's send path (`Transports::poll_send` in iroh's
@@ -49,20 +71,19 @@ pub(crate) struct Forwarder {
     pub(super) forwarded: AtomicU64,
     /// Cells that ended here and went into the inbox of the local transport.
     pub(super) delivered: AtomicU64,
+    /// Cells dropped because the best next hop is the hop that they came from.
+    pub(super) turned_back: AtomicU64,
+    /// Cells dropped because no neighbor of this node can reach their destination now.
+    pub(super) no_next_hop: AtomicU64,
+    /// Cells dropped because they had no forward left, or claimed more than the limit.
+    pub(super) hop_limit: AtomicU64,
     /// What the relay may do for cells.
     pub(super) rule: RelayRule,
-    /// Where the dial address of a next hop comes from: a route names a hop by two ids,
-    /// and the address is the one that the hop signed in its link vector.
+    /// The vectors that this node holds: the table that each next hop and each dial address come from.
+    // shared with the handle, which updates the vectors
     pub(super) topology: Arc<RwLock<Topology>>,
-    /// Hops that a writer was spawned for with no vector in the topology: a hop without a vector.
-    pub(super) unresolved_hops: AtomicU64,
-    /// The hops that got a log line, and whether it was a warning: see [`UNRESOLVED_SEEN_CAP`].
-    pub(super) unresolved_seen: Mutex<HashMap<UnderlayId, bool>>,
-    /// The hops that a cell arrived from, whether this node delivered or forwarded the cell: the
-    /// connection proves each of them. A reply goes back along the route of a cell reversed, so
-    /// the first hop of a reply to a delivered cell, and the origin of a reply that this node
-    /// relays, can lack a vector for a normal reason: see [`HEARD_HOPS_CAP`].
-    pub(super) heard_hops: Mutex<HeardHops>,
+    /// The next hop of each destination, kept while the topology and the set of refused hops do not change.
+    next_hops: Mutex<NextHopCache>,
 }
 
 impl Forwarder {
@@ -86,146 +107,73 @@ impl Forwarder {
             dropped: AtomicU64::new(0),
             forwarded: AtomicU64::new(0),
             delivered: AtomicU64::new(0),
+            turned_back: AtomicU64::new(0),
+            no_next_hop: AtomicU64::new(0),
+            hop_limit: AtomicU64::new(0),
             rule: RelayRule {
                 allow_relay,
                 stuck_after,
             },
             topology,
-            unresolved_hops: AtomicU64::new(0),
-            unresolved_seen: Mutex::new(HashMap::new()),
-            heard_hops: Mutex::new(HeardHops::default()),
+            next_hops: Mutex::new(NextHopCache::default()),
         }
     }
 
-    /// How many writers were spawned for a hop without a vector in the topology.
-    #[cfg(test)]
-    pub(crate) fn unresolved_hops(&self) -> u64 {
-        self.unresolved_hops.load(Ordering::Relaxed)
-    }
-
-    /// The address to dial for `hop`: the one that its node signed in its link vector, if the
-    /// vector names the same underlay endpoint as the hop. A hop without a vector is dialed
-    /// by its id alone, never at an address that a cell carries, and counted: it may still be reachable by what iroh
-    /// knows of the id, and if it is not, the cells are lost like any other.
+    /// The next hop of a cell for `dst` that came from `from` (`None` for a cell that starts here), from the
+    /// vectors that this node holds and the hops that its gate refuses now.
     ///
-    /// Logged at debug when the hop is explained. A cell that this node delivered or forwarded
-    /// arrived from it: a reply goes back along the reversed route
-    /// of a cell, and the sender's first link-vector arrives some 15 s after it starts. Or it is a link of this node: the origin of a route
-    /// saw the vector of a new neighbor before this node did, and the link reaches it. Or this
-    /// node held the vector and removed it, because the peer left or the vector expired: the
-    /// cells in flight to the peer still name it, and the origin of the route is behind. Any
-    /// other hop without a vector is a warning.
-    pub(super) fn dial_addr(&self, hop: &RouteHop) -> EndpointAddr {
-        let (known, gone) = {
-            let topology = self.topology.read().expect("topology lock poisoned");
-            let known = topology
-                .underlay_of(hop.app_id)
-                .filter(|address| UnderlayId::new(address.id) == hop.underlay_id);
-            (known, topology.is_gone(hop.app_id))
-        };
-        known.unwrap_or_else(|| {
-            let total = self.unresolved_hops.fetch_add(1, Ordering::Relaxed) + 1;
-            let explained =
-                gone || self.heard_hop(hop.underlay_id) || self.is_link_of_ours(hop.app_id);
-            if self.line_is_due(hop.underlay_id, total, explained) {
-                if gone {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        total,
-                        hop = %hop.underlay_id.fmt_short(),
-                        app_id = %hop.app_id.fmt_short(),
-                        "multihop forwarder: hop whose vector is gone, dialing it by id"
-                    );
-                } else if explained {
-                    tracing::debug!(
-                        target: LOG_TARGET,
-                        total,
-                        hop = %hop.underlay_id.fmt_short(),
-                        app_id = %hop.app_id.fmt_short(),
-                        "multihop forwarder: hop without a vector, dialing it by id"
-                    );
-                } else {
-                    tracing::warn!(
-                        target: LOG_TARGET,
-                        total,
-                        hop = %hop.underlay_id.fmt_short(),
-                        app_id = %hop.app_id.fmt_short(),
-                        "multihop forwarder: hop without a vector that no delivered cell named, dialing it by id"
-                    );
-                }
-            }
-            EndpointAddr::new(hop.underlay_id.get())
-        })
-    }
-
-    /// Whether `app_id` is a link in the vector that this node published of itself.
-    fn is_link_of_ours(&self, app_id: AppId) -> bool {
+    /// The generation of the refused set is read BEFORE the set. The pool changes the set under its lock and
+    /// raises the generation after it, so a value can be kept under an older key than the set that it was made
+    /// from, never under a newer one, and the next call then makes it again. Do not swap the two reads.
+    pub(crate) fn next_hop(&self, dst: AppId, from: Option<AppId>) -> NextHop {
         let topology = self.topology.read().expect("topology lock poisoned");
-        topology
-            .links_of(self.self_app_id)
-            .is_some_and(|links| links.contains(&app_id))
+        let key = CacheKey {
+            topology: topology.generation(),
+            gate: self.pool.gate_generation(),
+        };
+        let mut cache = self.next_hops.lock().expect("next hop cache poisoned");
+        let kept: NextHop = cache.get_or_compute(key, dst, || {
+            let (stuck, waiting) = self.pool.gate_sets();
+            let stuck: HashSet<AppId> = stuck.into_iter().collect();
+            let waiting: HashSet<AppId> = waiting.into_iter().collect();
+            topology.next_hop(self.self_app_id, dst, &stuck, &waiting)
+        });
+        kept.unless_from(from)
     }
 
-    /// Whether a cell that this node delivered named the hop `underlay_id`.
-    fn heard_hop(&self, underlay_id: UnderlayId) -> bool {
-        self.heard_hops
-            .lock()
-            .expect("heard hops poisoned")
-            .set
-            .contains(&underlay_id)
+    /// Send a packet that starts at this node: one cell for `dst`, to the next hop that this node picks now.
+    pub(crate) fn originate(&self, dst: AppId, packet: Vec<u8>) -> Result<(), NotSent> {
+        if dst == self.self_app_id {
+            return Err(NotSent::ToSelf);
+        }
+        let NextHop::Forward(neighbor) = self.next_hop(dst, None) else {
+            self.no_next_hop.fetch_add(1, Ordering::Relaxed);
+            return Err(NotSent::NoNextHop);
+        };
+        let cell = Cell {
+            dst,
+            src: self.self_app_id,
+            hops_left: MAX_CELL_HOPS,
+            packet,
+        };
+        self.enqueue(neighbor, cell);
+        Ok(())
     }
 
-    /// Remember one hop that a cell arrived from. Past [`HEARD_HOPS_CAP`] hops the oldest is
-    /// forgotten.
-    fn note_heard_hop(&self, underlay_id: UnderlayId) {
-        let mut heard = self.heard_hops.lock().expect("heard hops poisoned");
-        if !heard.set.insert(underlay_id) {
-            return;
-        }
-        heard.order.push_back(underlay_id);
-        if heard.order.len() > HEARD_HOPS_CAP
-            && let Some(oldest) = heard.order.pop_front()
-        {
-            heard.set.remove(&oldest);
-        }
-    }
-
-    /// Whether a log line is due for the hop `underlay_id`, found without a vector for the
-    /// `total`-th time, `explained` or not: one line per distinct hop, and one warning per hop,
-    /// which a hop that was explained the first time still gets when it is not any more. The ids
-    /// come off the wire, so the map that remembers them is bounded; past [`UNRESOLVED_SEEN_CAP`]
-    /// hops the rule is one line in 256.
-    pub(super) fn line_is_due(&self, underlay_id: UnderlayId, total: u64, explained: bool) -> bool {
-        let mut seen = self
-            .unresolved_seen
-            .lock()
-            .expect("unresolved set poisoned");
-        if let Some(warned) = seen.get_mut(&underlay_id) {
-            if *warned || explained {
-                return false;
-            }
-            *warned = true;
-            return true;
-        }
-        if seen.len() < UNRESOLVED_SEEN_CAP {
-            seen.insert(underlay_id, !explained);
-            return true;
-        }
-        total.is_multiple_of(256)
-    }
-
-    /// How many cells this node passed on for other nodes.
     pub(crate) fn forwarded_cells(&self) -> u64 {
         self.forwarded.load(Ordering::Relaxed)
     }
 
-    /// The counters of the data path: what was passed on, refused, dropped and delivered.
     pub(crate) fn counters(&self) -> crate::MultihopCounters {
+        let read = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         crate::MultihopCounters {
-            forwarded: self.forwarded.load(Ordering::Relaxed),
-            dropped: self.dropped.load(Ordering::Relaxed),
-            refused_on_relay: self.pool.refused_on_relay.load(Ordering::Relaxed),
-            delivered: self.delivered.load(Ordering::Relaxed),
+            forwarded: read(&self.forwarded),
+            dropped: read(&self.dropped),
+            refused_on_relay: read(&self.pool.refused_on_relay),
+            delivered: read(&self.delivered),
+            turned_back: read(&self.turned_back),
+            no_next_hop: read(&self.no_next_hop),
+            hop_limit: read(&self.hop_limit),
         }
     }
 
@@ -254,17 +202,20 @@ impl Forwarder {
         Arc::clone(&self.pool.route_wake)
     }
 
-    /// The application ids of the hops that the gate refuses now, stuck or not.
-    pub(crate) fn refusing_hops(&self) -> Vec<AppId> {
-        self.pool.refusing_app_ids()
+    /// Put a hop in wait now, as if the gate did not admit it, as a test of the choice of a next hop needs it.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn hold_hop_for_test(&self, underlay: UnderlayId, app_id: AppId) {
+        self.pool.track(underlay, app_id);
+        self.pool.note_waiting(underlay, Duration::from_mins(1));
     }
 
-    /// Mark a hop as refused now, without the deadline having passed, as a test of
-    /// the choice of a route needs it.
+    /// Make a hop stuck now, without the deadline having passed, as a test of the choice of a next hop needs it.
     #[cfg(any(test, feature = "test-hooks"))]
-    pub(crate) fn refuse_hop_for_test(&self, underlay: UnderlayId, app_id: AppId) {
+    pub(crate) fn stick_hop_for_test(&self, underlay: UnderlayId, app_id: AppId) {
         self.pool.track(underlay, app_id);
-        self.pool.note_refused(underlay, Duration::from_mins(1));
+        // The first call puts the hop in wait, and the second finds the wait older than the deadline.
+        self.pool.note_waiting(underlay, Duration::ZERO);
+        self.pool.note_waiting(underlay, Duration::ZERO);
     }
 
     /// The open paths of the connection that our writer holds toward the underlay `hop`, now,
@@ -282,16 +233,24 @@ impl Forwarder {
         Some(paths_of(&connection))
     }
 
-    /// Rate-limited visibility for a refused cell. Whoever is sending them sets
-    /// the rate, so logging every one hands them a second amplifier.
+    /// Count a refused cell, and say so in the log for the first one and for each 256th.
     fn note_drop(&self, reason: &str) {
         if let Some(total) = self.count_drop() {
             tracing::warn!(target: LOG_TARGET, total, reason, "multihop forwarder refusing cells");
         }
     }
 
-    /// The refusal of a cell that came in over `connection` from `hop`, with what
-    /// the log needs to tell whose path it was: the hop, this node, and the paths.
+    /// Count a cell that this node dropped in a state that is normal in this design: its table and the tables
+    /// around it do not agree (no next hop, a cell sent back, no forward left) while the vectors travel, or the
+    /// queue of a hop that waits for a path is full. A person has nothing to do about it, so the line is a debug
+    /// line, for the first one and for each 256th. The counters say how many.
+    fn note_normal_drop(&self, reason: &str) {
+        if let Some(total) = self.count_drop() {
+            tracing::debug!(target: LOG_TARGET, total, reason, "multihop forwarder dropping cells");
+        }
+    }
+
+    /// The inbound gate refused a cell: it came over the relay, and this node does not take the relay.
     pub(super) fn note_inbound_refusal(&self, hop: UnderlayId, connection: &Connection) {
         if let Some(total) = self.count_drop() {
             tracing::warn!(
@@ -306,54 +265,56 @@ impl Forwarder {
         }
     }
 
-    /// Count a refused cell. The total when it is to be logged: the first, then
-    /// every 256th.
     fn count_drop(&self) -> Option<u64> {
         let total = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
         (total == 1 || total.is_multiple_of(256)).then_some(total)
     }
 
-    /// Hand a cell to the writer for `hop`, spawning one if none is live. Never
-    /// blocks: a full or dead queue drops the cell (QUIC recovers).
-    pub(crate) fn enqueue(&self, hop: &RouteHop, cell: Cell) {
-        let cost = cell.packet.len();
-        if self.pool.queued_bytes.fetch_add(cost, Ordering::Relaxed) + cost > FORWARD_QUEUE_BYTES {
-            self.pool.release(cost);
+    /// Queue `cell` on the writer of `neighbor`, spawning the writer if there is none. The dial address of the
+    /// neighbor is the one that it signed in its vector: a neighbor that has no vector now is no next hop, and the
+    /// cell is dropped (the table can change between the choice and this call).
+    ///
+    /// Bounded: the queue of a writer holds [`WRITER_QUEUE`] cells and all the writers hold
+    /// [`super::FORWARD_QUEUE_BYTES`] bytes. A cell that does not fit is dropped, as a full NIC queue drops a packet.
+    pub(crate) fn enqueue(&self, neighbor: AppId, cell: Cell) {
+        let Some(mut charged) = WriterPool::charge(&self.pool, cell) else {
             self.note_drop("forwarding byte budget exhausted");
             return;
-        }
-        let key = hop.underlay_id;
-        // First attempt on any existing writer.
-        if let Some(sender) = self.writer_for(key)
-            && sender.try_send(cell.clone()).is_ok()
-        {
-            return;
-        }
-        // Stale or absent: (re)spawn a writer, then try once more.
-        let Some(sender) = self.spawn_writer(hop) else {
-            self.pool.release(cost);
+        };
+        let address = {
+            let topology = self.topology.read().expect("topology lock poisoned");
+            topology.underlay_of(neighbor)
+        };
+        let Some(address) = address else {
+            self.note_drop("next hop has no vector");
             return;
         };
-        if sender.try_send(cell).is_err() {
-            self.pool.release(cost);
+        let key = UnderlayId::new(address.id);
+        if let Some(sender) = self.writer_for(key) {
+            match sender.try_send(charged) {
+                Ok(()) => return,
+                // The queue of a hop in wait is full: the cell does not fit, as a full NIC queue drops a
+                // packet. A new writer would only replace a live one.
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    self.note_normal_drop("writer queue full");
+                    return;
+                }
+                Err(mpsc::error::TrySendError::Closed(returned)) => charged = returned,
+            }
         }
+        let Some(sender) = self.spawn_writer(address, neighbor) else {
+            return;
+        };
+        // A full or closed queue drops the cell with the error, and the charge goes back with it.
+        drop(sender.try_send(charged));
     }
 
-    /// Deliver a cell that terminated here to the local transport.
-    fn deliver(&self, cell: Cell, from: UnderlayId) {
-        let Some(route) = Route::reverse_from(cell.path.hops(), cell.source) else {
-            self.note_drop("return route is not a legal route");
-            return;
-        };
-        // `from` is the one id of the cell that the connection proves: the first hop of `route`.
-        // The source and the other hops are fields of the cell that its sender chose.
-        self.note_heard_hop(from);
+    /// A cell ended here: hand its packet to the local transport, with the address of its source as the remote.
+    fn deliver(&self, cell: Cell) {
         let delivered = Delivered {
-            remote: route.encode(),
+            remote: Destination::new(cell.src).encode(),
             packet: cell.packet,
         };
-        // A full inbox drops the packet, as a saturated NIC would. It is counted and the first
-        // drop is logged: an inbox that nobody drains is a silent black hole otherwise.
         if self.inbound.try_send(delivered).is_ok() {
             self.delivered.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -361,59 +322,49 @@ impl Forwarder {
         }
     }
 
-    /// Whether `hop` is this node — both identities, since the two endpoints
-    /// carry different keys and a cell should not be able to pair our underlay
-    /// with somebody else's application id.
-    fn is_self(&self, hop: &RouteHop) -> bool {
-        hop.underlay_id == UnderlayId::new(self.underlay.id()) && hop.app_id == self.self_app_id
-    }
-
-    /// The hop that should have sent us this cell: our predecessor on the route,
-    /// or the original sender when we are the first hop.
-    fn expected_upstream(cell: &Cell) -> Option<&RouteHop> {
-        match cell.position.checked_sub(1) {
-            None => Some(&cell.source),
-            Some(previous) => cell.path.hop_at(previous as usize),
-        }
-    }
-
-    /// Process one received cell: forward to the next hop, or deliver if we are
-    /// the destination.
+    /// What this node does with a cell that arrived from the underlay endpoint `from`: deliver it if it is for
+    /// this node, and else give it to the next hop that this node picks now, with one forward fewer.
     ///
-    /// `from` is the authenticated id of the connection the cell arrived on.
-    /// Requiring it to be the route's preceding hop is what stops a stranger
-    /// injecting a cell at a position it does not occupy — the structural
-    /// invariants on [`Route`] bound what a route may look like, but only this
-    /// binds a cell to the path it claims to be travelling.
+    /// `from` is the identity that the QUIC-TLS connection proves, and the one thing about a cell that its sender
+    /// cannot choose. Who may open such a connection: any peer that can dial the underlay endpoint and speaks
+    /// the forward protocol; the acceptor does not check membership. The work that a stranger can make is bounded
+    /// by the limit of forwards, and by the drop of a cell that has no next hop.
     pub(crate) fn handle_cell(&self, cell: Cell, from: UnderlayId) {
-        let Some(here) = cell.current_hop() else {
-            self.note_drop("position past the end of the route");
+        if cell.hops_left > MAX_CELL_HOPS {
+            self.hop_limit.fetch_add(1, Ordering::Relaxed);
+            self.note_normal_drop("cell claims more forwards than the limit");
             return;
+        }
+        if cell.dst == self.self_app_id {
+            self.deliver(cell);
+            return;
+        }
+        if cell.hops_left == 0 {
+            self.hop_limit.fetch_add(1, Ordering::Relaxed);
+            self.note_normal_drop("cell has no forward left");
+            return;
+        }
+        let from_app = {
+            let topology = self.topology.read().expect("topology lock poisoned");
+            topology.app_id_of(from)
         };
-        if !self.is_self(here) {
-            self.note_drop("position does not name this node");
-            return;
-        }
-        let is_expected_upstream =
-            Self::expected_upstream(&cell).is_some_and(|hop| hop.underlay_id == from);
-        if !is_expected_upstream {
-            self.note_drop("cell did not arrive from its preceding hop");
-            return;
-        }
-        match cell.next_hop() {
-            Some(next) => {
-                let next = *next;
-                // `from` is the one id of the cell that the connection proves. The reply to this
-                // cell passes here again, and this hop is then the next hop, with no vector yet.
-                self.note_heard_hop(from);
+        match self.next_hop(cell.dst, from_app) {
+            NextHop::Forward(neighbor) => {
                 self.forwarded.fetch_add(1, Ordering::Relaxed);
-                self.enqueue(&next, cell.advanced());
+                self.enqueue(neighbor, cell.forwarded());
             }
-            None => self.deliver(cell, from),
+            NextHop::TurnedBack => {
+                self.turned_back.fetch_add(1, Ordering::Relaxed);
+                self.note_normal_drop("the best next hop is the hop that the cell came from");
+            }
+            NextHop::Unreachable => {
+                self.no_next_hop.fetch_add(1, Ordering::Relaxed);
+                self.note_normal_drop("no neighbor reaches the destination");
+            }
         }
     }
 
-    fn writer_for(&self, key: UnderlayId) -> Option<mpsc::Sender<Cell>> {
+    fn writer_for(&self, key: UnderlayId) -> Option<mpsc::Sender<Charged>> {
         let writers = self.pool.writers.lock().expect("writers mutex poisoned");
         writers.get(&key).cloned()
     }
@@ -421,15 +372,11 @@ impl Forwarder {
     /// Insert and spawn a fresh writer task for `dst`, replacing any dead entry.
     /// `None` once [`MAX_WRITERS`] are live.
     ///
-    /// Refusing rather than evicting is deliberate: the next-hop id comes off the
-    /// wire, so evicting would let a flood of invented hops walk the real
-    /// neighbours out of the map. A refused flood instead clears itself, because
-    /// each spawned writer gives up after `DIAL_ATTEMPTS` and removes its own
-    /// entry on the way out.
-    fn spawn_writer(&self, hop: &RouteHop) -> Option<mpsc::Sender<Cell>> {
-        let dst = self.dial_addr(hop);
+    /// Refusing rather than evicting is deliberate: a flood of cells for invented destinations must not walk the
+    /// real neighbours out of the map. Each spawned writer gives up after `DIAL_ATTEMPTS` and removes its own
+    /// entry on the way out, so a refused flood clears itself.
+    fn spawn_writer(&self, dst: EndpointAddr, app_id: AppId) -> Option<mpsc::Sender<Charged>> {
         let key = UnderlayId::new(dst.id);
-        let app_id = hop.app_id;
         let (tx, rx) = mpsc::channel(WRITER_QUEUE);
         {
             let mut writers = self.pool.writers.lock().expect("writers mutex poisoned");

@@ -15,7 +15,6 @@ use iroh::EndpointId;
 
 use crate::daemon::handler_ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState};
-use crate::protocol::messages::{Verified, sole_addressee};
 use crate::transport::webrtc;
 use crate::util::clock::Instant;
 
@@ -215,7 +214,7 @@ fn close_pinned_without_route(state: &EventLoopState) {
     let peers = state.webrtc_admission.pinned_peers();
     let pinned = peers
         .into_iter()
-        .map(|peer| (peer, route_to(state, peer).is_some()));
+        .map(|peer| (peer, has_route_in_table(state, peer)));
     for peer in pair_to_climb::lost_pinned(pinned) {
         let pool = state.unicast_pool.clone();
         task::spawn(async move {
@@ -248,6 +247,19 @@ pub(crate) fn route_to(state: &EventLoopState, peer: EndpointId) -> Option<iroh:
             handle.route_addr(habilis_network_iroh_multihop_transport::AppId::new(peer))
         })
         .map(iroh::TransportAddr::Custom)
+}
+
+/// Whether this node has a next hop for a cell to `peer` now. `false` off a host.
+#[cfg(feature = "multihop")]
+pub(crate) fn has_route_in_table(state: &EventLoopState, peer: EndpointId) -> bool {
+    state.multihop.as_ref().is_some_and(|handle| {
+        handle.has_route_in_table(habilis_network_iroh_multihop_transport::AppId::new(peer))
+    })
+}
+
+#[cfg(not(feature = "multihop"))]
+pub(crate) fn has_route_in_table(_state: &EventLoopState, _peer: EndpointId) -> bool {
+    false
 }
 
 #[cfg(not(feature = "multihop"))]
@@ -424,7 +436,7 @@ pub(crate) fn open_lane_after_proof(
 }
 
 /// Prove the pairs that a multihop route proves, and flush what waited for them. Runs on the sweep
-/// tick. A send to one peer runs the same rule for its addressee ([`prove_addressee`]).
+/// tick. A send to one peer runs the same rule for its addressee ([`prove_by_route`]).
 pub(crate) fn prove_routed_pairs(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let members = state.member_addresses();
     let peers: Vec<EndpointId> = members
@@ -435,14 +447,4 @@ pub(crate) fn prove_routed_pairs(state: &mut EventLoopState, context: &HandlerCt
     for peer in prove_by_route(state, peers) {
         open_lane_after_proof(state, context, peer);
     }
-}
-
-/// Prove the addressee of a directed `frame` by the same rule as the sweep, and give it back when it
-/// is proven now. The sweep runs every 10 s, and a pair with no path watcher (the higher id of a
-/// pair) has no other source of the proof, so a send would be held for up to that time though
-/// the pair rides a multihop route.
-pub(crate) fn prove_addressee(state: &mut EventLoopState, frame: &Verified) -> Option<EndpointId> {
-    let key = sole_addressee(&frame.kind)?;
-    let peer = transport::directed_endpoint(key, state)?;
-    prove_by_route(state, [peer]).pop()
 }

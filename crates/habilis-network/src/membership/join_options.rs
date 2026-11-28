@@ -12,6 +12,7 @@ use crate::runtime::{
     CreateParams, JoinParams, Node, Resolved, SetupKind, SetupParams, SignalHandling,
     derive_topic_mesh_config, setup_mesh,
 };
+use crate::util::tuning;
 use anyhow::Result;
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -20,6 +21,9 @@ use super::membership_app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use crate::beacon;
+#[cfg(feature = "iroh-test-utils")]
+use crate::lookup::Bind;
+use crate::lookup::TransportOpts;
 use n0_future::time;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 use std::sync::atomic;
@@ -48,7 +52,7 @@ use tokio::sync::oneshot;
 /// let options = JoinOptions::default().mesh(Some("a".to_owned())).topic(Some("b".to_owned()));
 /// assert!(resolve_kind(&options, None).is_err());
 /// ```
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct JoinOptions {
@@ -82,12 +86,55 @@ pub struct JoinOptions {
     /// different meshes. Empty ⇒ the default ladder. Ignored when joining
     /// by id.
     pub relay_urls: Vec<String>,
-    /// Cap on the direct connections of the node, and the size of the gossip active view; `0`
-    /// takes the engine default.
+    /// Cap on the direct connections of the node, and the size of the gossip active view. An
+    /// absent value is the engine default of 16. A number below 8, `0` too, is a setup error.
     pub max_connections: usize,
+    /// Where the node listens. Tests only: a node of the product listens on every interface. A
+    /// test that runs on one machine keeps its members off the network with `Bind::Loopback`.
+    #[cfg(feature = "iroh-test-utils")]
+    #[serde(skip)]
+    pub bind: Bind,
+}
+
+impl Default for JoinOptions {
+    /// Every choice unset, and the cap at the engine default of 16.
+    fn default() -> Self {
+        Self {
+            mesh: None,
+            topic: None,
+            nick: None,
+            name: None,
+            lookup: Vec::new(),
+            transport: Vec::new(),
+            relay_urls: Vec::new(),
+            max_connections: tuning::MAX_CONNECTIONS,
+            #[cfg(feature = "iroh-test-utils")]
+            bind: Bind::default(),
+        }
+    }
 }
 
 impl JoinOptions {
+    /// Where the node listens. Tests only.
+    ///
+    /// # Examples
+    ///
+    /// A member that listens on this host only.
+    ///
+    /// ```
+    /// use habilis_network::membership::JoinOptions;
+    /// use habilis_network::net::Bind;
+    ///
+    /// let options = JoinOptions::default().bind(Bind::Loopback);
+    /// assert_eq!(options.bind, Bind::Loopback);
+    /// ```
+    #[cfg(feature = "iroh-test-utils")]
+    #[must_use]
+    pub fn bind(mut self, bind: Bind) -> Self {
+        self.bind = bind;
+        self
+    }
+
     /// Set the topic that derives the mesh.
     #[must_use]
     pub fn topic(mut self, topic: Option<String>) -> Self {
@@ -264,11 +311,16 @@ pub async fn join<S: NodeSink + 'static>(
     }
 
     let (inbound_tx, inbound) = mpsc::channel(INBOUND_CAP);
-    let config = setup_mesh(
-        kind,
-        SetupParams::new(author, sink).max_connections(options.max_connections),
-    )
-    .await?;
+    // One way to build the transports of a node, with and without the test feature: the default
+    // options, and the bind of a test where the feature exists. A later option of `JoinOptions`
+    // that sets the transports goes here, in this one place, for both builds.
+    let transports = TransportOpts::default();
+    #[cfg(feature = "iroh-test-utils")]
+    let transports = transports.bind(options.bind);
+    let params = SetupParams::new(author, sink)
+        .max_connections(options.max_connections)
+        .transports(transports);
+    let config = setup_mesh(kind, params).await?;
 
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     if NEW_MEMBERS_ARE_BLIND.load(Ordering::SeqCst) {
@@ -426,6 +478,7 @@ pub fn resolve_kind(
 mod tests {
     use crate::protocol::{LookupOpts, RelayChoice};
     use crate::runtime;
+    use crate::util::tuning;
 
     use super::{JoinOptions, Lookup, MeshConfig, SetupKind, Transport, resolve_kind};
     fn options() -> JoinOptions {
@@ -483,6 +536,27 @@ mod tests {
             let decoded: serde_json::Result<JoinOptions> = serde_json::from_str(stale);
             assert!(decoded.is_err(), "{stale}");
         }
+    }
+
+    /// The default holds 16 and an absent `maxConnections` is that default; an explicit `0` is kept as
+    /// the caller wrote it, and the setup refuses it, because 0 is under the minimum.
+    #[test]
+    fn an_absent_cap_is_the_default_of_16_and_an_explicit_zero_stays_zero() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let absent: JoinOptions = serde_json::from_str("{}").expect("an empty object parses");
+        assert_eq!(
+            absent.max_connections,
+            tuning::MAX_CONNECTIONS,
+            "an absent maxConnections is the default"
+        );
+        assert_eq!(
+            JoinOptions::default().max_connections,
+            tuning::MAX_CONNECTIONS,
+            "the default holds the default cap"
+        );
+        let zero: JoinOptions =
+            serde_json::from_str(r#"{"maxConnections":0}"#).expect("an explicit 0 parses");
+        assert_eq!(zero.max_connections, 0, "an explicit 0 is not replaced");
     }
 
     /// The interop assertion. A browser resolving `topic` and a terminal calling

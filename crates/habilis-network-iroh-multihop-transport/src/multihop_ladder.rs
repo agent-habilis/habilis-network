@@ -44,9 +44,13 @@ impl MultihopLadder {
 impl PathSelector for MultihopLadder {
     fn select(&self, context: &PathSelectionContext<'_>) -> PathSelection {
         let paths: Vec<PathSelectionData<'_>> = context.paths().collect();
-        let chosen = climb_pinned(self.local, &paths, custom_rung, |rung, path| {
-            self.usable(rung, ip_remote(path), remote_id(path))
-        });
+        let chosen = climb_pinned(
+            self.local,
+            context.current(),
+            &paths,
+            custom_rung,
+            |rung, path| self.usable(rung, ip_remote(path), remote_id(path)),
+        );
         let mut selection = PathSelection::none();
         if let Some(path) = chosen {
             selection.set(path);

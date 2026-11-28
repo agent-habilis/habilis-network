@@ -221,7 +221,7 @@ pub(crate) async fn build_peer_webrtc_with(
             webrtc: Some(handle.clone()),
             gossip,
             admission: admission.cloned(),
-            underlay: false,
+            role: super::EndpointRole::Peer,
             options,
         },
     )
@@ -273,6 +273,20 @@ pub(crate) fn build_webrtc_handle(
     local: iroh::EndpointId,
 ) -> habilis_network_iroh_webrtc_transport::WebRtcHandle {
     habilis_network_iroh_webrtc_transport::WebRtcHandle::hub(local)
+}
+
+/// The options of the underlay endpoint of a node: the `udp` of the node, and where the node
+/// listens. The underlay is an endpoint of the node, so a node that listens on this host only
+/// listens on this host only with its underlay too.
+#[cfg(feature = "multihop")]
+pub(crate) fn underlay_options(options: super::TransportOpts) -> super::TransportOpts {
+    let underlay = super::TransportOpts {
+        udp: options.udp,
+        ..super::TransportOpts::default()
+    };
+    #[cfg(feature = "iroh-test-utils")]
+    let underlay = underlay.bind(options.bind);
+    underlay
 }
 
 /// A fresh random identity. Every endpoint of one peer is built from the one
@@ -370,15 +384,12 @@ pub(crate) async fn build_peer_multihop_with(
         None,
         Vec::new(),
         super::TransportHandles {
-            underlay: true,
+            role: super::EndpointRole::Underlay,
             webrtc: webrtc_leg,
             admission: admission_leg,
             // The underlay has IP sockets only when the node does: a node run without `udp`
             // has no IP on any of its endpoints, and its underlay rides WebRTC and the relay.
-            options: super::TransportOpts {
-                udp: options.udp,
-                ..super::TransportOpts::default()
-            },
+            options: underlay_options(options),
             ..super::TransportHandles::default()
         },
     )
@@ -388,7 +399,7 @@ pub(crate) async fn build_peer_multihop_with(
     if let Some((handle, table)) = underlay_leg {
         let allowed = underlay_webrtc::Allowed::default();
         let ice = transport::IceProfile {
-            host_only: lookups.is_loopback(),
+            host_only: super::stays_on_this_host(lookups.is_loopback(), options),
         };
         // The underlay is an endpoint of its own, with lookup services of its own, so it has
         // an address book of its own.
@@ -433,7 +444,7 @@ pub(crate) async fn build_peer_multihop_with(
             webrtc: Some(webrtc.clone()),
             gossip,
             admission: admission.cloned(),
-            underlay: false,
+            role: super::EndpointRole::Peer,
             options,
         },
     )

@@ -4,6 +4,7 @@
 //! and [`relay`] (the relay ladder + bootstrap-rung selection/failover).
 
 mod build_mesh;
+mod gate_policy;
 
 mod address_book;
 
@@ -22,10 +23,13 @@ mod subnet_binds;
 
 mod endpoint;
 
+#[cfg(feature = "iroh-test-utils")]
+mod bind;
 #[cfg(feature = "host")]
 mod capability;
 #[cfg(all(feature = "host", feature = "dht"))]
 mod dht;
+mod endpoint_role;
 mod error;
 #[cfg(all(feature = "host", feature = "mdns"))]
 mod mdns;
@@ -52,8 +56,11 @@ mod transport_opts;
 )]
 pub mod test_relay;
 
+#[cfg(feature = "iroh-test-utils")]
+pub use bind::Bind;
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
+pub use endpoint_role::EndpointRole;
 pub use error::EndpointError;
 pub use relay::{DefaultRung, RENDEZVOUS_RELAY_LADDER, RungPath, probe_ladder, relay_ladder};
 pub(crate) use relay::{
@@ -62,6 +69,7 @@ pub(crate) use relay::{
 };
 pub use transport_handles::TransportHandles;
 pub use transport_opts::TransportOpts;
+pub(crate) use transport_opts::{bind_only, stays_on_this_host};
 
 #[cfg(all(feature = "multihop", not(feature = "host")))]
 pub(crate) use peer::browser_handle_config;
@@ -80,6 +88,7 @@ pub(crate) use probe_answer::{ProbeAnswer, probe_answer};
 pub use endpoint::build_endpoint;
 
 pub(crate) use build_mesh::build_mesh;
+pub(crate) use gate_policy::GatePolicy;
 
 pub(crate) use address_book::replace_peer_addr;
 pub use address_book::{add_peer_addr, address_book};

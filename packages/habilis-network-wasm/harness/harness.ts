@@ -13,7 +13,7 @@
  *   `webrtc`, or any with `gossip` (id-changing, same rule). A tab needs
  *   `webrtc` or `relay`, and ignores `multihop`.
  * - `maxConnections` — the cap on this tab's direct connections (the engine default
- *   when omitted). At the cap, a send to a new peer rides a multihop route.
+ *   of 16 when omitted; a number below 8 is an error). At the cap, a send to a new peer rides a multihop route.
  * - `log` — an `EnvFilter` for the engine's tracing, to the console.
  *
  * DOM contract (what a driver asserts on):

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Inspect, Membership, Request};
+use habilis_network::net::Bind;
 use habilis_network::protocol::{Lookup, Transport};
 
 use habilis_network::net::test_relay;
@@ -67,14 +68,12 @@ async fn roster_len(member: &Membership) -> usize {
 /// `WebRTC`-only mesh over a local relay, as live members.
 async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
     let relay_urls = vec![relay.to_string()];
-    let creator = open(
-        "member-00",
-        membership::JoinOptions::default()
-            .lookup(vec![Lookup::Relay])
-            .transport(vec![Transport::WebRtc])
-            .relay_urls(relay_urls),
-    )
-    .await;
+    let creator_options: membership::JoinOptions = membership::JoinOptions::default()
+        .bind(Bind::Loopback)
+        .lookup(vec![Lookup::Relay])
+        .transport(vec![Transport::WebRtc])
+        .relay_urls(relay_urls);
+    let creator = open("member-00", creator_options).await;
     let beacon_wait = Instant::now();
     while !logs().contains("beacon role active") {
         assert!(
@@ -90,7 +89,9 @@ async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
         members.push(
             open(
                 &format!("member-{index:02}"),
-                membership::JoinOptions::default().mesh(Some(mesh.clone())),
+                membership::JoinOptions::default()
+                    .bind(Bind::Loopback)
+                    .mesh(Some(mesh.clone())),
             )
             .await,
         );
@@ -232,7 +233,9 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
         members.push(
             open(
                 "late-joiner",
-                membership::JoinOptions::default().mesh(Some(mesh)),
+                membership::JoinOptions::default()
+                    .bind(Bind::Loopback)
+                    .mesh(Some(mesh)),
             )
             .await,
         );

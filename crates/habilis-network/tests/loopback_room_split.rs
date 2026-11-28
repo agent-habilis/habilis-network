@@ -52,6 +52,7 @@ use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 
 use habilis_network::membership::{self, Beacons, Inspect, Membership, Request};
+use habilis_network::net::Bind;
 use habilis_network::protocol::LockedMesh;
 use habilis_network::runtime::tuning::{Tuning, init};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -246,8 +247,9 @@ impl Member {
     async fn open(nick: &str, mesh: Option<&str>) -> Self {
         let (sink, events) = membership::json_sink();
         let options: membership::JoinOptions = membership::JoinOptions::default()
-            .nick(Some(nick.to_owned()))
-            .mesh(mesh.map(str::to_owned));
+            .bind(Bind::Loopback)
+            .nick(Some(nick.to_owned()));
+        let options = options.mesh(mesh.map(str::to_owned));
         let membership: Membership = membership::join(&options, sink)
             .await
             .expect("open a member");
@@ -715,8 +717,9 @@ async fn holder_whose_beacon_stops_answering(
 async fn open_watched(nick: &str, mesh: &str) -> (Member, UnboundedReceiver<String>) {
     let (sink, events) = membership::json_sink();
     let options: membership::JoinOptions = membership::JoinOptions::default()
-        .nick(Some(nick.to_owned()))
-        .mesh(Some(mesh.to_owned()));
+        .bind(Bind::Loopback)
+        .nick(Some(nick.to_owned()));
+    let options = options.mesh(Some(mesh.to_owned()));
     let membership: Membership = membership::join(&options, sink)
         .await
         .expect("open a member");

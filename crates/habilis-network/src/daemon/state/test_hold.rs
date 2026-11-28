@@ -10,7 +10,7 @@ pub(crate) enum TestHold {
     /// A test uses it to force the order "a late joiner claims the free rung before any old member
     /// does", which a heal tick of a few seconds would otherwise win.
     Claims,
-    /// The beacon is shed at the top of the next turn of the loop, as a re-check shed does
+    /// The beacon is shed at the top of the next turn of the loop, as a yield to a rival does
     /// (`Beacons::ShedBeacon`). The loop takes the hold, so it is set once per shed.
     Shed,
     /// The beacon stops answering at the top of the next turn of the loop (`Beacons::StallBeacon`).

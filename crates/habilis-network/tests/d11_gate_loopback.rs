@@ -3,9 +3,9 @@
 //! the host slot of the gate (`cargo test --test d11_gate_loopback -- --include-ignored
 //! --test-threads=1`).
 //!
-//! - `a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts`: alice holds at most two
-//!   direct connections and sends in rotation to three peers. Every frame must arrive, and the
-//!   ledger must never count more than two units. Eviction closes an idle connection, a send dials
+//! - `a_node_at_the_minimum_ceiling_delivers_every_frame_while_it_evicts`: alice holds at most
+//!   8 direct connections and sends in rotation to nine peers. Every frame must arrive, and the
+//!   ledger must never count more than 8 units. Eviction closes an idle connection, a send dials
 //!   at once, and a busy connection is not a victim. A connection that finds no unit free and no
 //!   peer to evict is an extra: it takes no unit, it counts toward twice the ceiling, and it closes
 //!   after a minute with no use.
@@ -30,12 +30,20 @@ use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{
     self, Inbound, Inspect, InspectTest, Membership, Messaging, Request, Routing,
 };
+use habilis_network::net::Bind;
 use habilis_network::protocol::{Lookup, Transport};
+use habilis_network::util::tuning::{MAX_CONNECTIONS, MIN_MAX_CONNECTIONS};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use habilis_network::net::test_relay;
 use habilis_network::topology::TopologySnapshot;
 use tokio::time;
+/// The ceiling of alice in the rotation test: the minimum, so nine peers are more than it holds.
+const CEILING: usize = MIN_MAX_CONNECTIONS;
+/// The peers of alice in the rotation test.
+const PEERS: [&str; 9] = [
+    "bob", "carol", "dave", "erin", "frank", "grace", "heidi", "ivan", "judy",
+];
 const ROSTER_DEADLINE: Duration = Duration::from_mins(2);
 const FRAME_DEADLINE: Duration = Duration::from_mins(2);
 /// How long the extras of alice may last after the final send: a minute of idle, and the sweep.
@@ -70,7 +78,8 @@ impl Member {
         transport: Vec<Transport>,
         max_connections: usize,
     ) -> Self {
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .lookup(vec![Lookup::Relay]);
         let options = options
@@ -82,7 +91,8 @@ impl Member {
 
     async fn join(nick: &str, creator: &Self) -> Self {
         let mesh = creator.membership.node.mesh_id().to_string();
-        let options = membership::JoinOptions::default()
+        let options: membership::JoinOptions = membership::JoinOptions::default()
+            .bind(Bind::Loopback)
             .nick(Some(nick.to_owned()))
             .mesh(Some(mesh));
         Self::open(&options).await
@@ -186,25 +196,24 @@ async fn delivered(from: &Member, to: &mut Member, to_nick: &str, text: &str) ->
 
 #[test]
 #[ignore = "runs real members; run alone in the host slot"]
-fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
+fn a_node_at_the_minimum_ceiling_delivers_every_frame_while_it_evicts() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
-        let alice = Member::create("alice", &relay, vec![Transport::Udp], 2).await;
-        let mut bob = Member::join("bob", &alice).await;
-        let mut carol = Member::join("carol", &alice).await;
-        let mut dave = Member::join("dave", &alice).await;
+        let alice = Member::create("alice", &relay, vec![Transport::Udp], CEILING).await;
+        let mut peers: Vec<(&str, Member)> = Vec::new();
+        for nick in PEERS {
+            peers.push((nick, Member::join(nick, &alice).await));
+        }
+        let mut everyone: Vec<&Member> = vec![&alice];
+        everyone.extend(peers.iter().map(|(_, member)| member));
         assert!(
-            rosters_hold(&[&alice, &bob, &carol, &dave], 3, ROSTER_DEADLINE).await,
-            "the four members never formed a mesh"
+            rosters_hold(&everyone, PEERS.len(), ROSTER_DEADLINE).await,
+            "the ten members never formed a mesh"
         );
 
         for round in 0..3 {
-            for (nick, member) in [
-                ("bob", &mut bob),
-                ("carol", &mut carol),
-                ("dave", &mut dave),
-            ] {
+            for (nick, member) in &mut peers {
                 let text = format!("rotation {round} to {nick}");
                 assert!(
                     delivered(&alice, member, nick, &text).await,
@@ -212,8 +221,8 @@ fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
                 );
                 let (units, over) = alice.direct_units().await;
                 assert!(
-                    units <= 2 && over == 0,
-                    "after {text:?}: alice counts {units} units ({over} over) at a ceiling of 2: {:?}",
+                    units <= CEILING && over == 0,
+                    "after {text:?}: alice counts {units} units ({over} over) at a ceiling of {CEILING}: {:?}",
                     alice.snapshot().await
                 );
             }
@@ -224,7 +233,7 @@ fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
         let started = Instant::now();
         loop {
             let snapshot = alice.snapshot().await;
-            if snapshot.connected_peers <= 2 && snapshot.direct_units <= 2 {
+            if snapshot.connected_peers <= CEILING && snapshot.direct_units <= CEILING {
                 break;
             }
             assert!(
@@ -236,7 +245,8 @@ fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
             time::sleep(Duration::from_millis(500)).await;
         }
 
-        for member in [alice, bob, carol, dave] {
+        alice.leave().await;
+        for (_, member) in peers {
             member.leave().await;
         }
     });
@@ -248,7 +258,8 @@ fn a_lane_pair_delivers_a_frame_sent_as_soon_as_the_roster_forms() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
-        let mut alice = Member::create("alice", &relay, vec![Transport::WebRtc], 0).await;
+        let mut alice =
+            Member::create("alice", &relay, vec![Transport::WebRtc], MAX_CONNECTIONS).await;
         let mut bob = Member::join("bob", &alice).await;
         assert!(
             rosters_hold(&[&alice, &bob], 1, ROSTER_DEADLINE).await,

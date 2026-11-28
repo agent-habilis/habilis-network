@@ -1,6 +1,6 @@
 //! Link-state dissemination: a peer's advertised **link-vector** (the links it
 //! measures itself, plus its own underlay dial address) and the assembly of many
-//! peers' vectors into the routing [`Graph`] and concrete source [`Route`]s.
+//! peers' vectors into the routing [`Graph`] that each node reads its next hops from.
 //!
 //! Each origin advertises only its *own* outbound links and its own underlay
 //! address, carrying a monotonic `seq` so a newer vector supersedes an older one
@@ -15,11 +15,10 @@ use n0_future::time::{Duration, Instant, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use crate::app_id::{AppId, UnderlayId};
-use crate::graph::{Graph, Leg, Link};
+use crate::graph::{Graph, Link};
 use crate::link_metric::LinkMetric;
-use crate::route::{Route, RouteHop};
-
-use crate::graph;
+use crate::next_hop;
+use crate::next_hop::NextHop;
 /// How long a vector stays without a newer one, unless the handle says otherwise.
 pub(crate) const DEFAULT_VECTOR_MAX_AGE: Duration = Duration::from_secs(45);
 
@@ -126,7 +125,7 @@ impl LinkVector {
 }
 
 /// The received link-vectors, kept freshest-per-origin — the routing table's raw
-/// material. [`route_to`](Topology::route_to) folds them into the graph on demand.
+/// material. The next hop of a cell is read from them: they are folded into a graph on demand.
 ///
 /// # Examples
 ///
@@ -154,6 +153,9 @@ pub struct Topology {
     max_age: Duration,
     /// When a vector last refused for its age was reported in the log.
     last_skew_report: Option<Instant>,
+    /// Raised each time the held vectors change, so a value that was computed from the graph can tell that it is
+    /// stale without reading the graph.
+    generation: u64,
 }
 
 impl Default for Topology {
@@ -191,7 +193,15 @@ impl Topology {
             tombstones: HashMap::new(),
             max_age,
             last_skew_report: None,
+            generation: 0,
         }
+    }
+
+    /// The number of changes that the held vectors have had: it rises when a vector is taken in or removed, and
+    /// never when a vector is refused or only renewed in place.
+    #[must_use]
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Whether to report a vector refused for its age now: once per max age. A
@@ -249,6 +259,7 @@ impl Topology {
             Some(existing) if existing.vector.seq >= vector.seq => false,
             _ => {
                 self.tombstones.remove(&vector.origin);
+                self.generation += 1;
                 self.vectors.insert(
                     vector.origin,
                     Held {
@@ -271,6 +282,7 @@ impl Topology {
         let Some(held) = self.vectors.remove(&origin) else {
             return false;
         };
+        self.generation += 1;
         self.tombstones.insert(
             origin,
             Tombstone {
@@ -307,12 +319,6 @@ impl Topology {
         self.tombstones.contains_key(&origin)
     }
 
-    /// The application ids that `origin` linked to in the vector that we hold of it.
-    pub(crate) fn links_of(&self, origin: AppId) -> Option<Vec<AppId>> {
-        let held = self.vectors.get(&origin)?;
-        Some(held.vector.links.iter().map(|(id, _)| *id).collect())
-    }
-
     /// The underlay address an origin advertised, for dialing a hop through it.
     pub(crate) fn underlay_of(&self, origin: AppId) -> Option<EndpointAddr> {
         self.vectors
@@ -330,45 +336,28 @@ impl Topology {
             .map(|(origin, _)| *origin)
     }
 
-    /// Up to `max_paths` **node-disjoint** source [`Route`]s from `src` to `dst`,
-    /// shortest first — the primary plus failover candidates. A route is dropped
-    /// if any hop hasn't advertised its underlay address yet (we can't dial a hop
-    /// we can't reach), so the returned list may be shorter than `max_paths` or
-    /// empty.
-    pub fn route_to(&self, leg: Leg, max_paths: usize) -> impl Iterator<Item = Route> + use<'_> {
-        let paths = self.graph().disjoint_paths(leg, max_paths);
-        paths.into_iter().filter_map(|path| self.route_of(&path))
-    }
-
-    /// The shortest [`Route`] from `src` to `dst` that does not start with a hop in
-    /// `refused`, with the same filter on underlay addresses as [`Self::route_to`].
-    /// The destination can be a refused first hop: a direct link is skipped too.
-    #[must_use]
-    pub(crate) fn route_to_avoiding_first_hops(
+    /// The next hop of a cell at `node` for `dst`, from the vectors that we hold, with the hops that are stuck
+    /// removed and the hops in wait behind the others: see [`next_hop::next_hop`]. No cell came from anywhere
+    /// here (`from` is applied by the caller).
+    pub(crate) fn next_hop(
         &self,
-        leg: Leg,
-        refused: &HashSet<AppId>,
-    ) -> Option<Route> {
-        let path = self
-            .graph()
-            .shortest_path_avoiding_first_hops(leg, refused)?;
-        self.route_of(&path)
-    }
-
-    /// `path` as a dialable [`Route`], or `None` if a hop has not advertised its
-    /// underlay address yet (we can't dial a hop we can't reach).
-    fn route_of(&self, path: &graph::Path) -> Option<Route> {
-        let hops: Option<Vec<RouteHop>> = path
-            .hops
-            .iter()
-            .map(|hop| {
-                self.underlay_of(*hop).map(|underlay| RouteHop {
-                    app_id: *hop,
-                    underlay_id: UnderlayId::new(underlay.id),
-                })
-            })
-            .collect();
-        Route::try_new(hops?)
+        node: AppId,
+        dst: AppId,
+        stuck: &HashSet<AppId>,
+        waiting: &HashSet<AppId>,
+    ) -> NextHop {
+        let graph = self.graph();
+        // A neighbor with no vector has no underlay address: this node cannot dial it, so it is no candidate
+        // until its vector is here.
+        let links = graph.links_of(node).iter();
+        let known = links.filter(|(neighbor, _)| self.vectors.contains_key(neighbor));
+        let dialable: Vec<(AppId, LinkMetric)> = known.copied().collect();
+        next_hop::next_hop(
+            &dialable,
+            &graph.distances_to(dst),
+            next_hop::GateView { waiting, stuck },
+            None,
+        )
     }
 
     /// A JSON-serializable snapshot of the routing graph from `self_id`'s point
@@ -466,12 +455,14 @@ pub struct TopologyEdge {
 mod tests {
     use n0_future::time::{Duration, Instant};
 
-    use super::{Leg, LinkVector, Topology};
+    use std::collections::HashSet;
+
+    use super::{LinkVector, Topology};
     use crate::app_id::{AppId, UnderlayId};
+    use crate::next_hop::NextHop;
     use iroh::{EndpointAddr, SecretKey};
 
     use crate::link_metric;
-    use std::net;
     fn eid(seed: u8) -> AppId {
         AppId::new(SecretKey::from_bytes(&[seed; 32]).public())
     }
@@ -501,6 +492,80 @@ mod tests {
 
     fn secs(count: u64) -> Duration {
         Duration::from_secs(count)
+    }
+
+    /// The generation rises when a vector is taken in, and not when a vector is refused: a value computed from the
+    /// graph is stale exactly when the generation moved.
+    #[test]
+    fn the_generation_rises_when_a_vector_is_taken_in_and_not_when_it_is_refused() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (na, nb) = (eid(1), eid(2));
+        let mut store = Topology::default();
+        let start = store.generation();
+
+        assert!(
+            ingest(&mut store, vector(na, 7_000, &[(nb, 1)])),
+            "the first vector is taken in"
+        );
+        let after_first = store.generation();
+        assert!(
+            !ingest(&mut store, vector(na, 7_000, &[(nb, 1)])),
+            "the same seq"
+        );
+        assert!(
+            !ingest(&mut store, vector(na, 6_000, &[(nb, 1)])),
+            "an older seq"
+        );
+        let after_refused = store.generation();
+        assert!(
+            ingest(&mut store, vector(na, 8_000, &[])),
+            "a newer vector is taken in"
+        );
+        let after_newer = store.generation();
+
+        assert!(after_first > start, "a vector that was taken in");
+        assert_eq!(after_refused, after_first, "refused vectors change nothing");
+        assert!(
+            after_newer > after_refused,
+            "a newer vector replaces the old"
+        );
+    }
+
+    /// A removal and an expiry both change the graph, so both raise the generation: a next hop that was cached
+    /// from the vector of a hop that left is not used again.
+    #[test]
+    fn the_generation_rises_when_a_vector_is_removed_or_expires() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (na, nb, nc) = (eid(1), eid(2), eid(3));
+        let start = Instant::now();
+        let mut store = Topology::default();
+        assert!(
+            store.ingest_at(vector(na, 7_000, &[(nc, 1)]), start, 7_000),
+            "the vector of na is taken in"
+        );
+        assert!(
+            store.ingest_at(vector(nb, 7_000, &[(nc, 1)]), start, 7_000),
+            "the vector of nb is taken in"
+        );
+
+        let before_remove = store.generation();
+        assert!(store.remove(na), "the vector of na was held");
+        let after_remove = store.generation();
+        assert!(!store.remove(na), "nothing left to remove");
+        let after_second_remove = store.generation();
+        assert_eq!(
+            store.expire_older_than(start + secs(46)),
+            1,
+            "the vector of nb expires"
+        );
+        let after_expiry = store.generation();
+
+        assert!(after_remove > before_remove, "a removal");
+        assert_eq!(
+            after_second_remove, after_remove,
+            "a removal of nothing changes nothing"
+        );
+        assert!(after_expiry > after_second_remove, "an expiry");
     }
 
     #[test]
@@ -598,8 +663,11 @@ mod tests {
                 .all(|edge| edge.from == na.to_string()),
             "no edge of the crashed peer is left"
         );
-        let routes: Vec<_> = store.route_to(Leg { src: na, dst: nb }, 1).collect();
-        assert!(routes.is_empty(), "its underlay is gone too");
+        assert_eq!(
+            store.next_hop(na, nb, &HashSet::new(), &HashSet::new()),
+            NextHop::Unreachable,
+            "its underlay is gone too, so it is no next hop"
+        );
     }
 
     #[test]
@@ -770,39 +838,9 @@ mod tests {
         );
     }
 
-    /// Iroh names a path by the bytes of its address, so two spellings of one route are two
-    /// paths. Two ends hold different versions of a vector for a while (a relay switch, a new
-    /// IP), so the bytes of a route must depend on the ids of its hops and on nothing else.
+    /// Each node of a chain picks the next node of the chain as its next hop, from its own table.
     #[test]
-    fn the_locator_of_a_route_does_not_depend_on_the_addresses_a_vector_carries() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let (na, nb, nc) = (eid(1), eid(2), eid(3));
-        let mut store = Topology::default();
-        ingest(&mut store, vector(na, 1, &[(nb, 1)]));
-        ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
-        ingest(&mut store, vector(nc, 1, &[]));
-        let before_routes: Vec<_> = store.route_to(Leg { src: na, dst: nc }, 1).collect();
-        let before = before_routes[0].encode();
-
-        let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
-        let ip_addr: net::SocketAddr = "10.0.0.7:4000".parse().expect("an address");
-        let moved: EndpointAddr = EndpointAddr::new(nc.get())
-            .with_relay_url(relay)
-            .with_ip_addr(ip_addr);
-        assert!(
-            ingest(
-                &mut store,
-                LinkVector::signed(&secret_of(nc), 2, moved, Vec::new())
-            ),
-            "the locator of a route ignores the addresses a vector carries"
-        );
-        let after_routes: Vec<_> = store.route_to(Leg { src: na, dst: nc }, 1).collect();
-        let after = after_routes[0].encode();
-        assert_eq!(before, after, "the same route, the same bytes");
-    }
-
-    #[test]
-    fn route_traces_the_chain_and_carries_underlay_addrs() {
+    fn each_node_of_a_chain_picks_the_next_node_as_its_next_hop() {
         let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut store = Topology::default();
@@ -810,15 +848,21 @@ mod tests {
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
-        let routes: Vec<_> = store.route_to(Leg { src: na, dst: nd }, 3).collect();
-        assert_eq!(routes.len(), 1, "a route traces the chain of two hops");
-        let hops: Vec<_> = routes[0].hops().iter().map(|hop| hop.app_id).collect();
-        assert_eq!(hops, vec![nb, nc, nd], "the chain hops are b, c and d");
-        // Every hop names the underlay endpoint of that node.
+        let none = HashSet::new();
         assert_eq!(
-            routes[0].hops()[0].underlay_id,
-            UnderlayId::new(nb.get()),
-            "the first hop carries its underlay id"
+            store.next_hop(na, nd, &none, &HashSet::new()),
+            NextHop::Forward(nb),
+            "na reaches nd through nb"
+        );
+        assert_eq!(
+            store.next_hop(nb, nd, &none, &HashSet::new()),
+            NextHop::Forward(nc),
+            "nb reaches nd through nc"
+        );
+        assert_eq!(
+            store.next_hop(nc, nd, &none, &HashSet::new()),
+            NextHop::Forward(nd),
+            "nc is next to nd"
         );
     }
 
@@ -860,16 +904,28 @@ mod tests {
         );
     }
 
+    /// The origin of a cell needs no vector of the destination: the next hop is a neighbor, and only a neighbor
+    /// has to be dialable. A neighbor that has no vector is no next hop.
     #[test]
-    fn a_hop_without_an_underlay_addr_drops_the_route() {
+    fn the_destination_needs_no_vector_and_a_neighbor_without_one_is_no_next_hop() {
         let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc) = (eid(1), eid(2), eid(3));
         let mut store = Topology::default();
         ingest(&mut store, vector(na, 1, &[(nb, 1)]));
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         // nc never advertised its own vector, so its underlay addr is unknown.
-        let routes: Vec<_> = store.route_to(Leg { src: na, dst: nc }, 3).collect();
-        assert!(routes.is_empty(), "missing hop underlay ⇒ no usable route");
+        assert_eq!(
+            store.next_hop(na, nc, &HashSet::new(), &HashSet::new()),
+            NextHop::Forward(nb),
+            "the destination needs no vector: nb is a neighbor with one"
+        );
+        let mut alone = Topology::default();
+        ingest(&mut alone, vector(na, 1, &[(nb, 1)]));
+        assert_eq!(
+            alone.next_hop(na, nb, &HashSet::new(), &HashSet::new()),
+            NextHop::Unreachable,
+            "a neighbor with no vector cannot be dialed, so it is no next hop"
+        );
     }
 
     #[test]
@@ -881,18 +937,46 @@ mod tests {
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
-        let routes: Vec<_> = store.route_to(Leg { src: na, dst: nd }, 3).collect();
         assert_eq!(
-            routes.len(),
-            1,
-            "the interior-less direct route ends the search"
+            store.next_hop(na, nd, &HashSet::new(), &HashSet::new()),
+            NextHop::Forward(nd),
+            "the cheaper direct hop wins over the chain"
         );
-        let hops: Vec<_> = routes[0].hops().iter().map(|hop| hop.app_id).collect();
-        assert_eq!(hops, vec![nd], "the cheaper direct hop wins over the chain");
     }
 
+    /// The refused set removes only the neighbors of this node from the choice. A neighbor that this node refuses
+    /// still counts as a node on the way of another neighbor: A refuses X, and A > H > X > D is still a way.
     #[test]
-    fn returns_disjoint_alternates() {
+    fn a_refused_neighbor_is_still_a_node_on_the_way_of_another_neighbor() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let (na, nx, nh, nd) = (eid(1), eid(2), eid(3), eid(4));
+        let mut store = Topology::default();
+        ingest(&mut store, vector(na, 1, &[(nx, 1), (nh, 1)]));
+        ingest(&mut store, vector(nh, 1, &[(nx, 1)]));
+        ingest(&mut store, vector(nx, 1, &[(nd, 1)]));
+        ingest(&mut store, vector(nd, 1, &[]));
+
+        assert_eq!(
+            store.next_hop(na, nd, &HashSet::new(), &HashSet::new()),
+            NextHop::Forward(nx),
+            "control: with nothing refused the direct neighbor is the best"
+        );
+        assert_eq!(
+            store.next_hop(na, nd, &HashSet::from([nx]), &HashSet::new()),
+            NextHop::Forward(nh),
+            "a refused x is no next hop of a, and it is still on the way of h"
+        );
+        let distances = store.graph().distances_to(nd);
+        assert_eq!(
+            distances.get(&nh).map(|cost| cost.get()),
+            Some(2),
+            "the distance of h reads the table, which the refused set does not change"
+        );
+    }
+
+    /// A refused neighbor is removed before the choice: the other arm of a diamond takes over at once.
+    #[test]
+    fn a_refused_arm_of_a_diamond_gives_way_to_the_other() {
         let _guard = ::habilis_network_test_tracing::init();
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
         let mut store = Topology::default();
@@ -900,12 +984,15 @@ mod tests {
         ingest(&mut store, vector(nb, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
-        let routes: Vec<_> = store.route_to(Leg { src: na, dst: nd }, 3).collect();
-        assert_eq!(routes.len(), 2, "both diamond arms");
-        assert_ne!(
-            routes[0].hops()[0].app_id,
-            routes[1].hops()[0].app_id,
-            "the alternate routes are disjoint at the first hop"
+        let first = store.next_hop(na, nd, &HashSet::new(), &HashSet::new());
+        let NextHop::Forward(arm) = first else {
+            panic!("a way exists: {first:?}");
+        };
+        let other = if arm == nb { nc } else { nb };
+        assert_eq!(
+            store.next_hop(na, nd, &HashSet::from([arm]), &HashSet::new()),
+            NextHop::Forward(other),
+            "the other arm of the diamond takes over"
         );
     }
 
@@ -917,22 +1004,18 @@ mod tests {
     const NATIVE_COST: u32 = crate::DEFAULT_LINK_COST;
     const BROWSER_COST: u32 = crate::DEFAULT_LINK_COST * crate::BROWSER_HOP_FACTOR;
 
-    /// The application ids of the hops of the best route from `src` to `dst`.
-    fn best_route(store: &Topology, src: AppId, dst: AppId) -> Option<Vec<AppId>> {
-        let routes: Vec<_> = store.route_to(Leg { src, dst }, 1).collect();
-        let hops_of = |route: &crate::Route| -> Vec<AppId> {
-            let hops = route.hops();
-            hops.iter().map(|hop| hop.app_id).collect()
-        };
-        routes.first().map(hops_of)
+    /// The neighbor that `src` picks as the next hop of a cell for `dst`, with no neighbor refused.
+    fn first_hop(store: &Topology, src: AppId, dst: AppId) -> Option<AppId> {
+        match store.next_hop(src, dst, &HashSet::new(), &HashSet::new()) {
+            NextHop::Forward(neighbor) => Some(neighbor),
+            NextHop::TurnedBack | NextHop::Unreachable => None,
+        }
     }
 
     /// The cost of the cheapest path from `src` to `dst`.
     fn best_cost(store: &Topology, src: AppId, dst: AppId) -> Option<u32> {
-        store
-            .graph()
-            .shortest_path(Leg { src, dst })
-            .map(|path| path.cost.get())
+        let distances = store.graph().distances_to(dst);
+        distances.get(&src).map(|cost| cost.get())
     }
 
     /// `src` reaches `dst` by three native hops (`n1`, `n2`, `dst`), or by one browser hop (`tab`)
@@ -960,8 +1043,8 @@ mod tests {
         let _guard = ::habilis_network_test_tracing::init();
         let (store, [src, n1, n2, dst, tab]) = native_and_browser_routes(BROWSER_COST);
         assert_eq!(
-            best_route(&store, src, dst),
-            Some(vec![n1, n2, dst]),
+            first_hop(&store, src, dst),
+            Some(n1),
             "a three-hop native path beats a one-hop browser path"
         );
         assert_eq!(
@@ -969,20 +1052,19 @@ mod tests {
             Some(3 * NATIVE_COST),
             "the best cost is the native path's cost"
         );
-        let both: Vec<_> = store.route_to(Leg { src, dst }, 2).collect();
-        assert_eq!(both.len(), 2, "the browser route is still a route");
         assert_eq!(
-            both[1].hops()[0].app_id,
-            tab,
-            "the browser route comes second among the two routes"
+            store.next_hop(src, dst, &HashSet::from([n1]), &HashSet::new()),
+            NextHop::Forward(tab),
+            "the browser way is still a way: it takes over when the native neighbor is refused"
         );
+        let _ = n2;
 
         // The cost is what decides: a tab that advertises the native cost wins by its length.
         let (cheap_tab, [from, _, _, to, cheap]) = native_and_browser_routes(NATIVE_COST);
         assert_eq!(
-            best_route(&cheap_tab, from, to),
-            Some(vec![cheap, to]),
-            "the cheap tab route is the best route"
+            first_hop(&cheap_tab, from, to),
+            Some(cheap),
+            "the cheap tab is the best next hop"
         );
     }
 
@@ -1003,16 +1085,16 @@ mod tests {
             );
         }
         assert_eq!(
-            best_route(&store, alice, bob),
-            Some(vec![carol, bob]),
-            "the route from alice to the browser is found"
+            first_hop(&store, alice, bob),
+            Some(carol),
+            "the way from alice to the browser is found"
         );
 
         assert!(store.remove(carol), "carol leaves: her vector is gone");
         assert_eq!(
-            best_route(&store, alice, bob),
-            Some(vec![tab, bob]),
-            "the route through the browser has the browser's hop"
+            first_hop(&store, alice, bob),
+            Some(tab),
+            "the way through the browser has the browser's hop"
         );
         assert_eq!(
             best_cost(&store, alice, bob),
@@ -1064,11 +1146,7 @@ mod tests {
                     "the cost of a source changes no choice"
                 );
             }
-            assert_eq!(
-                best_route(&store, src, dst),
-                Some(vec![hop, dst]),
-                "{name} source"
-            );
+            assert_eq!(first_hop(&store, src, dst), Some(hop), "{name} source");
         }
     }
 

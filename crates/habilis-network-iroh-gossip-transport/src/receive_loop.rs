@@ -172,7 +172,7 @@ mod tests {
             use habilis_network_iroh_transport_util::{climb, custom_rung};
             let paths: Vec<_> = context.paths().collect();
             let mut selection = transports::PathSelection::none();
-            if let Some(path) = climb(&paths, custom_rung, |_, _| true) {
+            if let Some(path) = climb(context.current(), &paths, custom_rung, |_, _| true) {
                 selection.set(path);
             }
             selection

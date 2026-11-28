@@ -89,6 +89,8 @@ pub(crate) async fn fill_active_view(state: &mut EventLoopState, context: &Handl
 
 /// The member that a reclaim tick asks for a link when this node lost every one: the member
 /// that the fill tick would pick, and none while the node holds a link or the window is closed.
+/// The window does not close the starved `Join` of such a node: it is due 20 s after the first
+/// ask, and the window is 6 s long.
 pub(crate) fn isolated_candidate(
     state: &EventLoopState,
     max_connections: usize,
@@ -96,10 +98,101 @@ pub(crate) fn isolated_candidate(
     now: Instant,
     pick: usize,
 ) -> Option<iroh::EndpointAddr> {
+    if state.isolated_join_due(now) {
+        return join_pick(state, rendezvous_id, pick);
+    }
     if !state.isolated_refill_due(now) {
         return None;
     }
     next_fill(state, max_connections, rendezvous_id, now, pick)
+}
+
+/// One reclaim tick of a node that lost every link, as a decision: read which `Neighbor` requests
+/// went unanswered, then pick the member to ask. The read comes first. A request that nobody
+/// answered for `GRAFT_REFUSED_AFTER` makes the `Join` of a starved node due, and a read that only
+/// the heal tick made left the `Join` up to a heal interval late. With the read on each reclaim
+/// tick, the `Join` goes out within one tick of the end of that wait.
+pub(crate) fn isolated_tick(
+    state: &mut EventLoopState,
+    max_connections: usize,
+    rendezvous_id: EndpointId,
+    now: Instant,
+    pick: usize,
+) -> Option<iroh::EndpointAddr> {
+    state.settle_graft_backoff(now);
+    isolated_candidate(state, max_connections, rendezvous_id, now, pick)
+}
+
+/// The member that the starved `Join` of a node with no link goes to: a member that reads `Direct`
+/// and is not linked. The `Join` is paced by `STARVED`, so the relink cooldown of the member does
+/// not hold it.
+fn join_pick(
+    state: &EventLoopState,
+    rendezvous_id: EndpointId,
+    pick: usize,
+) -> Option<iroh::EndpointAddr> {
+    let mut members: Vec<iroh::EndpointAddr> = state
+        .member_addresses()
+        .into_iter()
+        .filter(|address| {
+            address.id != rendezvous_id
+                && !state.linked_endpoints.contains(&address.id)
+                && state.direct.get(&address.id) == Some(&DirectState::Direct)
+        })
+        .collect();
+    members.sort_unstable_by_key(|address| address.id);
+    let index = pick.checked_rem(members.len())?;
+    members.get(index).cloned()
+}
+
+/// Every filter of a fill or a retry pass that drops `address`, joined by `+`, or `candidate`
+/// when none does. The passes differ (the fill has no `pending` filter), so each flag that holds
+/// is named and the reader picks the filter of the pass that he reads.
+fn candidate_reason(
+    state: &EventLoopState,
+    address: &iroh::EndpointAddr,
+    rendezvous_id: EndpointId,
+    now: Instant,
+) -> String {
+    let flags: [(bool, &str); 5] = [
+        (address.id == rendezvous_id, "rendezvous"),
+        (state.linked_endpoints.contains(&address.id), "linked"),
+        (
+            state.direct.get(&address.id) == Some(&DirectState::Pending),
+            "pending",
+        ),
+        (state.relink_on_cooldown(address.id, now), "cooldown"),
+        (state.graft_blocked(address.id, now), "blocked"),
+    ];
+    let mut held: Vec<&str> = Vec::new();
+    for (holds, name) in flags {
+        if holds {
+            held.push(name);
+        }
+    }
+    if held.is_empty() {
+        "candidate".to_owned()
+    } else {
+        held.join("+")
+    }
+}
+
+/// The reason of each known member, as `short id=reason` words, for a debug line that names the
+/// filter that left a node with nobody to ask.
+pub(crate) fn candidate_reasons(
+    state: &EventLoopState,
+    rendezvous_id: EndpointId,
+    now: Instant,
+) -> String {
+    let words: Vec<String> = state
+        .member_addresses()
+        .iter()
+        .map(|address| {
+            let reason = candidate_reason(state, address, rendezvous_id, now);
+            format!("{}={reason}", address.id.fmt_short())
+        })
+        .collect();
+    words.join(" ")
 }
 
 /// A node that lost every link asks one other known peer per reclaim tick (400 ms) while the
@@ -109,13 +202,21 @@ pub(crate) fn isolated_candidate(
 pub(crate) async fn refill_isolated(state: &mut EventLoopState, context: &HandlerCtx<'_>) {
     let now = Instant::now();
     let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
-    let Some(address) = isolated_candidate(
+    let Some(address) = isolated_tick(
         state,
         context.max_connections,
         context.rendezvous_id,
         now,
         pick,
     ) else {
+        if state.isolated_refill_due(now) {
+            tracing::debug!(
+                target: transport::LOG_TARGET,
+                local = %context.endpoint.id().fmt_short(),
+                members = %candidate_reasons(state, context.rendezvous_id, now),
+                "no link left: nobody to ask"
+            );
+        }
         return;
     };
     tracing::info!(target: transport::LOG_TARGET, peer = %address.id, "no link left: asking another known peer");
@@ -200,7 +301,7 @@ mod tests {
     use iroh_gossip::net::Gossip;
     use iroh_gossip::proto::TopicId;
 
-    use super::{graft_one, next_fill, retry_candidates_at};
+    use super::{graft_one, isolated_tick, next_fill, retry_candidates_at};
     use crate::daemon::handler_ctx::HandlerCtx;
     use crate::daemon::state::{DirectState, EventLoopState};
     use crate::gossip::event::CountingSink;
@@ -208,11 +309,14 @@ mod tests {
     use crate::protocol::{MeshId, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick, test_key};
     use crate::transport::MeshSender;
+    use crate::transport::probe::graft_request::{GraftRequest, GraftTarget, graft_request};
     use crate::util::clock::Instant;
     use crate::util::tuning::{GRAFT_REFUSED_AFTER, RELINK_COOLDOWN, STARVED};
 
     const MAX_CONNECTIONS: usize = 4;
     const SECOND: Duration = Duration::from_secs(1);
+    /// The period of the reclaim tick, in milliseconds.
+    const RECLAIM_MILLIS: u64 = 400;
 
     fn rendezvous() -> EndpointId {
         endpoint_id(1)
@@ -232,6 +336,51 @@ mod tests {
             iroh::EndpointAddr::new(endpoint_id(2)),
         );
         state
+    }
+
+    /// A node with no neighbor whose `Neighbor` request was read as refused asks with a `Join` at
+    /// once, and does not wait for `STARVED`. A node with no neighbor and no refusal, and a node
+    /// with a neighbor, keep the wait. The pace after the `Join` is the same as for any starved
+    /// node. The test shows the rule, with a fixed clock. It does not show that a real mesh reaches
+    /// that state and stays there. The first case is a new member at its start: it sends no `Join`.
+    #[test]
+    fn a_node_with_no_neighbor_and_a_read_refusal_asks_with_a_join_at_once() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let start = Instant::now();
+        let asked_at = start + SECOND;
+        let read_at = asked_at + GRAFT_REFUSED_AFTER;
+        let now = read_at + SECOND;
+        let candidate = endpoint_id(2);
+
+        let mut fresh = fresh_state();
+        fresh.note_link_count(MAX_CONNECTIONS, start);
+        assert!(
+            !fresh.starved_join_ready(now),
+            "a node with no neighbor and no refusal waits for STARVED"
+        );
+
+        let mut refused = fresh_state();
+        refused.note_link_count(MAX_CONNECTIONS, start);
+        refused.graft_backoff.asked(candidate, asked_at);
+        refused.settle_graft_backoff(read_at);
+        assert!(
+            refused.starved_join_ready(now),
+            "a node with no neighbor that was refused asks with a Join at once"
+        );
+        assert!(refused.starved_join_due(now), "the first ask is due");
+        assert!(
+            !refused.starved_join_ready(now + SECOND),
+            "the ask is paced: the next one waits for STARVED"
+        );
+
+        let mut linked = state_with_a_member_to_fill(1);
+        linked.note_link_count(MAX_CONNECTIONS, start);
+        linked.graft_backoff.asked(candidate, asked_at);
+        linked.settle_graft_backoff(read_at);
+        assert!(
+            !linked.starved_join_ready(now),
+            "a node with a neighbor waits for STARVED, refused or not"
+        );
     }
 
     /// The fill tick grafts a member while the node holds fewer than G peers.
@@ -415,5 +564,191 @@ mod tests {
                 "the graft of a known path dropped the refusal, so the fallback asked a Neighbor"
             );
         });
+    }
+    /// What one run of [`join_delay`] saw.
+    struct JoinRun {
+        /// From the first `Neighbor` request to the first `Join`, if a `Join` went out.
+        delay: Option<Duration>,
+        /// The `Join` requests in the 60 s of the run.
+        joins: usize,
+        /// The members that the reclaim tick and the heal tick picked.
+        picks: usize,
+        /// Whether each `Join` went to a member that reads `Direct`.
+        joins_to_direct: bool,
+        /// The member of the first `Join`.
+        join_target: Option<EndpointId>,
+        /// The `Neighbor` requests to that member after the `Join`.
+        asks_after_join: usize,
+    }
+
+    /// The `Join` of a node that lost every link goes out within one reclaim tick of the end of the
+    /// wait that reads its first request as refused, whatever the phase of the reclaim tick (400 ms)
+    /// and of the heal tick (15 s), and whichever member the tick picks. The next `Join` waits for
+    /// `STARVED` (`join_fallback_at`, read by `starved_join_ready`), so the reclaim ticks that go
+    /// on for 40 s after the `Join` send none.
+    ///
+    /// The run of 2026-11-24 asked first at 27:48.94 and asked with the `Join` at 28:16.34, 27.4 s
+    /// later, because only the heal tick read the refusals: a delay from 20 s to 35 s, by the phase
+    /// of the heal tick. The guard of a silent partition fails the test at 25 s. In that run 2 of
+    /// the 3 members were cut, so the table has 0, 1, 2 and 3 members that read `RelayOnly`, and
+    /// the pick of the member goes through the check that production makes (a `Direct` member is
+    /// asked, any other is probed and not asked). The clock is a parameter, so the 152 phases of
+    /// each case need no sleep.
+    #[test]
+    fn the_join_of_a_node_with_no_link_goes_out_one_reclaim_tick_after_the_refusal_is_due() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let tick = Duration::from_millis(RECLAIM_MILLIS);
+        let heal_phases: Vec<u64> = (0..38).map(|step| step * RECLAIM_MILLIS).collect();
+        for relay_only in 0..=3_usize {
+            let mut shortest = Duration::MAX;
+            let mut longest = Duration::ZERO;
+            let mut most_picks = 0;
+            let mut most_joins = 0;
+            let mut most_asks_after_join = 0;
+            let mut targets: Vec<EndpointId> = Vec::new();
+            for pick in 0..3 {
+                for reclaim_phase in [0, 100, 200, 300] {
+                    for &heal_phase in &heal_phases {
+                        let run = join_delay(reclaim_phase, heal_phase, relay_only, pick);
+                        let case = format!(
+                            "{relay_only} relay-only, pick {pick}, reclaim phase {reclaim_phase} ms, heal phase {heal_phase} ms"
+                        );
+                        assert!(
+                            run.joins_to_direct,
+                            "a Join goes to a Direct member ({case})"
+                        );
+                        shortest = shortest.min(run.delay.unwrap_or(Duration::MAX));
+                        longest = longest.max(run.delay.unwrap_or(Duration::ZERO));
+                        most_picks = most_picks.max(run.picks);
+                        most_joins = most_joins.max(run.joins);
+                        most_asks_after_join = most_asks_after_join.max(run.asks_after_join);
+                        if let Some(target) = run.join_target
+                            && !targets.contains(&target)
+                        {
+                            targets.push(target);
+                        }
+                    }
+                }
+            }
+            eprintln!(
+                "Join delay with {relay_only} relay-only of 3: min {shortest:?}, max {longest:?}, most picks in 60 s {most_picks}, most Joins {most_joins}, most Neighbor asks to the Join target after it {most_asks_after_join}, members that got a Join {}",
+                targets.len()
+            );
+            assert_eq!(
+                most_asks_after_join, 0,
+                "the member that got the Join is not asked again with a Neighbor request ({relay_only} relay-only)"
+            );
+            assert_eq!(
+                targets.len(),
+                3 - relay_only,
+                "over the pick values, each member that reads Direct gets a Join ({relay_only} relay-only)"
+            );
+            if relay_only == 3 {
+                assert_eq!(most_joins, 0, "no member reads Direct, so no Join goes out");
+            } else {
+                assert_eq!(
+                    most_joins, 1,
+                    "one Join in 60 s, and no repeat ({relay_only} relay-only)"
+                );
+                assert!(
+                    shortest >= GRAFT_REFUSED_AFTER,
+                    "the Join waits for the read of the refusal ({relay_only} relay-only): min {shortest:?}, max {longest:?}"
+                );
+                assert!(
+                    longest <= GRAFT_REFUSED_AFTER + tick,
+                    "the Join goes out within one reclaim tick of the refusal, and one more for each member that is not asked ({relay_only} relay-only): min {shortest:?}, max {longest:?}"
+                );
+            }
+        }
+    }
+
+    /// One run of 60 s of a node with 3 known members and no link, of which the last `relay_only`
+    /// read `RelayOnly` and the others `Direct`. The reclaim tick picks with `pick`, and the
+    /// reclaim tick and the heal tick run at the given phases, as the event loop runs them.
+    fn join_delay(reclaim_phase: u64, heal_phase: u64, relay_only: usize, pick: usize) -> JoinRun {
+        const WINDOW: u64 = 60_000;
+        let start = Instant::now();
+        let mut state = fresh_state();
+        let members = [(0, "one", 2), (1, "two", 3), (2, "three", 4)];
+        for (index, name, seed) in members {
+            state.names.insert(test_key(name), nick(name));
+            state.bind_peer_endpoint(
+                test_key(name),
+                nick(name),
+                iroh::EndpointAddr::new(endpoint_id(seed)),
+            );
+            let verdict = if index + relay_only >= 3 {
+                DirectState::RelayOnly
+            } else {
+                DirectState::Direct
+            };
+            state.direct.insert(endpoint_id(seed), verdict);
+        }
+        state.note_link_count(MAX_CONNECTIONS, start);
+        state.start_zero_links_gap_at(start);
+        state.arm_reclaim(start);
+        let mut first_ask: Option<Instant> = None;
+        let mut joins: Vec<Instant> = Vec::new();
+        let mut picks = 0;
+        let mut joins_to_direct = true;
+        let mut join_target: Option<EndpointId> = None;
+        let mut asks_after_join = 0;
+        // What `graft_one` does with a member: it starts the relink cooldown, and asks only a
+        // member that reads `Direct` (`ensure_direct`).
+        let mut graft = |node: &mut EventLoopState, peer: EndpointId, now: Instant| {
+            node.note_relink(peer, now);
+            picks += 1;
+            if node.direct.get(&peer) != Some(&DirectState::Direct) {
+                return;
+            }
+            let target = GraftTarget {
+                peer,
+                rendezvous: rendezvous(),
+            };
+            match graft_request(node, target, MAX_CONNECTIONS, now, true) {
+                GraftRequest::Neighbor => {
+                    first_ask.get_or_insert(now);
+                    if join_target == Some(peer) {
+                        asks_after_join += 1;
+                    }
+                }
+                GraftRequest::Join => {
+                    joins.push(now);
+                    join_target.get_or_insert(peer);
+                    joins_to_direct &= node.direct.get(&peer) == Some(&DirectState::Direct);
+                }
+                GraftRequest::Skip => {}
+            }
+        };
+        for millis in (0..WINDOW).step_by(100) {
+            let now = start + Duration::from_millis(millis);
+            if millis >= reclaim_phase
+                && (millis - reclaim_phase).is_multiple_of(RECLAIM_MILLIS)
+                && let Some(address) =
+                    isolated_tick(&mut state, MAX_CONNECTIONS, rendezvous(), now, pick)
+            {
+                graft(&mut state, address.id, now);
+            }
+            if millis >= heal_phase && (millis - heal_phase).is_multiple_of(15_000) {
+                state.note_link_count(MAX_CONNECTIONS, now);
+                state.settle_graft_backoff(now);
+                let candidates =
+                    retry_candidates_at(&state, rendezvous(), MAX_CONNECTIONS, false, now);
+                if let Some(address) = candidates.first() {
+                    graft(&mut state, address.id, now);
+                }
+            }
+        }
+        let delay: Option<Duration> = first_ask
+            .zip(joins.first())
+            .map(|(asked, joined)| joined.duration_since(asked));
+        JoinRun {
+            delay,
+            joins: joins.len(),
+            picks,
+            joins_to_direct,
+            join_target,
+            asks_after_join,
+        }
     }
 }

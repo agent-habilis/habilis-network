@@ -1,13 +1,12 @@
 //! Why a send failed.
 
 use crate::daemon::event_loop::EventLoopError;
-use iroh::EndpointId;
 
 use std::{error, fmt};
 /// Why a frame could not be sent.
 ///
-/// [`SendError::Held`] is a refusal that the caller can retry later, so it is a variant and not a
-/// downcast. [`SendError::Internal`] holds the causes no caller acts on.
+/// [`SendError::Undeliverable`] names an addressee with no known path, so it is a variant and
+/// not a downcast. [`SendError::Internal`] holds the causes no caller acts on.
 ///
 /// # Examples
 ///
@@ -23,12 +22,6 @@ use std::{error, fmt};
 #[non_exhaustive]
 #[must_use]
 pub enum SendError {
-    /// The send is refused: a probe found that the only path of its peer is the relay, which is
-    /// lookup only on this mesh. The caller can retry the send later, when a direct path is proven.
-    Held {
-        /// The endpoint the frame is held for.
-        eid: EndpointId,
-    },
     /// The addressee has no known path: a route that waits on `PeerInfo`, or the rendezvous.
     Undeliverable(String),
     /// The message is larger than one frame carries.
@@ -63,10 +56,6 @@ impl SendError {
 impl fmt::Display for SendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Held { eid } => write!(
-                f,
-                "directed message to {eid} refused: a probe found only the relay, and the relay is lookup only on this mesh; retry the send later"
-            ),
             Self::Undeliverable(message)
             | Self::Oversize(message)
             | Self::InvalidAddressee(message) => f.write_str(message),
@@ -100,8 +89,7 @@ impl error::Error for SendError {
             Self::EventLoop(error) => Some(error),
             Self::State(error) => Some(error),
             Self::Internal(error) => error.source(),
-            Self::Held { .. }
-            | Self::Undeliverable(_)
+            Self::Undeliverable(_)
             | Self::Oversize(_)
             | Self::InvalidAddressee(_)
             | Self::ForeignFrame

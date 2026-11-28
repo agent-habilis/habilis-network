@@ -81,9 +81,24 @@ pub struct TransportOpts {
     /// other path. Off by default, and set only by [`Self::within`]: it is a choice of the
     /// mesh, which every member makes the same way, and not a limit of this node.
     pub gossip: GossipPath,
+    /// Where the endpoint listens. Tests only.
+    #[cfg(feature = "iroh-test-utils")]
+    pub bind: super::Bind,
 }
 
 impl TransportOpts {
+    /// Where the endpoint listens. Tests only.
+    #[cfg(feature = "iroh-test-utils")]
+    #[must_use]
+    pub fn bind(
+        mut self,
+        // `Bind::Loopback` keeps the endpoint off the network
+        bind: super::Bind,
+    ) -> Self {
+        self.bind = bind;
+        self
+    }
+
     /// Set the UDP transport.
     #[must_use]
     pub fn udp(
@@ -129,6 +144,41 @@ impl TransportOpts {
     }
 }
 
+/// Whether the endpoint of a node with these options listens on this host only.
+#[cfg(feature = "iroh-test-utils")]
+pub(crate) fn binds_loopback_only(options: TransportOpts) -> bool {
+    options.bind == super::Bind::Loopback
+}
+
+/// Whether the endpoint of a node with these options listens on this host only: a build without
+/// the test feature has no way to ask for it.
+#[cfg(not(feature = "iroh-test-utils"))]
+pub(crate) fn binds_loopback_only(_options: TransportOpts) -> bool {
+    false
+}
+
+/// Whether a node stays on this host: the lookups of its mesh are loopback only (`loopback_mesh`),
+/// or it asked for a loopback bind. One answer for the two things that follow from it: the
+/// `WebRTC` sessions of the node gather host candidates only (no STUN) and bind their sockets on
+/// loopback, so that no packet leaves the host and no other machine can send one to the node.
+pub(crate) fn stays_on_this_host(loopback_mesh: bool, options: TransportOpts) -> bool {
+    loopback_mesh || binds_loopback_only(options)
+}
+
+/// The options of an endpoint that a node builds beside its own and that has no transport choice of
+/// its own (a rendezvous endpoint, a prober): the defaults, with the bind of the node. The other
+/// fields (`udp`, relay, `WebRTC`, gossip) are choices of the member endpoint and do not reach it.
+#[must_use]
+pub(crate) fn bind_only(options: TransportOpts) -> TransportOpts {
+    #[cfg(feature = "iroh-test-utils")]
+    return TransportOpts::default().bind(options.bind);
+    #[cfg(not(feature = "iroh-test-utils"))]
+    {
+        let _ = options;
+        TransportOpts::default()
+    }
+}
+
 impl Default for TransportOpts {
     fn default() -> Self {
         Self {
@@ -136,6 +186,8 @@ impl Default for TransportOpts {
             relay: true,
             webrtc: true,
             gossip: GossipPath::Off,
+            #[cfg(feature = "iroh-test-utils")]
+            bind: super::Bind::AllInterfaces,
         }
     }
 }
@@ -176,6 +228,8 @@ impl TransportOpts {
             relay: true,
             webrtc: true,
             gossip: GossipPath::Off,
+            #[cfg(feature = "iroh-test-utils")]
+            bind: super::Bind::AllInterfaces,
         }
     }
 }
