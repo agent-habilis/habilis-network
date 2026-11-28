@@ -1,6 +1,7 @@
 //! The client side of the IPC socket: send a command and read its reply.
 
 use super::addressed::Addressed;
+use super::denied::Denied;
 use super::ipc_error::IpcError;
 use super::listener;
 use super::no_daemon::NoDaemon;
@@ -21,8 +22,9 @@ use tokio::io;
 /// # Panics
 /// If called with a command that carries no mesh id — never: `Info` uses `send_to_path`.
 /// # Errors
-/// [`NoDaemon`] when no server is listening; otherwise an invalid socket name
-/// or a failed request/response round trip.
+/// [`NoDaemon`] when no server is listening, and [`Denied`] when the operating
+/// system denies the connect; otherwise an invalid socket name or a failed
+/// request/response round trip.
 ///
 /// # Examples
 ///
@@ -54,11 +56,9 @@ where
     let path = listener::socket_path(base, mesh, nickname);
     let name = listener::to_name(&path)
         .map_err(|error| IpcError::internal(anyhow::anyhow!("invalid socket name: {error}")))?;
-    let stream = Stream::connect(name).await.map_err(|_| {
-        IpcError::NoDaemon(NoDaemon {
-            nickname: nickname.clone(),
-        })
-    })?;
+    let stream = Stream::connect(name)
+        .await
+        .map_err(|error| connect_error(&error, &path, Some(nickname)))?;
     round_trip(stream, command)
         .await
         .map_err(IpcError::internal)
@@ -69,8 +69,9 @@ where
 /// missing/dead socket is a plain `Err` the caller can skip.
 ///
 /// # Errors
-/// The path is not valid UTF-8, the socket can't be connected (no live
-/// daemon), or the request/response round trip fails.
+/// [`Denied`] when the operating system denies the connect. Otherwise the path
+/// is not valid UTF-8, the socket can't be connected (no live daemon), or the
+/// request/response round trip fails.
 ///
 /// # Examples
 ///
@@ -100,10 +101,30 @@ pub async fn send_to_path<Cmd: Serialize>(
         .map_err(|error| IpcError::internal(anyhow::anyhow!("invalid socket name: {error}")))?;
     let stream = Stream::connect(name)
         .await
-        .map_err(|error| IpcError::internal(anyhow::anyhow!("connect {path_str}: {error}")))?;
+        .map_err(|error| connect_error(&error, path_str, None))?;
     round_trip(stream, command)
         .await
         .map_err(IpcError::internal)
+}
+
+/// Why a connect to the daemon socket failed. Only a connect with a nickname
+/// can say [`NoDaemon`], because that error names the member.
+pub(super) fn connect_error(
+    error: &io::Error,
+    socket: &str,
+    nickname: Option<&Nickname>,
+) -> IpcError {
+    match (error.kind(), nickname) {
+        (io::ErrorKind::PermissionDenied, _) => IpcError::Denied(Denied {
+            socket: socket.to_owned(),
+        }),
+        (io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused, Some(nickname)) => {
+            IpcError::NoDaemon(NoDaemon {
+                nickname: nickname.clone(),
+            })
+        }
+        _ => IpcError::internal(anyhow::anyhow!("connect {socket}: {error}")),
+    }
 }
 
 /// Write `cmd`, half-close, and read back the single-line JSON response.

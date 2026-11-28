@@ -2,6 +2,8 @@ mod addressed;
 pub use addressed::Addressed;
 mod client;
 pub use client::{active_socket_paths, send, send_to_path};
+mod denied;
+pub use denied::Denied;
 mod ipc_error;
 pub use ipc_error::IpcError;
 mod json_reply;
@@ -366,10 +368,67 @@ mod tests {
 #[cfg(test)]
 mod chain_tests {
 
-    use super::IpcError;
+    use super::{Denied, IpcError, NoDaemon, client};
+    use crate::protocol::Nickname;
 
     use std::io;
     use std::io::ErrorKind;
+
+    const SOCKET: &str = "/tmp/habilis/mesh/nick.ipc.sock";
+
+    #[test]
+    fn a_denied_connect_is_typed_as_denied() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let error = io::Error::from(ErrorKind::PermissionDenied);
+        let nickname = Nickname::from("nick");
+        for named in [Some(&nickname), None] {
+            let typed = client::connect_error(&error, SOCKET, named);
+            assert!(
+                matches!(&typed, IpcError::Denied(Denied { socket }) if socket == SOCKET),
+                "a PermissionDenied connect is not typed as Denied: {typed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_or_refused_socket_is_no_daemon() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let nickname = Nickname::from("nick");
+        for kind in [ErrorKind::NotFound, ErrorKind::ConnectionRefused] {
+            let typed = client::connect_error(&io::Error::from(kind), SOCKET, Some(&nickname));
+            assert!(
+                matches!(&typed, IpcError::NoDaemon(NoDaemon { nickname: named }) if *named == nickname),
+                "a {kind:?} connect is not typed as NoDaemon: {typed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn another_connect_error_is_internal_and_keeps_its_text() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let nickname = Nickname::from("nick");
+        for named in [Some(&nickname), None] {
+            let typed = client::connect_error(&io::Error::from(ErrorKind::TimedOut), SOCKET, named);
+            assert!(
+                matches!(&typed, IpcError::Internal(_)) && typed.to_string().contains(SOCKET),
+                "a TimedOut connect is not Internal with the socket in its text: {typed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn denied_says_the_operating_system_denied_access() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let text = IpcError::Denied(Denied {
+            socket: SOCKET.to_owned(),
+        })
+        .to_string();
+        assert!(
+            text.contains("denied access to the daemon socket") && text.contains(SOCKET),
+            "the Denied text does not name the denial and the socket: {text}"
+        );
+    }
+
     #[test]
     fn an_internal_cause_keeps_its_chain() {
         let _guard = ::habilis_network_test_tracing::init();

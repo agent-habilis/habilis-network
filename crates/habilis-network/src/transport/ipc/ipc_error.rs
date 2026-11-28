@@ -1,11 +1,13 @@
 //! The error of an IPC round trip.
 
+use super::denied::Denied;
 use super::no_daemon::NoDaemon;
 
 use std::{error, fmt};
 /// Why a command could not reach its daemon.
 ///
-/// [`IpcError::NoDaemon`] is the one a caller acts on (no live daemon to ask).
+/// [`IpcError::NoDaemon`] and [`IpcError::Denied`] are the two a caller acts on:
+/// no live daemon to ask, and a daemon socket that the operating system refuses.
 /// [`IpcError::Internal`] holds the causes no caller acts on: a bad socket name, a
 /// round trip that fails, or a response that is too large.
 ///
@@ -26,6 +28,8 @@ use std::{error, fmt};
 pub enum IpcError {
     /// No daemon is listening on the socket.
     NoDaemon(NoDaemon),
+    /// The operating system denied the connect to the daemon socket.
+    Denied(Denied),
     /// A cause no caller acts on. It keeps its text and its chain.
     Internal(Box<dyn error::Error + Send + Sync>),
 }
@@ -41,6 +45,7 @@ impl fmt::Display for IpcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoDaemon(error) => fmt::Display::fmt(error, f),
+            Self::Denied(error) => fmt::Display::fmt(error, f),
             Self::Internal(error) => fmt::Display::fmt(error.as_ref(), f),
         }
     }
@@ -50,7 +55,7 @@ impl error::Error for IpcError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Internal(error) => error.source(),
-            Self::NoDaemon(_) => None,
+            Self::NoDaemon(_) | Self::Denied(_) => None,
         }
     }
 }

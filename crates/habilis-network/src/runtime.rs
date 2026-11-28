@@ -46,8 +46,8 @@ pub mod state_file {
 #[cfg(feature = "host")]
 pub mod ipc {
     pub use crate::transport::ipc::{
-        Addressed, IpcError, NoDaemon, active_socket_paths, json_ack, json_error, json_ok_msg,
-        send, send_to_path,
+        Addressed, Denied, IpcError, NoDaemon, active_socket_paths, json_ack, json_error,
+        json_ok_msg, send, send_to_path,
     };
 }
 
