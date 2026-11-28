@@ -371,8 +371,10 @@ mod chain_tests {
     use super::{Denied, IpcError, NoDaemon, client};
     use crate::protocol::Nickname;
 
-    use std::io;
+    use rustix::io::Errno;
     use std::io::ErrorKind;
+    use std::os::unix::net::UnixStream;
+    use std::{env, fs, io, process};
 
     const SOCKET: &str = "/tmp/habilis/mesh/nick.ipc.sock";
 
@@ -384,7 +386,7 @@ mod chain_tests {
         for named in [Some(&nickname), None] {
             let typed = client::connect_error(&error, SOCKET, named);
             assert!(
-                matches!(&typed, IpcError::Denied(Denied { socket }) if socket == SOCKET),
+                matches!(&typed, IpcError::Denied(Denied { socket, .. }) if socket == SOCKET),
                 "a PermissionDenied connect is not typed as Denied: {typed:?}"
             );
         }
@@ -421,11 +423,77 @@ mod chain_tests {
         let _guard = ::habilis_network_test_tracing::init();
         let text = IpcError::Denied(Denied {
             socket: SOCKET.to_owned(),
+            os_error: Some(1),
         })
         .to_string();
         assert!(
-            text.contains("denied access to the daemon socket") && text.contains(SOCKET),
-            "the Denied text does not name the denial and the socket: {text}"
+            text.contains("denied access to the daemon socket")
+                && text.contains(SOCKET)
+                && text.contains("os error 1"),
+            "the Denied text does not name the denial, the socket and the OS error: {text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_denied_connect_keeps_the_os_error_number() {
+        let _guard = ::habilis_network_test_tracing::init();
+        for code in [Errno::PERM, Errno::ACCESS] {
+            let error = io::Error::from_raw_os_error(code.raw_os_error());
+            let typed = client::connect_error(&error, SOCKET, None);
+            assert!(
+                matches!(&typed, IpcError::Denied(Denied { os_error, .. }) if *os_error == Some(code.raw_os_error())),
+                "a denied connect with {code:?} does not keep its OS error number: {typed:?}"
+            );
+        }
+    }
+
+    // A real connect: a socket path in a folder of mode 000 is denied with EACCES.
+    #[cfg(unix)]
+    #[test]
+    fn a_connect_in_a_folder_of_mode_000_is_denied_with_eacces() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use std::os::unix::fs::PermissionsExt as _;
+            let folder = env::temp_dir().join(format!("habilis-ipc-denied-{}", process::id()));
+            fs::create_dir_all(&folder).expect("the test folder is made");
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o000))
+                .expect("the test folder is closed");
+            let blocked = fs::read_dir(&folder).is_err();
+            let socket = folder.join("nick.ipc.sock");
+            let result =
+                client::send_to_path(&socket, &serde_json::json!({"command": "ping"})).await;
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o700))
+                .expect("the test folder is opened");
+            fs::remove_dir(&folder).expect("the test folder is removed");
+            if !blocked {
+                return; // root reads a folder of mode 000, so nothing is denied
+            }
+            let error = result.expect_err("a connect in a closed folder fails");
+            assert!(
+                matches!(&error, IpcError::Denied(Denied { os_error, .. }) if *os_error == Some(Errno::ACCESS.raw_os_error())),
+                "a connect in a folder of mode 000 is not Denied with EACCES: {error:?}"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_regular_file_at_the_socket_path_is_no_daemon() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let file = env::temp_dir().join(format!("habilis-ipc-notsock-{}", process::id()));
+        fs::write(&file, b"").expect("the test file is written");
+        let real = UnixStream::connect(&file).expect_err("a connect to a regular file fails");
+        fs::remove_file(&file).expect("the test file is removed");
+        assert_eq!(
+            real.raw_os_error(),
+            Some(Errno::NOTSOCK.raw_os_error()),
+            "a connect to a regular file does not give ENOTSOCK on this platform"
+        );
+        let nickname = Nickname::from("nick");
+        let typed = client::connect_error(&real, SOCKET, Some(&nickname));
+        assert!(
+            matches!(&typed, IpcError::NoDaemon(_)),
+            "a regular file at the socket path is not NoDaemon: {typed:?}"
         );
     }
 

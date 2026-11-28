@@ -69,9 +69,11 @@ where
 /// missing/dead socket is a plain `Err` the caller can skip.
 ///
 /// # Errors
-/// [`Denied`] when the operating system denies the connect. Otherwise the path
-/// is not valid UTF-8, the socket can't be connected (no live daemon), or the
-/// request/response round trip fails.
+/// [`Denied`] when the operating system denies the connect. Any other failure
+/// is an internal error: the path is not valid UTF-8, the socket can't be
+/// connected (no live daemon, no socket at the path, or any other connect
+/// error), or the request/response round trip fails. This function has no
+/// nickname, so it never returns [`NoDaemon`].
 ///
 /// # Examples
 ///
@@ -107,6 +109,19 @@ pub async fn send_to_path<Cmd: Serialize>(
         .map_err(IpcError::internal)
 }
 
+/// Whether the connect found a file that is no socket. No daemon listens at
+/// that path, so the member has no daemon.
+#[cfg(all(unix, feature = "host"))]
+fn is_not_a_socket(error: &io::Error) -> bool {
+    use rustix::io::Errno;
+    Errno::from_io_error(error) == Some(Errno::NOTSOCK)
+}
+
+#[cfg(not(all(unix, feature = "host")))]
+fn is_not_a_socket(_error: &io::Error) -> bool {
+    false
+}
+
 /// Why a connect to the daemon socket failed. Only a connect with a nickname
 /// can say [`NoDaemon`], because that error names the member.
 pub(super) fn connect_error(
@@ -117,12 +132,16 @@ pub(super) fn connect_error(
     match (error.kind(), nickname) {
         (io::ErrorKind::PermissionDenied, _) => IpcError::Denied(Denied {
             socket: socket.to_owned(),
+            os_error: error.raw_os_error(),
         }),
         (io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused, Some(nickname)) => {
             IpcError::NoDaemon(NoDaemon {
                 nickname: nickname.clone(),
             })
         }
+        (_, Some(nickname)) if is_not_a_socket(error) => IpcError::NoDaemon(NoDaemon {
+            nickname: nickname.clone(),
+        }),
         _ => IpcError::internal(anyhow::anyhow!("connect {socket}: {error}")),
     }
 }
