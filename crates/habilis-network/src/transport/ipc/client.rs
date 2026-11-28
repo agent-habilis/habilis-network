@@ -130,21 +130,23 @@ pub(super) fn connect_error(
     socket: &str,
     nickname: Option<&Nickname>,
 ) -> IpcError {
-    match (error.kind(), nickname) {
-        (io::ErrorKind::PermissionDenied, _) => IpcError::Denied(Denied {
+    let kind = error.kind();
+    if kind == io::ErrorKind::PermissionDenied {
+        return IpcError::Denied(Denied {
             socket: socket.to_owned(),
             os_error: error.raw_os_error(),
-        }),
-        (io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused, Some(nickname)) => {
-            IpcError::NoDaemon(NoDaemon {
-                nickname: nickname.clone(),
-            })
-        }
-        (_, Some(nickname)) if is_not_a_socket(error) => IpcError::NoDaemon(NoDaemon {
-            nickname: nickname.clone(),
-        }),
-        _ => IpcError::internal(anyhow::anyhow!("connect {socket}: {error}")),
+        });
     }
+    if let Some(nickname) = nickname
+        && (kind == io::ErrorKind::NotFound
+            || kind == io::ErrorKind::ConnectionRefused
+            || is_not_a_socket(error))
+    {
+        return IpcError::NoDaemon(NoDaemon {
+            nickname: nickname.clone(),
+        });
+    }
+    IpcError::internal(anyhow::anyhow!("connect {socket}: {error}"))
 }
 
 /// Write `cmd`, half-close, and read back the single-line JSON response.
