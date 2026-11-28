@@ -2,6 +2,8 @@ mod addressed;
 pub use addressed::Addressed;
 mod client;
 pub use client::{active_socket_paths, send, send_to_path};
+mod denied;
+pub use denied::Denied;
 mod ipc_error;
 pub use ipc_error::IpcError;
 mod json_reply;
@@ -366,10 +368,183 @@ mod tests {
 #[cfg(test)]
 mod chain_tests {
 
-    use super::IpcError;
+    use super::{Denied, IpcError, NoDaemon, client};
+    use crate::protocol::Nickname;
 
+    #[cfg(unix)]
+    use super::{Addressed, listener};
+    #[cfg(unix)]
+    use crate::protocol::MeshId;
+    #[cfg(unix)]
+    use crate::util;
+    use rustix::io::Errno;
     use std::io;
     use std::io::ErrorKind;
+    #[cfg(target_os = "macos")]
+    use std::os::unix::net::UnixStream;
+    #[cfg(unix)]
+    use std::{fs, path, process};
+
+    const SOCKET: &str = "/tmp/habilis/mesh/nick.ipc.sock";
+
+    #[test]
+    fn a_denied_connect_is_typed_as_denied() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let error = io::Error::from(ErrorKind::PermissionDenied);
+        let nickname = Nickname::from("nick");
+        for named in [Some(&nickname), None] {
+            let typed = client::connect_error(&error, SOCKET, named);
+            assert!(
+                matches!(&typed, IpcError::Denied(Denied { socket, .. }) if socket == SOCKET),
+                "a PermissionDenied connect is not typed as Denied: {typed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_or_refused_socket_is_no_daemon() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let nickname = Nickname::from("nick");
+        for kind in [ErrorKind::NotFound, ErrorKind::ConnectionRefused] {
+            let typed = client::connect_error(&io::Error::from(kind), SOCKET, Some(&nickname));
+            assert!(
+                matches!(&typed, IpcError::NoDaemon(NoDaemon { nickname: named }) if *named == nickname),
+                "a {kind:?} connect is not typed as NoDaemon: {typed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn another_connect_error_is_internal_and_keeps_its_text() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let nickname = Nickname::from("nick");
+        for named in [Some(&nickname), None] {
+            let typed = client::connect_error(&io::Error::from(ErrorKind::TimedOut), SOCKET, named);
+            assert!(
+                matches!(&typed, IpcError::Internal(_)) && typed.to_string().contains(SOCKET),
+                "a TimedOut connect is not Internal with the socket in its text: {typed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn denied_says_the_operating_system_denied_access() {
+        let _guard = ::habilis_network_test_tracing::init();
+        let text = IpcError::Denied(Denied {
+            socket: SOCKET.to_owned(),
+            os_error: Some(1),
+        })
+        .to_string();
+        assert!(
+            text.contains("denied access to the daemon socket")
+                && text.contains(SOCKET)
+                && text.contains("os error 1"),
+            "the Denied text does not name the denial, the socket and the OS error: {text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_denied_connect_keeps_the_os_error_number() {
+        let _guard = ::habilis_network_test_tracing::init();
+        for code in [Errno::PERM, Errno::ACCESS] {
+            let error = io::Error::from_raw_os_error(code.raw_os_error());
+            let typed = client::connect_error(&error, SOCKET, None);
+            assert!(
+                matches!(&typed, IpcError::Denied(Denied { os_error, .. }) if *os_error == Some(code.raw_os_error())),
+                "a denied connect with {code:?} does not keep its OS error number: {typed:?}"
+            );
+        }
+    }
+
+    /// A folder of this test's own under the short `/tmp` base. `env::temp_dir()` can be a
+    /// long path, and a socket path over the `sun_path` limit (about 100 bytes) fails to connect.
+    #[cfg(unix)]
+    fn short_folder(name: &str) -> path::PathBuf {
+        util::runtime_base("habilis-network-ipc-test").join(format!("{name}-{}", process::id()))
+    }
+
+    // A real connect: a socket path in a folder of mode 000 is denied with EACCES.
+    #[cfg(unix)]
+    #[test]
+    fn a_connect_in_a_folder_of_mode_000_is_denied_with_eacces() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            use std::os::unix::fs::PermissionsExt as _;
+            let folder = short_folder("denied");
+            fs::create_dir_all(&folder).expect("the test folder is made");
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o000))
+                .expect("the test folder is closed");
+            let blocked = fs::read_dir(&folder).is_err();
+            let socket = folder.join("nick.ipc.sock");
+            let result =
+                client::send_to_path(&socket, &serde_json::json!({"command": "ping"})).await;
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o700))
+                .expect("the test folder is opened");
+            fs::remove_dir(&folder).expect("the test folder is removed");
+            if !blocked {
+                eprintln!(
+                    "skipped: this user reads a folder of mode 000 (root), so nothing is denied"
+                );
+                return;
+            }
+            let error = result.expect_err("a connect in a closed folder fails");
+            assert!(
+                matches!(&error, IpcError::Denied(Denied { os_error, .. }) if *os_error == Some(Errno::ACCESS.raw_os_error())),
+                "a connect in a folder of mode 000 is not Denied with EACCES: {error:?}"
+            );
+        });
+    }
+
+    /// A command that only carries a mesh, for `send`.
+    #[cfg(unix)]
+    #[derive(serde::Serialize)]
+    struct Ping {
+        mesh: MeshId,
+    }
+
+    #[cfg(unix)]
+    impl Addressed for Ping {
+        fn mesh_id(&self) -> Option<&MeshId> {
+            Some(&self.mesh)
+        }
+    }
+
+    // A real send: a regular file at the socket path means no daemon listens, on every platform.
+    // The errno differs: ENOTSOCK on macOS and the BSDs, ECONNREFUSED on Linux.
+    #[cfg(unix)]
+    #[test]
+    fn a_regular_file_at_the_socket_path_is_no_daemon() {
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let base = short_folder("notsock");
+            let pid_b58 = bs58::encode(process::id().to_le_bytes()).into_string();
+            let mesh = MeshId::from(format!("ipcfile{pid_b58}").as_str());
+            let nickname = Nickname::from("nick");
+            let socket = listener::socket_path(&base, &mesh, &nickname);
+            let folder = path::Path::new(&socket)
+                .parent()
+                .expect("the socket path has a folder");
+            fs::create_dir_all(folder).expect("the test folder is made");
+            fs::write(&socket, b"").expect("the test file is written");
+            #[cfg(target_os = "macos")]
+            let probe = UnixStream::connect(&socket);
+            let result = client::send(&base, &Ping { mesh }, &nickname).await;
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                probe
+                    .expect_err("a connect to a regular file fails")
+                    .raw_os_error(),
+                Some(Errno::NOTSOCK.raw_os_error()),
+                "a connect to a regular file does not give ENOTSOCK on macOS"
+            );
+            fs::remove_dir_all(&base).expect("the test folder is removed");
+            let error = result.expect_err("a send to a regular file fails");
+            assert!(
+                matches!(&error, IpcError::NoDaemon(NoDaemon { nickname: named }) if *named == nickname),
+                "a regular file at the socket path is not NoDaemon: {error:?}"
+            );
+        });
+    }
+
     #[test]
     fn an_internal_cause_keeps_its_chain() {
         let _guard = ::habilis_network_test_tracing::init();
