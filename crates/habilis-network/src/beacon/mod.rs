@@ -54,10 +54,12 @@ mod rival_probe;
 mod rung_ladder;
 mod rung_probe;
 mod rung_watch;
-pub(crate) use beacon_who::{BEACON_WHO_ALPN, BeaconWho, WhoAnswer, ask_who};
+pub(crate) use beacon_who::{BEACON_WHO_ALPN, BeaconWho, Cause, WhoAnswer, ask_who};
 pub(crate) use contest::{Contest, claim_after_probe, releasable};
 pub(crate) use held::{Held, Walk, read_busy_rungs, read_ladder, walk_ladder};
-pub(crate) use holder_contest::{ContestAction, HolderContest};
+pub(crate) use holder_contest::{
+    ContestAction, HolderContest, Miss, log_claim_missed, log_claim_on_free, log_holder_probe,
+};
 pub(crate) use lookups::beacon_lookups;
 pub(crate) use rendezvous::{Rendezvous, RendezvousLane};
 pub(crate) use rendezvous_params::RendezvousParams;

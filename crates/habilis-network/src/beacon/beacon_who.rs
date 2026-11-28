@@ -2,6 +2,7 @@
 //! connects cannot tell them apart. The answer can: it names the member that serves the beacon
 //! that was reached.
 
+use std::fmt;
 use std::time::Duration;
 
 use iroh::endpoint::Connection;
@@ -49,6 +50,68 @@ impl ProtocolHandler for BeaconWho {
     }
 }
 
+/// Why an ask read nothing, or no id. The causes are a closed list: each has one word with no space,
+/// which the log line of the holder probe carries and a parser reads. A new cause is a new word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cause {
+    /// The dial failed, or the beacon refused the ALPN.
+    DialOrAlpnRefused,
+    /// No connection came up in the budget.
+    NoConnection,
+    /// A connection came up and no frame followed in the budget.
+    NoFrame,
+    /// The frame is not 32 bytes.
+    FrameNot32Bytes,
+    /// The frame holds 32 bytes that are not an endpoint id.
+    FrameNotAnId,
+    /// The beacon opened no stream.
+    NoStream,
+    /// The frame was not read to its end.
+    FrameNotRead,
+    /// The prober endpoint did not bind.
+    ProberNotBound,
+    /// The task of the probe ended with no answer.
+    ProbeTaskEnded,
+    /// A departure cancelled the probe.
+    Cancelled,
+    /// The ladder has no busy rung to ask.
+    NoBusyRung,
+    /// A rung answered as the id.
+    RungAnsweredAsId,
+    /// No rung answered as the id.
+    NoRungAnswered,
+    /// There is no address to dial and no lookup to resolve the id.
+    NothingToDial,
+}
+
+impl Cause {
+    /// The word of the cause in the log line of the holder probe.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Self::DialOrAlpnRefused => "dial_or_alpn_refused",
+            Self::NoConnection => "no_connection",
+            Self::NoFrame => "no_frame",
+            Self::FrameNot32Bytes => "frame_not_32_bytes",
+            Self::FrameNotAnId => "frame_not_an_id",
+            Self::NoStream => "no_stream",
+            Self::FrameNotRead => "frame_not_read",
+            Self::ProberNotBound => "prober_not_bound",
+            Self::ProbeTaskEnded => "probe_task_ended",
+            Self::Cancelled => "cancelled",
+            Self::NoBusyRung => "no_busy_rung",
+            Self::RungAnsweredAsId => "rung_answered_as_id",
+            Self::NoRungAnswered => "no_rung_answered",
+            Self::NothingToDial => "nothing_to_dial",
+        }
+    }
+}
+
+impl fmt::Display for Cause {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.word())
+    }
+}
+
 /// What a dial to the rendezvous id found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WhoAnswer {
@@ -58,10 +121,10 @@ pub(crate) enum WhoAnswer {
     Rival(EndpointId),
     /// A connection came up and no valid frame followed: someone is there, and it did not say who
     /// (a slow beacon, a frame that is not an id). The cause says why.
-    Reached(&'static str),
+    Reached(Cause),
     /// Nothing was reached: no answer in time, or a refusal of the dial or of the ALPN. The cause
     /// says why.
-    Unknown(&'static str),
+    Unknown(Cause),
 }
 
 impl WhoAnswer {
@@ -76,11 +139,11 @@ impl WhoAnswer {
         }
     }
 
-    /// The cause of a `Reached` or `Unknown`, and the empty text for the others.
-    pub(crate) fn cause(self) -> &'static str {
+    /// The cause of a `Reached` or `Unknown`, and nothing for the others.
+    pub(crate) fn cause(self) -> Option<Cause> {
         match self {
-            Self::Reached(cause) | Self::Unknown(cause) => cause,
-            Self::Ours | Self::Rival(_) => "",
+            Self::Reached(cause) | Self::Unknown(cause) => Some(cause),
+            Self::Ours | Self::Rival(_) => None,
         }
     }
 }
@@ -98,8 +161,8 @@ pub(crate) async fn ask_who(
     let dialed = time::timeout(timeout, prober.connect(target, BEACON_WHO_ALPN)).await;
     let connection = match dialed {
         Ok(Ok(connection)) => connection,
-        Ok(Err(_)) => return nobody("the dial failed or the ALPN was refused"),
-        Err(_) => return nobody("no connection in the budget"),
+        Ok(Err(_)) => return nobody(Cause::DialOrAlpnRefused),
+        Err(_) => return nobody(Cause::NoConnection),
     };
     let left = timeout.saturating_sub(started.elapsed());
     let frame = time::timeout(left, read_frame(&connection)).await;
@@ -108,35 +171,32 @@ pub(crate) async fn ask_who(
     let frame = match frame {
         Ok(Ok(frame)) => frame,
         Ok(Err(cause)) => return somebody(cause),
-        Err(_) => return somebody("no frame in the budget"),
+        Err(_) => return somebody(Cause::NoFrame),
     };
     let Ok(bytes) = <[u8; 32]>::try_from(frame) else {
-        return somebody("the frame is not 32 bytes");
+        return somebody(Cause::FrameNot32Bytes);
     };
     match EndpointId::from_bytes(&bytes) {
         Ok(holder) if holder == own => WhoAnswer::Ours,
         Ok(holder) => WhoAnswer::Rival(holder),
-        Err(_) => somebody("the frame is not an endpoint id"),
+        Err(_) => somebody(Cause::FrameNotAnId),
     }
 }
 
 /// The frame that the beacon on `connection` sends, or why there is none.
-async fn read_frame(connection: &Connection) -> Result<Vec<u8>, &'static str> {
-    let mut recv = connection
-        .accept_uni()
-        .await
-        .map_err(|_| "the beacon opened no stream")?;
+async fn read_frame(connection: &Connection) -> Result<Vec<u8>, Cause> {
+    let mut recv = connection.accept_uni().await.map_err(|_| Cause::NoStream)?;
     recv.read_to_end(MAX_FRAME_BYTES)
         .await
-        .map_err(|_| "the frame was not read")
+        .map_err(|_| Cause::FrameNotRead)
 }
 
-fn nobody(cause: &'static str) -> WhoAnswer {
-    tracing::debug!(target: "habilis_network::beacon", cause, "ask who: nobody reached");
+fn nobody(cause: Cause) -> WhoAnswer {
+    tracing::debug!(target: "habilis_network::beacon", %cause, "ask who: nobody reached");
     WhoAnswer::Unknown(cause)
 }
 
-fn somebody(cause: &'static str) -> WhoAnswer {
-    tracing::debug!(target: "habilis_network::beacon", cause, "ask who: reached, no valid frame");
+fn somebody(cause: Cause) -> WhoAnswer {
+    tracing::debug!(target: "habilis_network::beacon", %cause, "ask who: reached, no valid frame");
     WhoAnswer::Reached(cause)
 }

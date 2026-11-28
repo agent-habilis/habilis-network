@@ -347,6 +347,32 @@ Measured on a local relay, one run each: a lone holder over 1 hour used about 20
 A local relay has no loss and no fault, so the rate of `Unknown` on a real relay is not known from that data.
 A claim again binds a new endpoint with a new `WebRTC` handle, so a browser tab that negotiates with the old beacon loses the round.
 The tab offers again when its rendezvous link drops, and again on the next heal tick. A session that it still holds is detached on the second tick, so the loss is at most 2 heal intervals (30 s) and one round (read, not measured).
+A joiner that claims on an old free reading holds a newer claim than the members that claimed before it.
+The relay serves the newer claim, so only an older holder can read it, and it reads it at its next ask.
+Let P be the heal interval (15 s).
+An older holder asks at most P after the relay serves the claim, and the action of its answer applies at most `HEAL_PROBE` (5 s) later.
+The model in `beacon/holder_contest.rs` counts periods of P.
+The period model takes it that the relay serves a claim in the period of the claim.
+Under that condition, for 2 holders it ends the contest within 4 periods (60 s), on each relay rule that it tries.
+If the relay serves a claim 16 ticks or more after the bind, the 4 periods do not hold.
+A holder can act on the answer of the period before: a probe has a budget, and a claim takes time.
+Then all holders can yield, each on an answer that the yield of the other has made old.
+Nobody holds the rendezvous for 2 periods (30 s, `RECLAIM_PERIODS` in the model), and the first member that claims holds it, so it is not always the holder with the lowest id.
+The bound is then 7 periods (105 s) for 2 holders.
+These bounds are read from the model. No host has measured them.
+A scratch model with ticks of 1 s, which is not in the repository, read 30 ticks for 2 holders that claim together, and 33 ticks when the relay serves a claim 4 ticks late and the 2 claims are 3 ticks apart.
+When the relay serves a claim 14, 16 or 20 ticks late, the scratch model reads up to 52, 61 and 65 ticks for 2 holders, and up to 82, 91 and 94 ticks for 3, and an old answer adds up to 2 to 4 ticks for 2 holders and 4 to 6 ticks for 3.
+On a relay that serves the newest claim, the lowest id wins in each case, and no case has nobody holding the rendezvous.
+On a relay that alternates between the newest and the oldest claim (`Flip`, not measured), some of these cases do not end.
+The ask timer starts when the bind returns (`arm_holder_probe` in `daemon/cohost_arm.rs`), and the relay serves the claim a moment later.
+No log line marks that moment, so no host value of that delay exists.
+The 2 log lines `rendezvous read free twice: claiming` and `beacon assumed` of one node bound the local bind only.
+The log line of a holder probe has the fields `node`, `kind`, `cause`, `rival` and `action`, each one word, and `-` for a field that does not apply.
+The INFO line has a `kind` of `rival`, `reached` or `unknown`.
+An answer of `ours` writes the DEBUG line `holder probe: ours` and no other.
+The 14 words of `cause` are `dial_or_alpn_refused`, `no_connection`, `no_frame`, `frame_not_32_bytes`, `frame_not_an_id`, `no_stream`, `frame_not_read`, `prober_not_bound`, `probe_task_ended`, `cancelled`, `no_busy_rung`, `rung_answered_as_id`, `no_rung_answered` and `nothing_to_dial`.
+A claim writes `rendezvous read free twice: claiming` at its start. It ends with `beacon assumed`, or with `rendezvous claim ended with no beacon` and a `cause` of `slot_taken` or `no_bind`.
+A test pins each word and each line as written, because the soak counters and the analysers parse them.
 On a LAN, a member that sees a member of its mesh asks it to be a neighbor, at most 8 times a minute (`MAX_LAN_GRAFTS_PER_MINUTE` in `gossip/lan.rs`).
 The mDNS record does not change again, so no event comes for a request that was refused or lost.
 A member that was asked and is still not a neighbor is asked again from the heal tick: after `RETRY_FIRST` (60 s), then every `RETRY_STEADY` (300 s).

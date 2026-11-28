@@ -1480,24 +1480,30 @@ impl<Driver: NodeDriver> Loop<'_, Driver> {
             self.state
                 .rendezvous_flags
                 .remove(&RendezvousFlag::ProbeReadFree);
-            let claimed = beacon::claim_after_probe(
+            if found_rival {
+                tracing::debug!(target: "habilis_network::beacon", node = %self.parts.endpoint.id().fmt_short(), "public rendezvous already served by a beacon; staying peer");
+                note_rival_holds(&mut self.state, &self.parts.handler_ctx(&self.sender));
+                return;
+            }
+            beacon::log_claim_on_free(self.parts.endpoint.id());
+            let claim = beacon::claim_after_probe(
                 &self.rendezvous_params,
                 self.parts.endpoint,
                 &self.state.address_book,
                 &mut self.rendezvous,
-                found_rival,
                 &mut self.state.rungs,
             )
             .await;
-            if claimed {
-                // Two joiners that start together both read free twice and claim in the same
-                // instant; the first ask of who serves the rendezvous merges that split.
-                arm_holder_probe(&mut self.state, self.cohost, &self.rendezvous_params);
-                // The new rendezvous never dials us; the reclaim tick re-grafts it.
-                self.state.arm_reclaim(Instant::now());
-                offer_to_the_new_holder(&mut self.state, &self.parts.handler_ctx(&self.sender));
-            } else if found_rival {
-                note_rival_holds(&mut self.state, &self.parts.handler_ctx(&self.sender));
+            match claim {
+                Ok(()) => {
+                    // Two joiners that start together both read free twice and claim in the same
+                    // instant; the first ask of who serves the rendezvous merges that split.
+                    arm_holder_probe(&mut self.state, self.cohost, &self.rendezvous_params);
+                    // The new rendezvous never dials us; the reclaim tick re-grafts it.
+                    self.state.arm_reclaim(Instant::now());
+                    offer_to_the_new_holder(&mut self.state, &self.parts.handler_ctx(&self.sender));
+                }
+                Err(miss) => beacon::log_claim_missed(self.parts.endpoint.id(), miss),
             }
         }
     }

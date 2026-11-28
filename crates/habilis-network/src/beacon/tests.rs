@@ -7,8 +7,8 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 
 use super::{
-    Contest, ProbePurpose, Rendezvous, RendezvousParams, RivalProbe, WhoAnswer, claim, releasable,
-    rendezvous_addr, rival_probe, rung_ladder, spawn_rival_probe,
+    Cause, Contest, ProbePurpose, Rendezvous, RendezvousParams, RivalProbe, WhoAnswer, claim,
+    releasable, rendezvous_addr, rival_probe, rung_ladder, spawn_rival_probe,
 };
 use crate::util::clock::Instant;
 use iroh::SecretKey;
@@ -2795,11 +2795,11 @@ fn nothing_to_name_is_none_not_a_bare_id() {
 fn an_answered_probe_is_taken_at_its_word() {
     let _guard = ::habilis_network_test_tracing::init();
     assert!(
-        rival_probe::verdict_of(Ok(WhoAnswer::Reached("a rival answered"))),
+        rival_probe::verdict_of(Ok(WhoAnswer::Reached(Cause::RungAnsweredAsId))),
         "a rival answered"
     );
     assert!(
-        !rival_probe::verdict_of(Ok(WhoAnswer::Unknown("nobody answered"))),
+        !rival_probe::verdict_of(Ok(WhoAnswer::Unknown(Cause::NoRungAnswered))),
         "nobody answered; the id is free"
     );
     // `RecvError` cannot be constructed here, so the unanswered case is
@@ -2812,7 +2812,7 @@ fn a_verdict_is_delivered_once_and_frees_the_slot() {
         let (tx, rx) = oneshot::channel();
         let (probe, endpoint) = probe_for(rx).await;
         let mut slot = Some(probe);
-        tx.send(WhoAnswer::Unknown("nobody answered"))
+        tx.send(WhoAnswer::Unknown(Cause::NoRungAnswered))
             .expect("verdict accepted");
 
         assert!(

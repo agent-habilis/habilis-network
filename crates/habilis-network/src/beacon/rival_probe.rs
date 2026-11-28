@@ -10,7 +10,9 @@ use crate::lookup::{ProbeAnswer, TransportHandles, build_endpoint, probe_answer}
 use crate::protocol::meshes::LookupOpts;
 use crate::util::tuning::{HEAL_PROBE, RENDEZVOUS_CLOSE, heal_interval};
 
-use super::{RendezvousParams, WhoAnswer, ask_who, beacon_lookups, rendezvous_addr, rung_is_busy};
+use super::{
+    Cause, RendezvousParams, WhoAnswer, ask_who, beacon_lookups, rendezvous_addr, rung_is_busy,
+};
 
 use n0_future::{task, time};
 use std::future;
@@ -147,7 +149,7 @@ pub(crate) fn verdict_of(result: Result<WhoAnswer, oneshot::error::RecvError>) -
 
 /// The answer of a probe whose task may have ended without one: someone may be there, so `Reached`.
 fn answer_of(result: Result<WhoAnswer, oneshot::error::RecvError>) -> WhoAnswer {
-    result.unwrap_or(WhoAnswer::Reached("the probe task ended"))
+    result.unwrap_or(WhoAnswer::Reached(Cause::ProbeTaskEnded))
 }
 
 /// Start the probe-before-claim on its own task.
@@ -198,9 +200,7 @@ pub(crate) async fn spawn_rival_probe(
                 "rival probe has nothing to dial and no lookup to resolve the id; reading the rendezvous as held");
             let (tx, rx) = oneshot::channel();
             // The receiver is held below; this send cannot fail.
-            let _ = tx.send(WhoAnswer::Reached(
-                "nothing to dial and no lookup to resolve the id",
-            ));
+            let _ = tx.send(WhoAnswer::Reached(Cause::NothingToDial));
             return Some(RivalProbe {
                 rx,
                 task: task::spawn(async {}),
@@ -270,7 +270,7 @@ async fn spawn_ask(
             // hears `Unknown`, and 3 of them in a row make it claim again.
             return (purpose == ProbePurpose::OfHolder).then(|| {
                 resolved(
-                    WhoAnswer::Unknown("the prober did not bind"),
+                    WhoAnswer::Unknown(Cause::ProberNotBound),
                     ProbePurpose::OfHolder,
                 )
             });
@@ -296,7 +296,7 @@ async fn spawn_ask(
                 answer = ask_who(&prober, target, node, budget) => answer,
                 // A departure: no one will read the verdict, but the endpoint
                 // must still close below.
-                _ = cancelled => WhoAnswer::Reached("cancelled"),
+                _ = cancelled => WhoAnswer::Reached(Cause::Cancelled),
             };
             prober.close().await;
             // A closed receiver means the loop moved on (departure, or the
@@ -330,7 +330,7 @@ async fn spawn_ladder_probe(params: &RendezvousParams, node: EndpointId) -> Opti
         .collect();
     let (tx, rx) = oneshot::channel();
     if rungs.is_empty() {
-        let _ = tx.send(WhoAnswer::Unknown("no busy rung to ask"));
+        let _ = tx.send(WhoAnswer::Unknown(Cause::NoBusyRung));
         return Some(RivalProbe {
             rx,
             task: task::spawn(async {}),
@@ -391,9 +391,9 @@ async fn spawn_ladder_probe(params: &RendezvousParams, node: EndpointId) -> Opti
                 }
             };
             let answer = if found_rival {
-                WhoAnswer::Reached("a rung answered as the id")
+                WhoAnswer::Reached(Cause::RungAnsweredAsId)
             } else {
-                WhoAnswer::Unknown("no rung answered as the id")
+                WhoAnswer::Unknown(Cause::NoRungAnswered)
             };
             let _ = tx.send(answer);
         }

@@ -555,27 +555,7 @@ pub(super) async fn apply_holder_answer(
     }
     let node = context.endpoint.id();
     let action = state.holder_contest.on_answer(node, answer);
-    if answer == beacon::WhoAnswer::Ours {
-        tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "holder probe: ours");
-    } else {
-        // The fields are a contract with the parsers of the soak and the analysers (a test pins the
-        // words). `cause` is empty unless the answer is reached or unknown; `rival` is empty unless
-        // the answer names one.
-        let rival = if let beacon::WhoAnswer::Rival(id) = answer {
-            id.fmt_short().to_string()
-        } else {
-            String::new()
-        };
-        tracing::info!(
-            target: "habilis_network::beacon",
-            node = %node.fmt_short(),
-            kind = answer.kind(),
-            cause = answer.cause(),
-            rival = %rival,
-            action = action.word(),
-            "holder probe"
-        );
-    }
+    beacon::log_holder_probe(node, answer, action);
     match action {
         beacon::ContestAction::Stay => {}
         beacon::ContestAction::ClaimAgain => {
@@ -591,6 +571,8 @@ pub(super) async fn apply_holder_answer(
                 arm_holder_probe(state, arm.policy, arm.params);
                 state.arm_reclaim(Instant::now());
                 offer_to_the_new_holder(state, context);
+            } else if let Some(miss) = beacon::Miss::of(held) {
+                beacon::log_claim_missed(node, miss);
             }
         }
         beacon::ContestAction::YieldTo(rival) => {
@@ -1016,7 +998,7 @@ mod tests {
             params.bootstrap_relay = Some(relay);
             let mut holder = Member::new(&params).await;
             holder.claim(&params).await;
-            let unknown = beacon::WhoAnswer::Unknown("a test");
+            let unknown = beacon::WhoAnswer::Unknown(beacon::Cause::NoConnection);
             let before = holder.sockets();
 
             holder.apply(&params, unknown).await;
