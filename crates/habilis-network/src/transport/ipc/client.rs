@@ -111,6 +111,7 @@ pub async fn send_to_path<Cmd: Serialize>(
 
 /// Whether the connect found a file that is no socket. No daemon listens at
 /// that path, so the member has no daemon.
+/// Reachable on macOS and the BSDs only: Linux gives `ConnectionRefused` for the same file.
 #[cfg(all(unix, feature = "host"))]
 fn is_not_a_socket(error: &io::Error) -> bool {
     use rustix::io::Errno;

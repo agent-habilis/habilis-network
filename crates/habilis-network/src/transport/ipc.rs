@@ -371,10 +371,19 @@ mod chain_tests {
     use super::{Denied, IpcError, NoDaemon, client};
     use crate::protocol::Nickname;
 
+    #[cfg(unix)]
+    use super::{Addressed, listener};
+    #[cfg(unix)]
+    use crate::protocol::MeshId;
+    #[cfg(unix)]
+    use crate::util;
     use rustix::io::Errno;
+    use std::io;
     use std::io::ErrorKind;
+    #[cfg(target_os = "macos")]
     use std::os::unix::net::UnixStream;
-    use std::{env, fs, io, process};
+    #[cfg(unix)]
+    use std::{fs, path, process};
 
     const SOCKET: &str = "/tmp/habilis/mesh/nick.ipc.sock";
 
@@ -448,13 +457,20 @@ mod chain_tests {
         }
     }
 
+    /// A folder of this test's own under the short `/tmp` base. `env::temp_dir()` can be a
+    /// long path, and a socket path over the `sun_path` limit (about 100 bytes) fails to connect.
+    #[cfg(unix)]
+    fn short_folder(name: &str) -> path::PathBuf {
+        util::runtime_base("habilis-network-ipc-test").join(format!("{name}-{}", process::id()))
+    }
+
     // A real connect: a socket path in a folder of mode 000 is denied with EACCES.
     #[cfg(unix)]
     #[test]
     fn a_connect_in_a_folder_of_mode_000_is_denied_with_eacces() {
         ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
             use std::os::unix::fs::PermissionsExt as _;
-            let folder = env::temp_dir().join(format!("habilis-ipc-denied-{}", process::id()));
+            let folder = short_folder("denied");
             fs::create_dir_all(&folder).expect("the test folder is made");
             fs::set_permissions(&folder, fs::Permissions::from_mode(0o000))
                 .expect("the test folder is closed");
@@ -466,7 +482,10 @@ mod chain_tests {
                 .expect("the test folder is opened");
             fs::remove_dir(&folder).expect("the test folder is removed");
             if !blocked {
-                return; // root reads a folder of mode 000, so nothing is denied
+                eprintln!(
+                    "skipped: this user reads a folder of mode 000 (root), so nothing is denied"
+                );
+                return;
             }
             let error = result.expect_err("a connect in a closed folder fails");
             assert!(
@@ -476,25 +495,54 @@ mod chain_tests {
         });
     }
 
+    /// A command that only carries a mesh, for `send`.
+    #[cfg(unix)]
+    #[derive(serde::Serialize)]
+    struct Ping {
+        mesh: MeshId,
+    }
+
+    #[cfg(unix)]
+    impl Addressed for Ping {
+        fn mesh_id(&self) -> Option<&MeshId> {
+            Some(&self.mesh)
+        }
+    }
+
+    // A real send: a regular file at the socket path means no daemon listens, on every platform.
+    // The errno differs: ENOTSOCK on macOS and the BSDs, ECONNREFUSED on Linux.
     #[cfg(unix)]
     #[test]
     fn a_regular_file_at_the_socket_path_is_no_daemon() {
-        let _guard = ::habilis_network_test_tracing::init();
-        let file = env::temp_dir().join(format!("habilis-ipc-notsock-{}", process::id()));
-        fs::write(&file, b"").expect("the test file is written");
-        let real = UnixStream::connect(&file).expect_err("a connect to a regular file fails");
-        fs::remove_file(&file).expect("the test file is removed");
-        assert_eq!(
-            real.raw_os_error(),
-            Some(Errno::NOTSOCK.raw_os_error()),
-            "a connect to a regular file does not give ENOTSOCK on this platform"
-        );
-        let nickname = Nickname::from("nick");
-        let typed = client::connect_error(&real, SOCKET, Some(&nickname));
-        assert!(
-            matches!(&typed, IpcError::NoDaemon(_)),
-            "a regular file at the socket path is not NoDaemon: {typed:?}"
-        );
+        ::habilis_network_test_tracing::run(::habilis_network_test_tracing::init(), async {
+            let base = short_folder("notsock");
+            let pid_b58 = bs58::encode(process::id().to_le_bytes()).into_string();
+            let mesh = MeshId::from(format!("ipcfile{pid_b58}").as_str());
+            let nickname = Nickname::from("nick");
+            let socket = listener::socket_path(&base, &mesh, &nickname);
+            let folder = path::Path::new(&socket)
+                .parent()
+                .expect("the socket path has a folder");
+            fs::create_dir_all(folder).expect("the test folder is made");
+            fs::write(&socket, b"").expect("the test file is written");
+            #[cfg(target_os = "macos")]
+            let probe = UnixStream::connect(&socket);
+            let result = client::send(&base, &Ping { mesh }, &nickname).await;
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                probe
+                    .expect_err("a connect to a regular file fails")
+                    .raw_os_error(),
+                Some(Errno::NOTSOCK.raw_os_error()),
+                "a connect to a regular file does not give ENOTSOCK on macOS"
+            );
+            fs::remove_dir_all(&base).expect("the test folder is removed");
+            let error = result.expect_err("a send to a regular file fails");
+            assert!(
+                matches!(&error, IpcError::NoDaemon(NoDaemon { nickname: named }) if *named == nickname),
+                "a regular file at the socket path is not NoDaemon: {error:?}"
+            );
+        });
     }
 
     #[test]
