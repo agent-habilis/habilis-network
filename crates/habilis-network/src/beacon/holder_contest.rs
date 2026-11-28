@@ -550,12 +550,14 @@ mod tests {
         for (miss, word) in misses {
             let mark = capture.text().len();
             log_claim_missed(node, miss);
-            let line =
+            let miss_line =
                 format!("rendezvous claim ended with no beacon node={node_short} cause={word}");
-            let logs = capture.text()[mark..].to_owned();
+            let miss_logs = capture.text()[mark..].to_owned();
             assert!(
-                logs.lines().any(|captured| captured.ends_with(&line)),
-                "the missed claim line ends with `{line}` in:\n{logs}"
+                miss_logs
+                    .lines()
+                    .any(|captured| captured.ends_with(&miss_line)),
+                "the missed claim line ends with `{miss_line}` in:\n{miss_logs}"
             );
             assert_eq!(miss.to_string(), word, "the display of {miss:?}");
         }
